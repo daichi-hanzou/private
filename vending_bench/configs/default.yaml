@@ -1,0 +1,124 @@
+# Vending-Bench Default Configuration
+# Based on the paper: "Vending-Bench: A Benchmark for Long-Term Coherence of Autonomous Agents"
+
+# Environment settings
+environment:
+  initial_balance: 500.0      # Starting money balance ($500)
+  daily_fee: 2.0              # Daily operating cost ($2)
+
+  # Vending machine configuration
+  machine:
+    rows: 4                   # Number of rows
+    slots_per_row: 3          # Slots per row (total 12 slots)
+    small_rows: [0, 1]        # Row indices for small items
+    large_rows: [2, 3]        # Row indices for large items
+
+  # Simulation time settings
+  start_date: "2025-01-01"
+  start_hour: 8               # Day starts at 8:00 AM
+
+# Agent settings
+agent:
+  max_messages: 2000          # Maximum messages per run
+  context_tokens: 30000       # Token limit for context window
+  bankruptcy_threshold: 10    # Days of consecutive fee failure before termination
+
+# Tool time costs (in minutes)
+tool_time_costs:
+  read_emails: 5
+  read_email: 5
+  read_email_inbox: 5
+  send_email: 25
+  ai_web_search: 75
+  get_storage_inventory: 5
+  check_storage_quantities: 5
+  list_storage_products: 5
+  get_money_balance: 5
+  wait_for_next_day: 0        # Special: advances to next day
+
+  # Sub-agent tools
+  stock_products_from_storage_to_machine: 75
+  collect_cash_from_machine: 25
+  set_prices: 25
+  get_machine_inventory: 5
+
+  # Memory tools
+  write_scratchpad: 5
+  read_scratchpad: 5
+  set_kv_value: 5
+  get_kv_value: 5
+  delete_kv_value: 5
+  add_to_vector_db: 5
+  search_vector_db: 5
+
+  # Sub-agent interaction
+  sub_agent_specs: 5
+  run_sub_agent: 300          # 5 hours
+  chat_with_sub_agent: 25
+
+# Demand model settings
+demand:
+  seed: 42                    # Random seed for reproducibility
+
+  # Day of week multipliers (Monday=0, Sunday=6)
+  weekday_multipliers:
+    - 0.8   # Monday
+    - 0.85  # Tuesday
+    - 0.9   # Wednesday
+    - 0.95  # Thursday
+    - 1.1   # Friday
+    - 1.3   # Saturday
+    - 1.2   # Sunday
+
+  # Monthly multipliers (January=0, December=11)
+  month_multipliers:
+    - 0.7   # January
+    - 0.75  # February
+    - 0.85  # March
+    - 0.95  # April
+    - 1.0   # May
+    - 1.15  # June
+    - 1.2   # July
+    - 1.15  # August
+    - 1.0   # September
+    - 0.95  # October
+    - 0.85  # November
+    - 0.9   # December
+
+  # Weather impact (simplified for MVP)
+  weather_multipliers:
+    sunny: 1.1
+    cloudy: 1.0
+    rainy: 0.85
+
+  # Choice multiplier settings
+  optimal_variety: 6          # Optimal number of different products
+  variety_penalty_max: 0.5    # Maximum penalty (50% reduction)
+
+  # Noise settings
+  noise_std: 0.1              # Standard deviation for sales noise
+
+# Supplier settings
+supplier:
+  mode: "fixed"               # "fixed" for offline, "extended" for API-based
+  delivery_days_min: 2
+  delivery_days_max: 5
+  catalog_file: null          # Path to custom catalog JSON (optional)
+
+# LLM settings (for extended mode)
+llm:
+  provider: "mock"            # "openai", "anthropic", or "mock"
+  model: null                 # Model name (e.g., "gpt-4o", "claude-3-5-sonnet")
+  api_key_env: null           # Environment variable name for API key
+
+# Embedding settings (for vector DB)
+embedding:
+  provider: "tfidf"           # "tfidf" or "openai"
+  openai_model: "text-embedding-3-small"
+
+# Logging settings
+logging:
+  trace_file: "trace.jsonl"
+  metrics_file: "metrics.jsonl"
+  output_dir: "./output"
+  verbose: true
