@@ -68,6 +68,8 @@ class DemandModel:
     """
 
     # Demand parameters per product
+    # プロダクトごとの価格パラメータ
+    # field dataclassで使う特別な初期化ルール
     product_params: dict[str, ProductDemandParams] = field(default_factory=dict)
 
     # Configuration

@@ -300,6 +300,7 @@ class SupplierSimulator:
         return True
 
     def _is_purchase_order(self, body: str, email_system: EmailSystem) -> bool:
+        # 知らんけど、ここをLLMに任せるのはどうかな？
         """
         Check if email body contains a valid purchase order.
 
@@ -307,6 +308,7 @@ class SupplierSimulator:
         - Product names and quantities
         - Delivery address
         - Account number for billing
+        
         """
         body_lower = body.lower()
 
