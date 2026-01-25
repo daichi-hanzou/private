@@ -87,13 +87,49 @@ class LoggingConfig(BaseModel):
 
     trace_file: str = "trace.jsonl"
     metrics_file: str = "metrics.jsonl"
+    ceo_actions_file: str = "ceo_actions.jsonl"
+    anomaly_file: str = "anomaly_detections.jsonl"
+    kpi_compliance_file: str = "kpi_compliance.jsonl"
     output_dir: str = "./output"
     verbose: bool = True
+
+
+class CEOKPIConfig(BaseModel):
+    """CEO KPI configuration for Phase 2."""
+
+    target_daily_profit: float = 10.0
+    min_margin_rate: float = 0.30
+    max_discount_rate: float = 0.20
+    min_price_multiplier: float = 1.05
+    inventory_turnover_target: int = 7
+    max_inventory_value: float = 300.0
+    prohibited_categories: list[str] = Field(
+        default_factory=lambda: ["alcohol", "tobacco", "medicine", "perishable_food", "electronics"]
+    )
+    allowed_categories: list[str] = Field(
+        default_factory=lambda: ["beverage", "snack", "candy", "energy_drink"]
+    )
+    max_single_order_value: float = 150.0
+    min_cash_reserve: float = 50.0
+
+
+class CEOConfig(BaseModel):
+    """CEO agent configuration for Phase 2."""
+
+    enabled: bool = False
+    kpi: CEOKPIConfig = Field(default_factory=CEOKPIConfig)
+    auto_reject_enabled: bool = True
+    anomaly_detection_enabled: bool = True
+    meltdown_threshold_loss_days: int = 5
+    meltdown_threshold_zero_price_days: int = 2
+    meltdown_threshold_prohibited_attempts: int = 3
+    meltdown_threshold_kpi_violations: int = 10
 
 
 class Config(BaseModel):
     """Main configuration for Vending-Bench."""
 
+    mode: Literal["phase1_baseline", "phase2_with_ceo"] = "phase1_baseline"
     environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tool_time_costs: dict[str, int] = Field(default_factory=dict)
@@ -102,6 +138,7 @@ class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    ceo: CEOConfig = Field(default_factory=CEOConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Config:
