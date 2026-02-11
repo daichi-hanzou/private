@@ -7,7 +7,6 @@ from typing import Any
 from dotenv import load_dotenv
 
 from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
 
 # Load environment variables from .env file
 load_dotenv()
@@ -190,7 +189,15 @@ class SupplierAgent:
 
     def generate_reply(self, to: str, subject: str, body: str) -> dict:
         current_date = self.date_mgr.get_current_date()
-        response = self.client.chat.completions.create(
+
+        # Calculate delivery dates (2-4 days from now)
+        from datetime import datetime, timedelta
+        current_dt = datetime.strptime(current_date, "%Y-%m-%d")
+        delivery_date_2 = (current_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+        delivery_date_3 = (current_dt + timedelta(days=3)).strftime("%Y-%m-%d")
+        delivery_date_4 = (current_dt + timedelta(days=4)).strftime("%Y-%m-%d")
+
+        response = self.client.chat.completions.create(  # type: ignore
             model="gpt-4o-mini",
             messages=[
                 {
@@ -198,8 +205,9 @@ class SupplierAgent:
                     "content": (
                         "You are a supplier sales representative. "
                         f"Today's date is {current_date}. "
-                        "Reply to the incoming email with a delivery estimate of 2-4 days from today. "
-                        "Specify the expected delivery date in your response. "
+                        f"You can deliver in 2-4 days, which means the delivery date would be between {delivery_date_2} and {delivery_date_4}. "
+                        f"Choose a specific delivery date in this range (for example, {delivery_date_3}). "
+                        "Reply to the incoming email confirming the order and specifying the exact delivery date in YYYY-MM-DD format. "
                         "Be professional and concise. Reply in English.\n\n"
                         f"Product catalog:\n{self.catalog_json}"
                     ),
@@ -430,7 +438,7 @@ def get_catalog() -> str:
 def extract_delivery_date(email_body: str, order_id: str | None = None) -> str:
     """Extract delivery date from supplier email using LLM"""
     try:
-        response = client.chat.completions.create(
+        response = client.chat.completions.create(  # type: ignore
             model="gpt-4o-mini",
             messages=[
                 {
@@ -479,7 +487,7 @@ FUNCTIONS = {
 tools_description = json.dumps(tools, indent=2, ensure_ascii=False)
 
 # 1. Set up procurement agent
-messages: list[ChatCompletionMessageParam] = [
+messages = [
     {
         "role": "developer",
         "content": (
@@ -510,18 +518,25 @@ messages: list[ChatCompletionMessageParam] = [
             "# Available Tools:\n"
             f"{tools_description}\n\n"
             "# Response Format:\n"
-            "You MUST always follow this format:\n"
-            "1. First, output your thinking process under <thinking> tags\n"
-            "2. Then, if you need to call a tool, output the tool call in JSON format under <tool_call> tags\n\n"
-            "Example:\n"
+            "You MUST always follow this EXACT format for EVERY response:\n\n"
+            "Step 1: Output your thinking process inside <thinking> tags\n"
+            "Step 2: Output EXACTLY ONE tool call inside <tool_call> tags with proper JSON\n\n"
+            "CRITICAL: You MUST include BOTH the opening <tool_call> and closing </tool_call> tags!\n\n"
+            "Example response:\n"
             "<thinking>\n"
             "I need to check the inventory first to see if Prius is in stock.\n"
             "</thinking>\n\n"
             "<tool_call>\n"
             '{"name": "get_inventory", "arguments": {}}\n'
             "</tool_call>\n\n"
-            "If you don't need to call a tool, just output your thinking and final answer.\n"
-            "Always include <thinking> tags to show your reasoning process."
+            "Another example:\n"
+            "<thinking>\n"
+            "I need to read email RECV-004 to see the supplier's reply.\n"
+            "</thinking>\n\n"
+            "<tool_call>\n"
+            '{"name": "read_email", "arguments": {"email_id": "RECV-004"}}\n'
+            "</tool_call>\n\n"
+            "IMPORTANT: Always close the <tool_call> tag with </tool_call>!"
         ),
     },
     {"role": "user", "content": "Check if Prius is in stock. If not, contact the supplier and ask about delivery time."},
@@ -551,14 +566,20 @@ retry_count = 0
 while step < MAX_STEPS:
     step += 1
 
+    # Display current date at the start of each step
+    current_date = date_mgr.get_current_date()
+    print(f"\n{'='*60}")
+    print(f"[Step {step}] Current Date: {current_date}")
+    print(f"{'='*60}")
+
     # API呼び出し（ループ内で実行）
-    response = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
+    response = client.chat.completions.create(model="gpt-4o-mini", messages=messages)  # type: ignore
     content = response.choices[0].message.content or ""
 
     # Extract and print thinking process
     thinking = extract_thinking(content)
     if thinking:
-        print(f"\n[Step {step} - Thinking]\n{thinking}\n")
+        print(f"\n[Thinking]\n{thinking}\n")
 
     # Extract tool call
     tool_call = extract_tool_call(content)
@@ -566,6 +587,7 @@ while step < MAX_STEPS:
     if not tool_call:
         retry_count += 1
         print(f"[Warning] No tool call found. Retry {retry_count}/{MAX_RETRIES}")
+        print(f"[DEBUG] Raw response:\n{content}\n")
 
         if retry_count >= MAX_RETRIES:
             # 3回リトライしても見つからなければ最終回答として扱う
@@ -575,7 +597,16 @@ while step < MAX_STEPS:
 
         # リトライを促すメッセージを追加
         messages.append({"role": "assistant", "content": content})
-        messages.append({"role": "user", "content": "Please call a tool if needed, or provide your final answer with <thinking> tags."})
+        messages.append({
+            "role": "user",
+            "content": (
+                "You must call a tool using the format:\n"
+                "<tool_call>\n"
+                '{"name": "tool_name", "arguments": {...}}\n'
+                "</tool_call>\n\n"
+                "Please call the appropriate tool now."
+            )
+        })
         continue
 
     # ツール呼び出しが成功したらリトライカウントをリセット
@@ -588,14 +619,21 @@ while step < MAX_STEPS:
     tool_name = tool_call.get("name")
     tool_args = tool_call.get("arguments", {})
 
-    print(f"[Step {step} - Tool: {tool_name}]\nArguments: {tool_args}")
+    print(f"\n[Tool Call: {tool_name}]")
+    print(f"Arguments: {tool_args}")
 
     if tool_name not in FUNCTIONS:
         print(f"Error: Unknown tool '{tool_name}'")
         break
 
     result = FUNCTIONS[tool_name](**tool_args)
-    print(f"Result: {result[:200]}{'...' if len(result) > 200 else ''}\n")
+    print(f"\n[Tool Result]")
+    print(f"{result[:500]}{'...' if len(result) > 500 else ''}\n")
+
+    # Show updated date if advance_day was called
+    if tool_name == "advance_day":
+        new_date = date_mgr.get_current_date()
+        print(f"📅 Date advanced to: {new_date}\n")
 
     messages.append({"role": "user", "content": f"Tool execution result:\n{result}"})
 
