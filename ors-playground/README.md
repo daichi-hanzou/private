@@ -7,6 +7,8 @@ This repo now includes a minimal CoffeeBench-style ORS environment with trader i
 - `run_mini_coffee_sim.py`
 - `mini_coffee_agent_runner.py`
 - `compare_mini_coffee_strategies.py`
+- `mini_coffee_event_logger.py`
+- `render_mini_coffee_charts.py`
 
 It keeps a small but useful supply-chain loop:
 
@@ -47,8 +49,46 @@ To let an LLM play the environment:
 uv run python mini_coffee_agent_runner.py
 ```
 
+Provider selection:
+
+- Anthropic default:
+
+```bash
+ANTHROPIC_API_KEY=... \
+ANTHROPIC_MODEL=claude-opus-4-8 \
+uv run python mini_coffee_agent_runner.py
+```
+
+- Azure OpenAI:
+
+```bash
+MINI_COFFEE_LLM_PROVIDER=azure_openai \
+AZURE_OPENAI_ENDPOINT=... \
+AZURE_OPENAI_DEPLOYMENT=... \
+AZURE_OPENAI_API_KEY=... \
+AZURE_OPENAI_API_VERSION=2024-10-21 \
+uv run python mini_coffee_agent_runner.py
+```
+
+If you use a bearer token instead of an API key, set `AZURE_OPENAI_TOKEN` instead of `AZURE_OPENAI_API_KEY`.
+
 To compare simple baseline strategies:
 
 ```bash
 uv run python compare_mini_coffee_strategies.py
 ```
+
+To generate a CoffeeBench-style replay log and static charts:
+
+```bash
+MINI_COFFEE_ORS_URL=http://localhost:8086 uv run python run_mini_coffee_sim.py
+uv run python render_mini_coffee_charts.py
+```
+
+The simulation now writes one JSONL log per run under:
+
+```bash
+ors-playground/workspace/output/mini_coffee_runs/
+```
+
+`render_mini_coffee_charts.py` reads the latest JSONL by default and emits a static HTML dashboard next to it.

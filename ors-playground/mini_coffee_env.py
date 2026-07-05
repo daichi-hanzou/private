@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 from itertools import count
+from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from ors import Environment, Server, Split, TextBlock, ToolOutput, tool
+
+from mini_coffee_event_logger import EventLogger
 
 
 INITIAL_CASH = 1_000.0
@@ -141,6 +145,7 @@ class MiniCoffeeEnv(Environment):
 
     def get_prompt(self):
         self.day_index = 0
+        self.run_id = uuid4().hex[:8]
         self.cash = INITIAL_CASH
         self.inventory = {item_id: 0 for item_id in ITEMS}
         self.prices = {
@@ -175,6 +180,7 @@ class MiniCoffeeEnv(Environment):
             "committed_sales": 0,
         }
         self._seed_trader_contracts()
+        self._init_event_logger()
 
         lines = [
             "You run a small coffee roaster-retailer for 7 days.",
@@ -199,7 +205,19 @@ class MiniCoffeeEnv(Environment):
             "  advance_day            - harvest, fulfill contracts, sell retail demand, and charge carrying costs",
             "  finish_episode         - end the run and compute reward",
         ]
+        self.event_logger.emit(
+            "run_start",
+            run_id=self.run_id,
+            snapshot=self._snapshot(),
+        )
         return [TextBlock(text="\n".join(lines))]
+
+    def _init_event_logger(self) -> None:
+        base_dir = Path(__file__).resolve().parent / "workspace" / "output" / "mini_coffee_runs"
+        log_dir = Path(os.getenv("MINI_COFFEE_LOG_DIR", str(base_dir)))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_path = log_dir / f"mini_coffee_{self.run_id}.jsonl"
+        self.event_logger = EventLogger(str(self.log_path))
 
     def _seed_trader_contracts(self) -> None:
         plans = [
@@ -293,6 +311,56 @@ class MiniCoffeeEnv(Environment):
 
     def _portfolio_value(self) -> float:
         return self.cash + self._inventory_value_at_salvage()
+
+    def _trader_value_analysis(self) -> dict[str, float]:
+        roaster_contracts = [
+            c for c in self.ledger_contracts if c["buyer_kind"] == "roaster"
+        ]
+        roaster_deliveries = [
+            d for d in self.ledger_deliveries if d["buyer_kind"] == "roaster"
+        ]
+        direct_ordered_qty = sum(c["quantity_kg"] for c in roaster_contracts)
+        direct_delivered_qty = sum(d["delivered_qty"] for d in roaster_deliveries)
+        direct_shortfall_qty = max(0, direct_ordered_qty - direct_delivered_qty)
+        direct_late_qty = sum(d["delivered_qty"] for d in roaster_deliveries if not d["on_time"])
+        direct_refund_value = sum(d["refund"] for d in roaster_deliveries)
+
+        trader_guaranteed_qty = float(self.trader["committed_sales"])
+        trader_purchase_share = (
+            trader_guaranteed_qty / max(1.0, trader_guaranteed_qty + direct_delivered_qty)
+        )
+        direct_fill_rate = direct_delivered_qty / max(1, direct_ordered_qty)
+        risk_transfer_proxy_qty = min(trader_guaranteed_qty, float(direct_shortfall_qty))
+        avoided_stockout_proxy_qty = max(0.0, trader_guaranteed_qty - direct_shortfall_qty)
+
+        return {
+            "direct_ordered_qty": float(direct_ordered_qty),
+            "direct_delivered_qty": float(direct_delivered_qty),
+            "direct_shortfall_qty": float(direct_shortfall_qty),
+            "direct_late_qty": float(direct_late_qty),
+            "direct_fill_rate": float(direct_fill_rate),
+            "direct_refund_value": float(direct_refund_value),
+            "trader_guaranteed_qty": float(trader_guaranteed_qty),
+            "trader_purchase_share": float(trader_purchase_share),
+            "risk_transfer_proxy_qty": float(risk_transfer_proxy_qty),
+            "avoided_stockout_proxy_qty": float(avoided_stockout_proxy_qty),
+        }
+
+    def _snapshot(self) -> dict:
+        return {
+            "day": self._current_day_number(),
+            "cash": round(self.cash, 2),
+            "estimated_terminal_value": round(self._portfolio_value(), 2),
+            "inventory": dict(self.inventory),
+            "prices": dict(self.prices),
+            "trader_inventory": dict(self.trader["inventory"]),
+            "metrics": {k: round(v, 2) for k, v in self.metrics.items()},
+            "open_direct_contracts": sum(
+                1
+                for c in self.ledger_contracts
+                if c["buyer_kind"] == "roaster" and not c["closed"]
+            ),
+        }
 
     def _sales_for_item(self, item_id: str) -> tuple[int, float]:
         item = ITEMS[item_id]
@@ -531,6 +599,14 @@ class MiniCoffeeEnv(Environment):
         self.metrics["investigation_spend"] += INVESTIGATION_COST
         self.investigated_farmers.add(farmer_id)
         metrics = self._farmer_metrics(farmer_id)
+        self.event_logger.emit(
+            "tool_event",
+            tool="investigate_farmer",
+            farmer_id=farmer_id,
+            cost=INVESTIGATION_COST,
+            revealed_metrics=metrics,
+            snapshot=self._snapshot(),
+        )
         return ToolOutput(
             blocks=[
                 TextBlock(
@@ -571,6 +647,17 @@ class MiniCoffeeEnv(Environment):
             delivery_day=self._current_day_number(),
         )
         self.ledger_contracts.append(contract)
+        self.event_logger.emit(
+            "tool_event",
+            tool="buy_spot_direct",
+            farmer_id=params.farmer_id,
+            item_id=params.item_id,
+            quantity_kg=params.quantity_kg,
+            unit_price=unit_price,
+            total_cost=round(total_cost, 2),
+            contract_id=contract["contract_id"],
+            snapshot=self._snapshot(),
+        )
         return ToolOutput(
             blocks=[TextBlock(text=f"Created spot contract {contract['contract_id']} with {params.farmer_id} for {params.quantity_kg} kg of {params.item_id} at ${unit_price:.2f}/kg.")],
             reward=0.0,
@@ -601,6 +688,18 @@ class MiniCoffeeEnv(Environment):
             delivery_day=params.delivery_day,
         )
         self.ledger_contracts.append(contract)
+        self.event_logger.emit(
+            "tool_event",
+            tool="create_forward_contract",
+            farmer_id=params.farmer_id,
+            item_id=params.item_id,
+            quantity_kg=params.quantity_kg,
+            delivery_day=params.delivery_day,
+            unit_price=unit_price,
+            total_cost=round(total_cost, 2),
+            contract_id=contract["contract_id"],
+            snapshot=self._snapshot(),
+        )
         return ToolOutput(
             blocks=[TextBlock(text=f"Created forward contract {contract['contract_id']} with {params.farmer_id} for day {params.delivery_day}: {params.quantity_kg} kg of {params.item_id} at ${unit_price:.2f}/kg.")],
             reward=0.0,
@@ -628,6 +727,15 @@ class MiniCoffeeEnv(Environment):
         self.trader["inventory"][params.item_id] -= params.quantity_kg
         self.inventory[params.item_id] += params.quantity_kg
         self.trader["committed_sales"] += params.quantity_kg
+        self.event_logger.emit(
+            "tool_event",
+            tool="buy_from_trader",
+            item_id=params.item_id,
+            quantity_kg=params.quantity_kg,
+            unit_price=unit_price,
+            total_cost=round(total_cost, 2),
+            snapshot=self._snapshot(),
+        )
         return ToolOutput(
             blocks=[TextBlock(text=f"Bought {params.quantity_kg} kg of {params.item_id} from trader at ${unit_price:.2f}/kg. Inventory transferred immediately.")],
             reward=0.0,
@@ -640,6 +748,13 @@ class MiniCoffeeEnv(Environment):
         if params.item_id not in ITEMS:
             return ToolOutput(blocks=[TextBlock(text=f"Unknown item_id: {params.item_id}")], reward=0.0, finished=False)
         self.prices[params.item_id] = round(params.price_per_kg, 2)
+        self.event_logger.emit(
+            "tool_event",
+            tool="set_price",
+            item_id=params.item_id,
+            price_per_kg=self.prices[params.item_id],
+            snapshot=self._snapshot(),
+        )
         return ToolOutput(blocks=[TextBlock(text=f"Set retail price for {params.item_id} to ${self.prices[params.item_id]:.2f}/kg.")], reward=0.0, finished=False)
 
     @tool
@@ -669,8 +784,19 @@ class MiniCoffeeEnv(Environment):
                 "revenue": total_revenue,
                 "holding_cost": holding_cost,
                 "profit": profit,
+                "sold_units": sold_units,
                 "events": events,
             }
+        )
+        self.event_logger.emit(
+            "day_end",
+            day=self._current_day_number(),
+            revenue=round(total_revenue, 2),
+            holding_cost=round(holding_cost, 2),
+            profit=round(profit, 2),
+            sold_units=sold_units,
+            events=events,
+            snapshot=self._snapshot(),
         )
 
         lines = [
@@ -714,6 +840,7 @@ class MiniCoffeeEnv(Environment):
         final_value = self.cash + salvage_value
         profit = final_value - INITIAL_CASH
         reward = max(0.0, min(1.0, 0.5 + (profit / INITIAL_CASH)))
+        trader_value = self._trader_value_analysis()
         lines = [
             "Episode finished.",
             f"Cash: ${self.cash:.2f}",
@@ -726,7 +853,31 @@ class MiniCoffeeEnv(Environment):
             f"Trader spend: ${self.metrics['trader_spend']:.2f}",
             f"Open direct contracts remaining: {len(open_direct)}",
             f"Reward: {reward:.4f}",
+            "",
+            "Trader value analysis:",
+            f"Direct fill rate: {trader_value['direct_fill_rate']:.2%}",
+            f"Direct shortfall qty: {trader_value['direct_shortfall_qty']:.0f} kg",
+            f"Direct late qty: {trader_value['direct_late_qty']:.0f} kg",
+            f"Direct refund value: ${trader_value['direct_refund_value']:.2f}",
+            f"Trader guaranteed qty: {trader_value['trader_guaranteed_qty']:.0f} kg",
+            f"Trader purchase share: {trader_value['trader_purchase_share']:.2%}",
+            f"Risk transferred to trader (proxy): {trader_value['risk_transfer_proxy_qty']:.0f} kg",
+            f"Potential stockout buffer from trader (proxy): {trader_value['avoided_stockout_proxy_qty']:.0f} kg",
+            f"Log path: {self.log_path}",
         ]
+        self.event_logger.emit(
+            "run_end",
+            run_id=self.run_id,
+            salvage_value=round(salvage_value, 2),
+            recovery_from_open_direct_contracts=round(open_contract_recovery, 2),
+            final_value=round(final_value, 2),
+            profit=round(profit, 2),
+            reward=round(reward, 4),
+            trader_value_analysis={k: round(v, 4) for k, v in trader_value.items()},
+            snapshot=self._snapshot(),
+            log_path=str(self.log_path),
+        )
+        self.event_logger.close()
         return ToolOutput(blocks=[TextBlock(text="\n".join(lines))], reward=reward, finished=True)
 
 
