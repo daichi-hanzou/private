@@ -3,23 +3,52 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+from pathlib import Path
 
 from dotenv import load_dotenv
 from ors.client import ORS
 
+from mini_coffee_event_logger import EventLogger
+from mini_coffee_env import FARMER_PROFILES
 
-load_dotenv()
+
+load_dotenv(Path(__file__).with_name(".env"))
 
 ORS_BASE_URL = os.getenv("MINI_COFFEE_ORS_URL", "http://localhost:8082")
 LLM_PROVIDER = os.getenv("MINI_COFFEE_LLM_PROVIDER", "anthropic").lower()
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "7"))
+FARMER_IDS = list(FARMER_PROFILES)
 MAX_TURNS = 60
 STRATEGY_HINT = (
     "Balance cheap but risky direct procurement against immediate trader inventory. "
     "Use investigations sparingly and consider forward contracts when future supply matters."
 )
+
+
+def _new_agent_logger(provider: str, deployment: str = "") -> EventLogger:
+    log_dir = Path(
+        os.getenv(
+            "MINI_COFFEE_AGENT_LOG_DIR",
+            str(Path(__file__).resolve().parent / "workspace" / "output" / "mini_coffee_agent_logs"),
+        )
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    suffix = deployment or provider
+    return EventLogger(str(log_dir / f"agent_{stamp}_{suffix}.jsonl"))
+
+
+def _anthropic_block_to_dict(block) -> dict:
+    if block.type == "text":
+        return {"type": "text", "text": block.text}
+    if block.type == "tool_use":
+        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    return {"type": block.type, "repr": repr(block)}
+
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -32,7 +61,7 @@ TOOL_SCHEMAS: list[dict] = [
         "description": "Pay to reveal ledger-derived fulfillment and liquidity metrics for one farmer.",
         "input_schema": {
             "type": "object",
-            "properties": {"farmer_id": {"type": "string", "enum": ["sierra_verde", "cloud_peak", "riverbend"]}},
+            "properties": {"farmer_id": {"type": "string", "enum": FARMER_IDS}},
             "required": ["farmer_id"],
         },
     },
@@ -42,7 +71,7 @@ TOOL_SCHEMAS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "farmer_id": {"type": "string", "enum": ["sierra_verde", "cloud_peak", "riverbend"]},
+                "farmer_id": {"type": "string", "enum": FARMER_IDS},
                 "item_id": {"type": "string", "enum": ["standard", "premium"]},
                 "quantity_kg": {"type": "integer", "minimum": 1, "maximum": 100},
             },
@@ -55,10 +84,10 @@ TOOL_SCHEMAS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "farmer_id": {"type": "string", "enum": ["sierra_verde", "cloud_peak", "riverbend"]},
+                "farmer_id": {"type": "string", "enum": FARMER_IDS},
                 "item_id": {"type": "string", "enum": ["standard", "premium"]},
                 "quantity_kg": {"type": "integer", "minimum": 1, "maximum": 100},
-                "delivery_day": {"type": "integer", "minimum": 2, "maximum": 7},
+                "delivery_day": {"type": "integer", "minimum": 2, "maximum": TOTAL_DAYS},
             },
             "required": ["farmer_id", "item_id", "quantity_kg", "delivery_day"],
         },
@@ -141,142 +170,231 @@ def _anthropic_client():
 
 
 def _azure_openai_client():
+    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
     from openai import AzureOpenAI
 
     endpoint = _require_env("AZURE_OPENAI_ENDPOINT")
     deployment = _require_env("AZURE_OPENAI_DEPLOYMENT")
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     bearer_token = os.getenv("AZURE_OPENAI_TOKEN")
-    if not api_key and not bearer_token:
-        print("ERROR: Set AZURE_OPENAI_API_KEY or AZURE_OPENAI_TOKEN.", file=sys.stderr)
-        sys.exit(1)
+    use_default_credential = os.getenv("AZURE_OPENAI_USE_DEFAULT_CREDENTIAL", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
     kwargs = {
         "azure_endpoint": endpoint,
         "api_version": AZURE_OPENAI_API_VERSION,
     }
-    if bearer_token:
+    if use_default_credential:
+        credential = DefaultAzureCredential()
+        kwargs["azure_ad_token_provider"] = get_bearer_token_provider(
+            credential,
+            "https://cognitiveservices.azure.com/.default",
+        )
+        kwargs["_enforce_credentials"] = False
+    elif bearer_token:
         kwargs["azure_ad_token"] = bearer_token
-    else:
+    elif api_key:
         kwargs["api_key"] = api_key
+    else:
+        print(
+            "ERROR: Set AZURE_OPENAI_API_KEY, AZURE_OPENAI_TOKEN, "
+            "or AZURE_OPENAI_USE_DEFAULT_CREDENTIAL=true.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     return AzureOpenAI(**kwargs), deployment
 
 
 def _run_agent_anthropic(session, prompt_text: str) -> float:
     llm = _anthropic_client()
+    agent_logger = _new_agent_logger("anthropic", ANTHROPIC_MODEL)
+    agent_logger.emit(
+        "agent_start",
+        provider="anthropic",
+        model=ANTHROPIC_MODEL,
+        total_days=TOTAL_DAYS,
+        prompt=prompt_text,
+        strategy_hint=STRATEGY_HINT,
+    )
     messages = _build_initial_messages(prompt_text)
     final_reward = 0.0
 
-    for turn in range(1, MAX_TURNS + 1):
-        print(f"\nTurn {turn}")
-        response = llm.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=4096,
-            tools=TOOL_SCHEMAS,
-            messages=messages,
-        )
-        messages.append({"role": "assistant", "content": response.content})
+    try:
+        for turn in range(1, MAX_TURNS + 1):
+            print(f"\nTurn {turn}")
+            response = llm.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=4096,
+                tools=TOOL_SCHEMAS,
+                messages=messages,
+            )
+            agent_logger.emit(
+                "llm_response",
+                turn=turn,
+                content=[_anthropic_block_to_dict(block) for block in response.content],
+                stop_reason=response.stop_reason,
+            )
+            messages.append({"role": "assistant", "content": response.content})
 
-        tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
-        if not tool_use_blocks:
-            print("Agent stopped without calling a tool.")
-            break
+            tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
+            if not tool_use_blocks:
+                print("Agent stopped without calling a tool.")
+                agent_logger.emit("agent_stop", turn=turn, reason="no_tool_call", final_reward=final_reward)
+                break
 
-        tool_results = []
-        for block in tool_use_blocks:
-            arguments = block.input if isinstance(block.input, dict) else {}
-            print(f"[TOOL] {block.name}({arguments})")
-            result_text, finished, reward = _call_ors_tool(session, block.name, arguments)
-            print(result_text)
-            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result_text})
-            if finished:
-                final_reward = reward
-                messages.append({"role": "user", "content": tool_results})
-                return final_reward
+            tool_results = []
+            for block in tool_use_blocks:
+                arguments = block.input if isinstance(block.input, dict) else {}
+                print(f"[TOOL] {block.name}({arguments})")
+                agent_logger.emit("tool_call", turn=turn, tool=block.name, arguments=arguments, tool_call_id=block.id)
+                result_text, finished, reward = _call_ors_tool(session, block.name, arguments)
+                print(result_text)
+                agent_logger.emit(
+                    "tool_result",
+                    turn=turn,
+                    tool=block.name,
+                    tool_call_id=block.id,
+                    result=result_text,
+                    finished=finished,
+                    reward=reward,
+                )
+                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result_text})
+                if finished:
+                    final_reward = reward
+                    messages.append({"role": "user", "content": tool_results})
+                    agent_logger.emit("agent_stop", turn=turn, reason="finished", final_reward=final_reward)
+                    return final_reward
 
-        messages.append({"role": "user", "content": tool_results})
+            messages.append({"role": "user", "content": tool_results})
 
-    return final_reward
+        return final_reward
+    finally:
+        agent_logger.close()
 
 
 def _run_agent_azure_openai(session, prompt_text: str) -> float:
     client, deployment = _azure_openai_client()
+    agent_logger = _new_agent_logger("azure_openai", deployment)
+    agent_logger.emit(
+        "agent_start",
+        provider="azure_openai",
+        deployment=deployment,
+        total_days=TOTAL_DAYS,
+        prompt=prompt_text,
+        strategy_hint=STRATEGY_HINT,
+    )
     messages = [
         {"role": "system", "content": STRATEGY_HINT},
         {"role": "user", "content": prompt_text},
     ]
     final_reward = 0.0
 
-    for turn in range(1, MAX_TURNS + 1):
-        print(f"\nTurn {turn}")
-        response = client.chat.completions.create(
-            model=deployment,
-            messages=messages,
-            tools=OPENAI_TOOL_SCHEMAS,
-            tool_choice="auto",
-            max_tokens=4096,
-        )
-        message = response.choices[0].message
-        if message.content:
-            print(f"[LLM] {message.content}")
+    try:
+        for turn in range(1, MAX_TURNS + 1):
+            print(f"\nTurn {turn}")
+            response = client.chat.completions.create(
+                model=deployment,
+                messages=messages,
+                tools=OPENAI_TOOL_SCHEMAS,
+                tool_choice="auto",
+                max_completion_tokens=4096,
+            )
+            message = response.choices[0].message
+            if message.content:
+                print(f"[LLM] {message.content}")
 
-        tool_calls = message.tool_calls or []
-        messages.append(
-            {
-                "role": "assistant",
-                "content": message.content or "",
-                "tool_calls": [
-                    {
-                        "id": tool_call.id,
-                        "type": tool_call.type,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                    for tool_call in tool_calls
-                ],
-            }
-        )
-        if not tool_calls:
-            print("Agent stopped without calling a tool.")
-            break
-
-        for tool_call in tool_calls:
-            arguments = json.loads(tool_call.function.arguments or "{}")
-            print(f"[TOOL] {tool_call.function.name}({arguments})")
-            result_text, finished, reward = _call_ors_tool(session, tool_call.function.name, arguments)
-            print(result_text)
+            tool_calls = message.tool_calls or []
+            serialized_tool_calls = [
+                {
+                    "id": tool_call.id,
+                    "type": tool_call.type,
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments,
+                    },
+                }
+                for tool_call in tool_calls
+            ]
+            agent_logger.emit(
+                "llm_response",
+                turn=turn,
+                content=message.content or "",
+                tool_calls=serialized_tool_calls,
+                finish_reason=response.choices[0].finish_reason,
+            )
             messages.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_text,
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": serialized_tool_calls,
                 }
             )
-            if finished:
-                final_reward = reward
-                return final_reward
+            if not tool_calls:
+                print("Agent stopped without calling a tool.")
+                agent_logger.emit("agent_stop", turn=turn, reason="no_tool_call", final_reward=final_reward)
+                break
 
-    return final_reward
+            for tool_call in tool_calls:
+                arguments = json.loads(tool_call.function.arguments or "{}")
+                print(f"[TOOL] {tool_call.function.name}({arguments})")
+                agent_logger.emit(
+                    "tool_call",
+                    turn=turn,
+                    tool=tool_call.function.name,
+                    arguments=arguments,
+                    tool_call_id=tool_call.id,
+                )
+                result_text, finished, reward = _call_ors_tool(session, tool_call.function.name, arguments)
+                print(result_text)
+                agent_logger.emit(
+                    "tool_result",
+                    turn=turn,
+                    tool=tool_call.function.name,
+                    tool_call_id=tool_call.id,
+                    result=result_text,
+                    finished=finished,
+                    reward=reward,
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result_text,
+                    }
+                )
+                if finished:
+                    final_reward = reward
+                    agent_logger.emit("agent_stop", turn=turn, reason="finished", final_reward=final_reward)
+                    return final_reward
+
+        return final_reward
+    finally:
+        agent_logger.close()
 
 
 def run_agent() -> float:
-    env = ORS(base_url=ORS_BASE_URL).environment("minicoffeeenv")
-    task = env.list_tasks(split="train")[0]
+    client = ORS(base_url=ORS_BASE_URL)
+    try:
+        env = client.environment("minicoffeeenv")
+        task = env.list_tasks(split="train")[0]
 
-    with env.session(task=task) as session:
-        prompt_text = "\n".join(block.text for block in session.get_prompt())
-        if LLM_PROVIDER == "anthropic":
-            return _run_agent_anthropic(session, prompt_text)
-        if LLM_PROVIDER in {"azure_openai", "azure-openai"}:
-            return _run_agent_azure_openai(session, prompt_text)
+        with env.session(task=task) as session:
+            prompt_text = "\n".join(block.text for block in session.get_prompt())
+            if LLM_PROVIDER == "anthropic":
+                return _run_agent_anthropic(session, prompt_text)
+            if LLM_PROVIDER in {"azure_openai", "azure-openai"}:
+                return _run_agent_azure_openai(session, prompt_text)
 
-        print(
-            "ERROR: MINI_COFFEE_LLM_PROVIDER must be 'anthropic' or 'azure_openai'.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+            print(
+                "ERROR: MINI_COFFEE_LLM_PROVIDER must be 'anthropic' or 'azure_openai'.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from itertools import count
 from pathlib import Path
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from ors import Environment, Server, Split, TextBlock, ToolOutput, tool
@@ -12,8 +13,10 @@ from ors import Environment, Server, Split, TextBlock, ToolOutput, tool
 from mini_coffee_event_logger import EventLogger
 
 
+load_dotenv(Path(__file__).with_name(".env"))
+
 INITIAL_CASH = 1_000.0
-TOTAL_DAYS = 7
+TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "7"))
 HOLDING_COST_PER_KG = 0.5
 SALVAGE_DISCOUNT = 0.5
 INVESTIGATION_COST = 15.0
@@ -52,6 +55,21 @@ FARMER_PROFILES = {
         "starting_cash": 180.0,
         "short_term_obligations": 120.0,
     },
+    "andes_mist": {
+        "name": "Andes Mist Collective",
+        "public_note": "Small high-altitude collective with excellent quality and tight working capital.",
+        "spot_prices": {
+            "standard": [4.2, 4.2, 4.6, 4.7, 5.0, 5.1, 5.1],
+            "premium": [6.8, 6.9, 7.4, 7.6, 8.1, 8.3, 8.3],
+        },
+        "harvest_schedule": {
+            "standard": [3, 3, 4, 5, 4, 3, 3],
+            "premium": [3, 4, 4, 5, 5, 3, 3],
+        },
+        "starting_cash": 65.0,
+        "short_term_obligations": 155.0,
+        "fulfillment_reliability": 0.22,
+    },
     "cloud_peak": {
         "name": "Cloud Peak Estate",
         "public_note": "Premium-focused farm with volatile financing and excellent cup scores.",
@@ -65,6 +83,21 @@ FARMER_PROFILES = {
         },
         "starting_cash": 75.0,
         "short_term_obligations": 170.0,
+        "fulfillment_reliability": 0.28,
+    },
+    "cedar_valley": {
+        "name": "Cedar Valley Farm",
+        "public_note": "Mid-sized farm with steady standard lots but limited premium capacity.",
+        "spot_prices": {
+            "standard": [3.9, 4.0, 4.2, 4.4, 4.5, 4.7, 4.7],
+            "premium": [7.4, 7.4, 7.8, 8.0, 8.2, 8.4, 8.4],
+        },
+        "harvest_schedule": {
+            "standard": [5, 5, 6, 6, 5, 5, 4],
+            "premium": [1, 1, 2, 2, 2, 1, 1],
+        },
+        "starting_cash": 135.0,
+        "short_term_obligations": 130.0,
     },
     "riverbend": {
         "name": "Riverbend Growers",
@@ -79,6 +112,79 @@ FARMER_PROFILES = {
         },
         "starting_cash": 115.0,
         "short_term_obligations": 145.0,
+        "fulfillment_reliability": 0.45,
+    },
+    "sunrock": {
+        "name": "Sunrock Producers",
+        "public_note": "Lowest visible prices, but public reports mention repeated delivery delays.",
+        "spot_prices": {
+            "standard": [3.2, 3.3, 3.5, 3.7, 3.9, 4.0, 4.0],
+            "premium": [5.8, 5.9, 6.2, 6.4, 6.6, 6.8, 6.8],
+        },
+        "harvest_schedule": {
+            "standard": [7, 7, 8, 8, 7, 6, 6],
+            "premium": [1, 1, 1, 2, 2, 1, 1],
+        },
+        "starting_cash": 45.0,
+        "short_term_obligations": 190.0,
+        "fulfillment_reliability": 0.12,
+    },
+    "harbor_roast_supply": {
+        "name": "Harbor Roast Supply",
+        "public_note": "Export-connected supplier with strong liquidity and higher transparent prices.",
+        "spot_prices": {
+            "standard": [4.7, 4.7, 4.9, 5.1, 5.3, 5.4, 5.4],
+            "premium": [7.9, 8.0, 8.3, 8.5, 8.8, 9.0, 9.0],
+        },
+        "harvest_schedule": {
+            "standard": [6, 6, 6, 7, 7, 6, 6],
+            "premium": [3, 3, 3, 4, 4, 3, 3],
+        },
+        "starting_cash": 260.0,
+        "short_term_obligations": 95.0,
+    },
+    "loma_dorada": {
+        "name": "Loma Dorada Estate",
+        "public_note": "Premium microlot specialist with strong cup scores and concentrated harvest windows.",
+        "spot_prices": {
+            "standard": [4.5, 4.5, 4.8, 4.9, 5.1, 5.2, 5.2],
+            "premium": [6.5, 6.6, 7.0, 7.1, 7.4, 7.7, 7.7],
+        },
+        "harvest_schedule": {
+            "standard": [2, 2, 2, 3, 3, 2, 2],
+            "premium": [4, 4, 5, 5, 5, 4, 4],
+        },
+        "starting_cash": 95.0,
+        "short_term_obligations": 150.0,
+    },
+    "norte_azul": {
+        "name": "Norte Azul Cooperative",
+        "public_note": "Broad cooperative network with moderate prices and diversified producers.",
+        "spot_prices": {
+            "standard": [4.1, 4.1, 4.3, 4.5, 4.7, 4.8, 4.8],
+            "premium": [6.9, 6.9, 7.2, 7.4, 7.6, 7.9, 7.9],
+        },
+        "harvest_schedule": {
+            "standard": [5, 6, 6, 7, 7, 6, 5],
+            "premium": [2, 2, 3, 3, 3, 2, 2],
+        },
+        "starting_cash": 155.0,
+        "short_term_obligations": 125.0,
+    },
+    "rainforest_direct": {
+        "name": "Rainforest Direct",
+        "public_note": "Large volume seller with opaque subcontracting and mixed delivery history.",
+        "spot_prices": {
+            "standard": [3.6, 3.6, 3.8, 4.0, 4.2, 4.3, 4.3],
+            "premium": [6.4, 6.4, 6.7, 6.9, 7.1, 7.3, 7.3],
+        },
+        "harvest_schedule": {
+            "standard": [8, 8, 9, 9, 8, 8, 7],
+            "premium": [2, 2, 2, 3, 3, 2, 2],
+        },
+        "starting_cash": 85.0,
+        "short_term_obligations": 180.0,
+        "fulfillment_reliability": 0.18,
     },
 }
 
@@ -137,7 +243,7 @@ class MiniCoffeeEnv(Environment):
             {
                 "id": "mini-coffee-merchant-002",
                 "description": (
-                    "Operate a coffee roaster-retailer for 7 days. Compare direct spot, "
+                    f"Operate a coffee roaster-retailer for {TOTAL_DAYS} days. Compare direct spot, "
                     "direct forward, and trader procurement under hidden fulfillment risk."
                 ),
             }
@@ -170,6 +276,7 @@ class MiniCoffeeEnv(Environment):
                 "short_term_obligations": profile["short_term_obligations"],
                 "inventory": {item_id: 0 for item_id in ITEMS},
                 "harvest_schedule": profile["harvest_schedule"],
+                "fulfillment_reliability": profile.get("fulfillment_reliability", 1.0),
                 "defaulted": False,
             }
 
@@ -183,7 +290,7 @@ class MiniCoffeeEnv(Environment):
         self._init_event_logger()
 
         lines = [
-            "You run a small coffee roaster-retailer for 7 days.",
+            f"You run a small coffee roaster-retailer for {TOTAL_DAYS} days.",
             f"Initial cash: ${INITIAL_CASH:,.2f}",
             "",
             "You can procure beans in three ways:",
@@ -194,6 +301,16 @@ class MiniCoffeeEnv(Environment):
             "Farmer internal state is hidden by default. You can investigate a farmer to reveal ledger-based metrics.",
             "The trader already sees the full farmer ledger and maintains its own inbound contracts and inventory.",
             "You do not see future harvest schedules, contract break probabilities, or future trader inbound deliveries.",
+            "",
+            "Initial public farmer directory:",
+        ]
+        for farmer_id, profile in FARMER_PROFILES.items():
+            lines.append(
+                f"  {farmer_id} ({profile['name']}): {profile['public_note']} "
+                f"Current standard ${self._current_farmer_price(farmer_id, 'standard'):.2f}/kg, "
+                f"premium ${self._current_farmer_price(farmer_id, 'premium'):.2f}/kg."
+            )
+        lines += [
             "",
             "Tools available:",
             "  view_state             - inspect cash, inventory, offers, trader inventory, and history",
@@ -226,7 +343,22 @@ class MiniCoffeeEnv(Environment):
             ("riverbend", "standard", 8, 4, 4.0),
             ("sierra_verde", "premium", 3, 5, 7.9),
             ("riverbend", "standard", 6, 6, 4.3),
+            ("harbor_roast_supply", "standard", 7, 7, 5.0),
+            ("norte_azul", "premium", 3, 8, 7.4),
+            ("cedar_valley", "standard", 6, 9, 4.6),
+            ("loma_dorada", "premium", 4, 10, 7.3),
+            ("cedar_valley", "standard", 5, 11, 4.7),
+            ("rainforest_direct", "standard", 8, 12, 4.2),
+            ("andes_mist", "premium", 4, 13, 7.8),
+            ("sunrock", "standard", 7, 14, 4.0),
+            ("harbor_roast_supply", "premium", 3, 15, 8.8),
+            ("norte_azul", "standard", 7, 16, 4.7),
+            ("loma_dorada", "premium", 3, 17, 7.7),
+            ("cedar_valley", "standard", 6, 18, 4.7),
+            ("rainforest_direct", "standard", 8, 19, 4.3),
+            ("harbor_roast_supply", "standard", 7, 20, 5.4),
         ]
+        plans = [plan for plan in plans if plan[3] <= TOTAL_DAYS]
         for farmer_id, item_id, qty, day, unit_price in plans:
             contract = self._new_contract(
                 buyer_kind="trader",
@@ -271,13 +403,13 @@ class MiniCoffeeEnv(Environment):
         return self.day_index + 1
 
     def _series_value(self, series: list[float]) -> float:
-        return series[min(self.day_index, TOTAL_DAYS - 1)]
+        return series[min(self.day_index, len(series) - 1)]
 
     def _current_farmer_price(self, farmer_id: str, item_id: str) -> float:
         return self._series_value(FARMER_PROFILES[farmer_id]["spot_prices"][item_id])
 
     def _current_trader_bulletin(self) -> str:
-        return TRADER_BULLETINS[min(self.day_index, TOTAL_DAYS - 1)]
+        return TRADER_BULLETINS[min(self.day_index, len(TRADER_BULLETINS) - 1)]
 
     def _current_trader_price(self, item_id: str) -> float:
         direct_prices = [self._current_farmer_price(fid, item_id) for fid in self.farmers]
@@ -289,7 +421,7 @@ class MiniCoffeeEnv(Environment):
 
     def _expected_remaining_harvest(self, farmer_id: str, item_id: str) -> int:
         schedule = self.farmers[farmer_id]["harvest_schedule"][item_id]
-        return sum(schedule[self.day_index :])
+        return sum(schedule[min(day, len(schedule) - 1)] for day in range(self.day_index, TOTAL_DAYS))
 
     def _farmer_open_commitments(self, farmer_id: str, item_id: str) -> int:
         total = 0
@@ -366,7 +498,7 @@ class MiniCoffeeEnv(Environment):
         item = ITEMS[item_id]
         price_factor = max(0.0, 1.0 - (self.prices[item_id] / item["reservation_price"]))
         demand = int(
-            round(item["base_demand"] * item["festival_boosts"][self.day_index] * price_factor)
+            round(item["base_demand"] * self._series_value(item["festival_boosts"]) * price_factor)
         )
         sold = min(self.inventory[item_id], demand)
         return sold, sold * self.prices[item_id]
@@ -437,7 +569,9 @@ class MiniCoffeeEnv(Environment):
         metrics = self._farmer_metrics(farmer_id)
         cash_ratio = float(metrics["recent_cash_ratio"])
         coverage = float(metrics["contract_coverage"])
-        return max(0.55, min(1.0, 0.7 + 0.15 * cash_ratio - 0.1 * max(0.0, coverage - 1.0)))
+        base_limit = max(0.25, min(1.0, 0.7 + 0.15 * cash_ratio - 0.1 * max(0.0, coverage - 1.0)))
+        reliability = float(self.farmers[farmer_id].get("fulfillment_reliability", 1.0))
+        return max(0.02, min(1.0, base_limit * reliability))
 
     def _contract_incentive_multiplier(self, contract: dict) -> float:
         current_spot = self._current_farmer_price(contract["seller_id"], contract["item_id"])
@@ -452,7 +586,7 @@ class MiniCoffeeEnv(Environment):
     def _harvest_today(self) -> None:
         for farmer_id, farmer in self.farmers.items():
             for item_id in ITEMS:
-                farmer["inventory"][item_id] += farmer["harvest_schedule"][item_id][self.day_index]
+                farmer["inventory"][item_id] += self._series_value(farmer["harvest_schedule"][item_id])
 
     def _process_contracts_for_day(self) -> list[str]:
         events = []
@@ -815,7 +949,7 @@ class MiniCoffeeEnv(Environment):
         if self.day_index < TOTAL_DAYS:
             lines.append(f"Next day is Day {self._current_day_number()}.")
         else:
-            lines.append("The 7-day horizon is complete. Call finish_episode.")
+            lines.append(f"The {TOTAL_DAYS}-day horizon is complete. Call finish_episode.")
 
         return ToolOutput(blocks=[TextBlock(text="\n".join(lines))], reward=0.0, finished=False)
 

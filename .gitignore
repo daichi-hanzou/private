@@ -1,0 +1,7 @@
+.venv/
+.uv-cache/
+.tmp/
+.env
+ors-playground/workspace/
+__pycache__/
+*.py[cod]
