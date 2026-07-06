@@ -22,6 +22,7 @@ SALVAGE_DISCOUNT = 0.5
 INVESTIGATION_COST = 15.0
 TRADER_MARGIN = {"standard": 1.8, "premium": 2.2}
 TERMINAL_OPEN_CONTRACT_RECOVERY = 0.35
+INITIAL_ROASTER_INVENTORY = {"standard": 8, "premium": 3}
 
 ITEMS = {
     "standard": {
@@ -253,7 +254,7 @@ class MiniCoffeeEnv(Environment):
         self.day_index = 0
         self.run_id = uuid4().hex[:8]
         self.cash = INITIAL_CASH
-        self.inventory = {item_id: 0 for item_id in ITEMS}
+        self.inventory = dict(INITIAL_ROASTER_INVENTORY)
         self.prices = {
             item_id: item["default_price"] for item_id, item in ITEMS.items()
         }
@@ -292,6 +293,7 @@ class MiniCoffeeEnv(Environment):
         lines = [
             f"You run a small coffee roaster-retailer for {TOTAL_DAYS} days.",
             f"Initial cash: ${INITIAL_CASH:,.2f}",
+            f"Initial inventory: standard {self.inventory['standard']} kg, premium {self.inventory['premium']} kg",
             "",
             "You can procure beans in three ways:",
             "1. Direct spot purchase from a farmer: cheaper, delivered after today's advance_day.",
@@ -301,6 +303,7 @@ class MiniCoffeeEnv(Environment):
             "Farmer internal state is hidden by default. You can investigate a farmer to reveal ledger-based metrics.",
             "The trader already sees the full farmer ledger and maintains its own inbound contracts and inventory.",
             "You do not see future harvest schedules, contract break probabilities, or future trader inbound deliveries.",
+            "On early turns, do not wait passively. Take at least one concrete action such as viewing state, investigating, procuring, or repricing.",
             "",
             "Initial public farmer directory:",
         ]
@@ -956,6 +959,19 @@ class MiniCoffeeEnv(Environment):
     @tool
     def finish_episode(self, params: NoParams) -> ToolOutput:
         """End the episode, settle remaining value, and return the final reward."""
+        if self.day_index < TOTAL_DAYS:
+            return ToolOutput(
+                blocks=[
+                    TextBlock(
+                        text=(
+                            f"finish_episode is only available after Day {TOTAL_DAYS} is complete. "
+                            "Keep using advance_day until the horizon ends."
+                        )
+                    )
+                ],
+                reward=0.0,
+                finished=False,
+            )
         open_direct = [
             c for c in self.ledger_contracts if c["buyer_kind"] == "roaster" and not c["closed"]
         ]

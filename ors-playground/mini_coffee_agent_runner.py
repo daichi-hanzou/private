@@ -23,9 +23,11 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "7"))
 FARMER_IDS = list(FARMER_PROFILES)
 MAX_TURNS = 60
+AUTO_FINISH_MARKER = "All days are complete. Call finish_episode."
 STRATEGY_HINT = (
     "Balance cheap but risky direct procurement against immediate trader inventory. "
     "Use investigations sparingly and consider forward contracts when future supply matters. "
+    "On the first turn, avoid waiting without action. "
     "Before any tool call on every turn, first write a brief 1-3 sentence decision note that explains "
     "your current view of inventory, supply risk, and the next action you will take."
 )
@@ -159,6 +161,28 @@ def _print_llm_note(text: str) -> None:
             print(f"[LLM] {cleaned}")
 
 
+def _auto_continue_after_no_tool_call(session, turn: int) -> tuple[str, bool, float]:
+    if turn == 1:
+        print("[AUTO] No tool call detected on turn 1. Viewing state automatically.")
+        result_text, finished, reward = _call_ors_tool(session, "view_state", {})
+        print(result_text)
+        return result_text, finished, reward
+
+    print("[AUTO] No tool call detected. Advancing the simulation automatically.")
+    result_text, finished, reward = _call_ors_tool(session, "advance_day", {})
+    print(result_text)
+    if finished:
+        return result_text, finished, reward
+    if AUTO_FINISH_MARKER not in result_text:
+        return result_text, False, reward
+
+    print("[AUTO] Horizon complete. Finishing the episode automatically.")
+    finish_text, finished, reward = _call_ors_tool(session, "finish_episode", {})
+    print(finish_text)
+    combined = f"{result_text}\n\n{finish_text}"
+    return combined, finished, reward
+
+
 def _build_initial_messages(prompt_text: str) -> list[dict]:
     return [
         {"role": "user", "content": prompt_text},
@@ -259,9 +283,30 @@ def _run_agent_anthropic(session, prompt_text: str) -> float:
 
             tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
             if not tool_use_blocks:
-                print("Agent stopped without calling a tool.")
-                agent_logger.emit("agent_stop", turn=turn, reason="no_tool_call", final_reward=final_reward)
-                break
+                result_text, finished, reward = _auto_continue_after_no_tool_call(session, turn)
+                agent_logger.emit(
+                    "tool_result",
+                    turn=turn,
+                    tool="auto_continue_after_no_tool_call",
+                    tool_call_id=f"auto-turn-{turn}",
+                    result=result_text,
+                    finished=finished,
+                    reward=reward,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "System fallback: you did not call a tool, so the runner automatically "
+                            f"continued the environment.\n{result_text}"
+                        ),
+                    }
+                )
+                if finished:
+                    final_reward = reward
+                    agent_logger.emit("agent_stop", turn=turn, reason="finished", final_reward=final_reward)
+                    return final_reward
+                continue
 
             tool_results = []
             for block in tool_use_blocks:
@@ -350,9 +395,30 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
                 }
             )
             if not tool_calls:
-                print("Agent stopped without calling a tool.")
-                agent_logger.emit("agent_stop", turn=turn, reason="no_tool_call", final_reward=final_reward)
-                break
+                result_text, finished, reward = _auto_continue_after_no_tool_call(session, turn)
+                agent_logger.emit(
+                    "tool_result",
+                    turn=turn,
+                    tool="auto_continue_after_no_tool_call",
+                    tool_call_id=f"auto-turn-{turn}",
+                    result=result_text,
+                    finished=finished,
+                    reward=reward,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "System fallback: you did not call a tool, so the runner automatically "
+                            f"continued the environment.\n{result_text}"
+                        ),
+                    }
+                )
+                if finished:
+                    final_reward = reward
+                    agent_logger.emit("agent_stop", turn=turn, reason="finished", final_reward=final_reward)
+                    return final_reward
+                continue
 
             for tool_call in tool_calls:
                 arguments = json.loads(tool_call.function.arguments or "{}")
