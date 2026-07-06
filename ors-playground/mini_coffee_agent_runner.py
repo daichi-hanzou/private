@@ -387,13 +387,13 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
                 tool_calls=serialized_tool_calls,
                 finish_reason=response.choices[0].finish_reason,
             )
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.content or "",
-                    "tool_calls": serialized_tool_calls,
-                }
-            )
+            assistant_message = {
+                "role": "assistant",
+                "content": message.content or "",
+            }
+            if serialized_tool_calls:
+                assistant_message["tool_calls"] = serialized_tool_calls
+            messages.append(assistant_message)
             if not tool_calls:
                 result_text, finished, reward = _auto_continue_after_no_tool_call(session, turn)
                 agent_logger.emit(
