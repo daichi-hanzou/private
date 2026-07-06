@@ -25,7 +25,9 @@ FARMER_IDS = list(FARMER_PROFILES)
 MAX_TURNS = 60
 STRATEGY_HINT = (
     "Balance cheap but risky direct procurement against immediate trader inventory. "
-    "Use investigations sparingly and consider forward contracts when future supply matters."
+    "Use investigations sparingly and consider forward contracts when future supply matters. "
+    "Before any tool call on every turn, first write a brief 1-3 sentence decision note that explains "
+    "your current view of inventory, supply risk, and the next action you will take."
 )
 
 
@@ -147,6 +149,16 @@ def _call_ors_tool(session, tool_name: str, arguments: dict) -> tuple[str, bool,
     return "\n".join(block.text for block in result.blocks), result.finished, result.reward
 
 
+def _print_llm_note(text: str) -> None:
+    note = (text or "").strip()
+    if not note:
+        return
+    for line in note.splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            print(f"[LLM] {cleaned}")
+
+
 def _build_initial_messages(prompt_text: str) -> list[dict]:
     return [
         {"role": "user", "content": prompt_text},
@@ -238,6 +250,12 @@ def _run_agent_anthropic(session, prompt_text: str) -> float:
                 stop_reason=response.stop_reason,
             )
             messages.append({"role": "assistant", "content": response.content})
+            assistant_text = "\n".join(
+                block.text.strip()
+                for block in response.content
+                if getattr(block, "type", None) == "text" and getattr(block, "text", "").strip()
+            )
+            _print_llm_note(assistant_text)
 
             tool_use_blocks = [block for block in response.content if block.type == "tool_use"]
             if not tool_use_blocks:
@@ -303,8 +321,7 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
                 max_completion_tokens=4096,
             )
             message = response.choices[0].message
-            if message.content:
-                print(f"[LLM] {message.content}")
+            _print_llm_note(message.content or "")
 
             tool_calls = message.tool_calls or []
             serialized_tool_calls = [
