@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import random
 from itertools import count
 from pathlib import Path
 from uuid import uuid4
@@ -16,7 +18,10 @@ from mini_coffee_event_logger import EventLogger
 load_dotenv(Path(__file__).with_name(".env"))
 
 INITIAL_CASH = 1_000.0
-TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "7"))
+TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "20"))
+DEFAULT_SEED = int(os.getenv("MINI_COFFEE_SEED", "0"))
+WARM_START_DAYS = int(os.getenv("MINI_COFFEE_WARM_START_DAYS", "90"))
+ENABLE_DEBUG_TOOLS = os.getenv("MINI_COFFEE_DEBUG_TOOLS", "0") == "1"
 HOLDING_COST_PER_KG = 0.5
 SALVAGE_DISCOUNT = 0.5
 INVESTIGATION_COST = 15.0
@@ -55,6 +60,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 180.0,
         "short_term_obligations": 120.0,
+        "fulfillment_reliability": 0.95,
     },
     "andes_mist": {
         "name": "Andes Mist Collective",
@@ -69,7 +75,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 65.0,
         "short_term_obligations": 155.0,
-        "fulfillment_reliability": 0.22,
+        "fulfillment_reliability": 0.55,
     },
     "cloud_peak": {
         "name": "Cloud Peak Estate",
@@ -84,7 +90,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 75.0,
         "short_term_obligations": 170.0,
-        "fulfillment_reliability": 0.28,
+        "fulfillment_reliability": 0.55,
     },
     "cedar_valley": {
         "name": "Cedar Valley Farm",
@@ -99,6 +105,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 135.0,
         "short_term_obligations": 130.0,
+        "fulfillment_reliability": 0.8,
     },
     "riverbend": {
         "name": "Riverbend Growers",
@@ -113,7 +120,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 115.0,
         "short_term_obligations": 145.0,
-        "fulfillment_reliability": 0.45,
+        "fulfillment_reliability": 0.8,
     },
     "sunrock": {
         "name": "Sunrock Producers",
@@ -128,7 +135,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 45.0,
         "short_term_obligations": 190.0,
-        "fulfillment_reliability": 0.12,
+        "fulfillment_reliability": 0.55,
     },
     "harbor_roast_supply": {
         "name": "Harbor Roast Supply",
@@ -143,6 +150,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 260.0,
         "short_term_obligations": 95.0,
+        "fulfillment_reliability": 0.95,
     },
     "loma_dorada": {
         "name": "Loma Dorada Estate",
@@ -157,6 +165,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 95.0,
         "short_term_obligations": 150.0,
+        "fulfillment_reliability": 0.8,
     },
     "norte_azul": {
         "name": "Norte Azul Cooperative",
@@ -171,6 +180,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 155.0,
         "short_term_obligations": 125.0,
+        "fulfillment_reliability": 0.95,
     },
     "rainforest_direct": {
         "name": "Rainforest Direct",
@@ -185,7 +195,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 85.0,
         "short_term_obligations": 180.0,
-        "fulfillment_reliability": 0.18,
+        "fulfillment_reliability": 0.55,
     },
 }
 
@@ -231,6 +241,10 @@ class SetPriceInput(BaseModel):
     price_per_kg: float = Field(gt=0.0, le=100.0)
 
 
+class DebugSetSeedInput(BaseModel):
+    seed: int = Field(ge=0)
+
+
 class MiniCoffeeEnv(Environment):
     @classmethod
     def list_splits(cls):
@@ -251,6 +265,10 @@ class MiniCoffeeEnv(Environment):
         ]
 
     def get_prompt(self):
+        self.total_days = TOTAL_DAYS
+        self.seed = getattr(self, "_seed_override", DEFAULT_SEED)
+        self._init_rngs(self.seed)
+        self._init_demand_series()
         self.day_index = 0
         self.run_id = uuid4().hex[:8]
         self.cash = INITIAL_CASH
@@ -283,11 +301,24 @@ class MiniCoffeeEnv(Environment):
 
         self.trader = {
             "cash": 700.0,
-            "inventory": {"standard": 8, "premium": 3},
+            "inventory": {"standard": 0, "premium": 0},
             "inbound_contracts": [],
             "committed_sales": 0,
         }
-        self._seed_trader_contracts()
+        self._warm_start_history()
+        self.day_index = 0
+        self.cash = INITIAL_CASH
+        self.inventory = dict(INITIAL_ROASTER_INVENTORY)
+        self.prices = {
+            item_id: item["default_price"] for item_id, item in ITEMS.items()
+        }
+        self.history = []
+        self.investigated_farmers = set()
+        self.metrics = {
+            "investigation_spend": 0.0,
+            "direct_spend": 0.0,
+            "trader_spend": 0.0,
+        }
         self._init_event_logger()
 
         lines = [
@@ -331,6 +362,95 @@ class MiniCoffeeEnv(Environment):
             snapshot=self._snapshot(),
         )
         return [TextBlock(text="\n".join(lines))]
+
+    def _init_rngs(self, seed: int) -> None:
+        seed_source = random.Random(seed)
+        self.rng_demand = random.Random(seed_source.randrange(2**63))
+        self.rng_harvest = random.Random(seed_source.randrange(2**63))
+        self.rng_fulfillment = random.Random(seed_source.randrange(2**63))
+
+    def _init_demand_series(self) -> None:
+        self.demand_series = {
+            item_id: [
+                round(1.0 + self.rng_demand.uniform(-0.05, 0.05), 4)
+                for _ in range(TOTAL_DAYS)
+            ]
+            for item_id in ITEMS
+        }
+
+    def _warm_start_history(self) -> None:
+        if WARM_START_DAYS <= 0:
+            self.trader["inventory"] = {"standard": 8, "premium": 3}
+            return
+
+        farmer_ids = list(self.farmers)
+        dummy_rng = random.Random(self.seed + 10_000)
+        original_cash = self.cash
+        original_inventory = dict(self.inventory)
+        original_prices = dict(self.prices)
+        original_history = list(self.history)
+        original_farmer_cash = {fid: farmer["cash"] for fid, farmer in self.farmers.items()}
+
+        self.cash = 0.0
+        self.inventory = {item_id: 0 for item_id in ITEMS}
+        self.prices = {
+            item_id: item["default_price"] for item_id, item in ITEMS.items()
+        }
+        self.history = []
+
+        for day in range(WARM_START_DAYS):
+            self.day_index = day
+            for item_id in ITEMS:
+                farmer_id = farmer_ids[dummy_rng.randrange(len(farmer_ids))]
+                qty = 2
+                contract = self._new_contract(
+                    buyer_kind="history",
+                    seller_kind="farmer",
+                    seller_id=farmer_id,
+                    item_id=item_id,
+                    quantity_kg=qty,
+                    unit_price=self._current_farmer_price(farmer_id, item_id),
+                    contract_type="warm_start",
+                    delivery_day=self._current_day_number(),
+                )
+                contract["historical"] = True
+                self.ledger_contracts.append(contract)
+
+            trader_farmer = max(
+                farmer_ids,
+                key=lambda fid: (
+                    self.farmers[fid]["fulfillment_reliability"],
+                    -self._current_farmer_price(fid, "standard"),
+                ),
+            )
+            trader_contract = self._new_contract(
+                buyer_kind="trader",
+                seller_kind="farmer",
+                seller_id=trader_farmer,
+                item_id="standard" if day % 2 == 0 else "premium",
+                quantity_kg=3,
+                unit_price=self._current_farmer_price(
+                    trader_farmer, "standard" if day % 2 == 0 else "premium"
+                ),
+                contract_type="warm_start",
+                delivery_day=self._current_day_number(),
+            )
+            trader_contract["historical"] = True
+            self.trader["inbound_contracts"].append(trader_contract)
+            self.ledger_contracts.append(trader_contract)
+
+            self._harvest_today()
+            self._process_contracts_for_day(visible_events=False)
+
+        self.cash = original_cash
+        self.inventory = original_inventory
+        self.prices = original_prices
+        self.history = original_history
+        for farmer_id, cash in original_farmer_cash.items():
+            self.farmers[farmer_id]["cash"] = cash
+            self.farmers[farmer_id]["inventory"] = {item_id: 0 for item_id in ITEMS}
+        self.trader["inventory"]["standard"] = min(max(self.trader["inventory"]["standard"], 8), 30)
+        self.trader["inventory"]["premium"] = min(max(self.trader["inventory"]["premium"], 3), 12)
 
     def _init_event_logger(self) -> None:
         base_dir = Path(__file__).resolve().parent / "workspace" / "output" / "mini_coffee_runs"
@@ -500,8 +620,11 @@ class MiniCoffeeEnv(Environment):
     def _sales_for_item(self, item_id: str) -> tuple[int, float]:
         item = ITEMS[item_id]
         price_factor = max(0.0, 1.0 - (self.prices[item_id] / item["reservation_price"]))
+        demand_noise = getattr(self, "demand_series", {}).get(item_id, [1.0])[
+            min(self.day_index, TOTAL_DAYS - 1)
+        ]
         demand = int(
-            round(item["base_demand"] * self._series_value(item["festival_boosts"]) * price_factor)
+            round(item["base_demand"] * self._series_value(item["festival_boosts"]) * demand_noise * price_factor)
         )
         sold = min(self.inventory[item_id], demand)
         return sold, sold * self.prices[item_id]
@@ -512,6 +635,7 @@ class MiniCoffeeEnv(Environment):
         delivered_qty: int,
         processed_day: int,
         refund: float = 0.0,
+        reason: str | None = None,
     ) -> None:
         self.ledger_deliveries.append(
             {
@@ -525,16 +649,17 @@ class MiniCoffeeEnv(Environment):
                 "due_day": contract["delivery_day"],
                 "on_time": processed_day <= contract["delivery_day"],
                 "refund": refund,
+                "shortfall_reason": reason,
             }
         )
 
-    def _farmer_metrics(self, farmer_id: str) -> dict[str, float | bool]:
+    def _farmer_metrics(self, farmer_id: str) -> dict[str, float | int | bool | None]:
         contracts = [
             c
             for c in self.ledger_contracts
             if c["seller_kind"] == "farmer"
             and c["seller_id"] == farmer_id
-            and c["delivery_day"] <= self._current_day_number()
+            and (c.get("historical") or c["delivery_day"] <= self._current_day_number())
         ]
         deliveries = [d for d in self.ledger_deliveries if d["seller_id"] == farmer_id]
 
@@ -542,6 +667,7 @@ class MiniCoffeeEnv(Environment):
         delivered_qty = sum(d["delivered_qty"] for d in deliveries)
         on_time_delivered_qty = sum(d["delivered_qty"] for d in deliveries if d["on_time"])
         matured_count = len(contracts)
+        sample_count = matured_count
         partial_count = sum(
             1
             for c in contracts
@@ -558,8 +684,14 @@ class MiniCoffeeEnv(Environment):
         recent_cash_ratio = self.farmers[farmer_id]["cash"] / obligations
 
         return {
-            "delivery_rate": delivered_qty / contracted_qty if contracted_qty else 1.0,
-            "on_time_delivery_rate": on_time_delivered_qty / contracted_qty if contracted_qty else 1.0,
+            "sample_count": sample_count,
+            "contracted_qty": contracted_qty,
+            "delivery_rate": (
+                delivered_qty / contracted_qty if contracted_qty and sample_count >= 5 else None
+            ),
+            "on_time_delivery_rate": (
+                on_time_delivered_qty / contracted_qty if contracted_qty and sample_count >= 5 else None
+            ),
             "partial_delivery_rate": partial_count / matured_count if matured_count else 0.0,
             "contract_coverage": (
                 outstanding_commitments / max(1, remaining_harvest + sum(self.farmers[farmer_id]["inventory"].values()))
@@ -567,6 +699,13 @@ class MiniCoffeeEnv(Environment):
             "recent_cash_ratio": recent_cash_ratio,
             "recent_default_flag": partial_count > 0 and delivered_qty < contracted_qty,
         }
+
+    def _format_rate_metric(self, label: str, metrics: dict, key: str) -> str:
+        value = metrics[key]
+        sample_count = metrics["sample_count"]
+        if value is None:
+            return f"{label}=unknown (only {sample_count} historical contracts)"
+        return f"{label}={value:.2f} (n={sample_count})"
 
     def _fulfillment_limit(self, farmer_id: str) -> float:
         metrics = self._farmer_metrics(farmer_id)
@@ -577,6 +716,8 @@ class MiniCoffeeEnv(Environment):
         return max(0.02, min(1.0, base_limit * reliability))
 
     def _contract_incentive_multiplier(self, contract: dict) -> float:
+        if os.getenv("MINI_COFFEE_DISABLE_INCENTIVE", "0") == "1":
+            return 1.0
         current_spot = self._current_farmer_price(contract["seller_id"], contract["item_id"])
         contracted_price = contract["unit_price"]
         if current_spot <= contracted_price:
@@ -591,7 +732,7 @@ class MiniCoffeeEnv(Environment):
             for item_id in ITEMS:
                 farmer["inventory"][item_id] += self._series_value(farmer["harvest_schedule"][item_id])
 
-    def _process_contracts_for_day(self) -> list[str]:
+    def _process_contracts_for_day(self, visible_events: bool = True) -> list[str]:
         events = []
         today = self._current_day_number()
         contracts = [
@@ -607,10 +748,19 @@ class MiniCoffeeEnv(Environment):
             farmer = self.farmers[farmer_id]
             available = farmer["inventory"][item_id]
             incentive_multiplier = self._contract_incentive_multiplier(contract)
-            deliverable = min(
-                contract["remaining_qty"],
-                int(available * self._fulfillment_limit(farmer_id) * incentive_multiplier),
-            )
+            physical_limit = min(contract["remaining_qty"], int(available))
+            reason = None
+            reliability = self._fulfillment_limit(farmer_id) * incentive_multiplier
+            if farmer.get("defaulted"):
+                deliverable = 0
+                reason = "financial_default"
+            elif self.rng_fulfillment.random() > reliability:
+                deliverable = min(physical_limit, int(contract["remaining_qty"] * 0.1))
+                reason = "nonperformance"
+            else:
+                deliverable = physical_limit
+                if deliverable < contract["remaining_qty"]:
+                    reason = "capacity_shortfall"
             if deliverable > 0:
                 farmer["inventory"][item_id] -= deliverable
                 farmer["cash"] += deliverable * contract["unit_price"]
@@ -625,23 +775,29 @@ class MiniCoffeeEnv(Environment):
                     self.cash += refund
                     farmer["cash"] = max(0.0, farmer["cash"] - refund)
                     contract["closed"] = True
-                    events.append(
-                        f"{farmer_id} missed contract {contract['contract_id']}: delivered {deliverable}/{contract['quantity_kg']} kg "
-                        f"of {item_id}, late refund ${refund:.2f}."
-                    )
+                    if visible_events:
+                        events.append(
+                            f"{farmer_id} missed contract {contract['contract_id']}: delivered {deliverable}/{contract['quantity_kg']} kg "
+                            f"of {item_id}, late refund ${refund:.2f}."
+                        )
                 else:
                     status = "on time" if today <= contract["delivery_day"] else "late"
-                    events.append(
-                        f"{farmer_id} delivered {deliverable}/{contract['quantity_kg']} kg of {item_id} for {contract['contract_id']} ({status})."
-                    )
-            else:
+                    if visible_events:
+                        events.append(
+                            f"{farmer_id} delivered {deliverable}/{contract['quantity_kg']} kg of {item_id} for {contract['contract_id']} ({status})."
+                        )
+            elif contract["buyer_kind"] == "trader":
                 self.trader["inventory"][item_id] += deliverable
-                events.append(
-                    f"Trader inbound {contract['contract_id']} from {farmer_id}: {deliverable}/{contract['quantity_kg']} kg of {item_id}."
-                )
+                if visible_events:
+                    events.append(
+                        f"Trader inbound {contract['contract_id']} from {farmer_id}: {deliverable}/{contract['quantity_kg']} kg of {item_id}."
+                    )
 
-            self._record_delivery(contract, deliverable, today, refund=refund)
-            if contract["remaining_qty"] <= 0:
+            self._record_delivery(contract, deliverable, today, refund=refund, reason=reason)
+            if contract.get("historical"):
+                contract["closed"] = True
+                contract["remaining_qty"] = 0
+            elif contract["remaining_qty"] <= 0:
                 contract["closed"] = True
 
         return events
@@ -670,8 +826,8 @@ class MiniCoffeeEnv(Environment):
                 metrics = self._farmer_metrics(farmer_id)
                 lines.append(
                     "    Revealed metrics: "
-                    f"delivery_rate={metrics['delivery_rate']:.2f}, "
-                    f"on_time_delivery_rate={metrics['on_time_delivery_rate']:.2f}, "
+                    f"{self._format_rate_metric('delivery_rate', metrics, 'delivery_rate')}, "
+                    f"{self._format_rate_metric('on_time_delivery_rate', metrics, 'on_time_delivery_rate')}, "
                     f"partial_delivery_rate={metrics['partial_delivery_rate']:.2f}, "
                     f"contract_coverage={metrics['contract_coverage']:.2f}, "
                     f"recent_cash_ratio={metrics['recent_cash_ratio']:.2f}"
@@ -726,7 +882,19 @@ class MiniCoffeeEnv(Environment):
         if farmer_id in self.investigated_farmers:
             metrics = self._farmer_metrics(farmer_id)
             return ToolOutput(
-                blocks=[TextBlock(text=f"Farmer already investigated. {metrics}")],
+                blocks=[
+                    TextBlock(
+                        text=(
+                            "Farmer already investigated. "
+                            f"{self._format_rate_metric('delivery_rate', metrics, 'delivery_rate')}, "
+                            f"{self._format_rate_metric('on_time_delivery_rate', metrics, 'on_time_delivery_rate')}, "
+                            f"partial_delivery_rate={metrics['partial_delivery_rate']:.2f}, "
+                            f"contract_coverage={metrics['contract_coverage']:.2f}, "
+                            f"recent_cash_ratio={metrics['recent_cash_ratio']:.2f}, "
+                            f"recent_default_flag={metrics['recent_default_flag']}."
+                        )
+                    )
+                ],
                 reward=0.0,
                 finished=False,
             )
@@ -749,8 +917,8 @@ class MiniCoffeeEnv(Environment):
                 TextBlock(
                     text=(
                         f"Investigation complete for {farmer_id}. "
-                        f"delivery_rate={metrics['delivery_rate']:.2f}, "
-                        f"on_time_delivery_rate={metrics['on_time_delivery_rate']:.2f}, "
+                        f"{self._format_rate_metric('delivery_rate', metrics, 'delivery_rate')}, "
+                        f"{self._format_rate_metric('on_time_delivery_rate', metrics, 'on_time_delivery_rate')}, "
                         f"partial_delivery_rate={metrics['partial_delivery_rate']:.2f}, "
                         f"contract_coverage={metrics['contract_coverage']:.2f}, "
                         f"recent_cash_ratio={metrics['recent_cash_ratio']:.2f}, "
@@ -1029,6 +1197,41 @@ class MiniCoffeeEnv(Environment):
         )
         self.event_logger.close()
         return ToolOutput(blocks=[TextBlock(text="\n".join(lines))], reward=reward, finished=True)
+
+    @tool
+    def debug_set_seed(self, params: DebugSetSeedInput) -> ToolOutput:
+        """[calibration harness only] Reset the whole world with a specific seed."""
+        if not ENABLE_DEBUG_TOOLS:
+            return ToolOutput(blocks=[TextBlock(text="Debug tools are disabled.")], reward=0.0, finished=False)
+        if hasattr(self, "event_logger"):
+            self.event_logger.close()
+        self._seed_override = params.seed
+        self.get_prompt()
+        return ToolOutput(
+            blocks=[TextBlock(text=f"World reset with seed {params.seed}.")],
+            reward=0.0,
+            finished=False,
+        )
+
+    @tool
+    def debug_get_true_state(self, params: NoParams) -> ToolOutput:
+        """[calibration harness only] Reveal true hidden farmer state. Never expose to LLM runs."""
+        if not ENABLE_DEBUG_TOOLS:
+            return ToolOutput(blocks=[TextBlock(text="Debug tools are disabled.")], reward=0.0, finished=False)
+        payload = {
+            farmer_id: {
+                "fulfillment_reliability": farmer["fulfillment_reliability"],
+                "cash": round(farmer["cash"], 2),
+                "short_term_obligations": farmer["short_term_obligations"],
+                "defaulted": farmer["defaulted"],
+            }
+            for farmer_id, farmer in self.farmers.items()
+        }
+        return ToolOutput(
+            blocks=[TextBlock(text=json.dumps(payload))],
+            reward=0.0,
+            finished=False,
+        )
 
 
 if __name__ == "__main__":

@@ -93,6 +93,7 @@ def run_strategy(env, name: str, strategy_fn: StrategyFn) -> dict[str, float]:
 
     metrics = _parse_final_metrics(final_text)
     metrics["name"] = name
+    metrics["primary_metric"] = metrics.get("profit", 0.0)
     return metrics
 
 
@@ -108,10 +109,11 @@ def main() -> None:
         env = client.environment("minicoffeeenv")
         results = [run_strategy(env, name, fn) for name, fn in strategies]
 
-        print("strategy,profit,final_value,reward,investigation_spend,direct_spend,trader_spend")
+        print("strategy,primary_metric,profit,final_value,reward,investigation_spend,direct_spend,trader_spend")
         for row in results:
             print(
-                f"{row['name']},{row.get('profit', 0.0):.2f},{row.get('final_value', 0.0):.2f},"
+                f"{row['name']},{row.get('primary_metric', 0.0):.2f},{row.get('profit', 0.0):.2f},"
+                f"{row.get('final_value', 0.0):.2f},"
                 f"{row.get('reward', 0.0):.4f},{row.get('investigation_spend', 0.0):.2f},"
                 f"{row.get('direct_spend', 0.0):.2f},{row.get('trader_spend', 0.0):.2f}"
             )
