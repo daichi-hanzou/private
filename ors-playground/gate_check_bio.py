@@ -173,6 +173,18 @@ class BlindPolicy(BasePolicy):
         return sorted(obs.offers, key=lambda f: obs.offers[f][item])
 
 
+class BlindExpensivePolicy(BasePolicy):
+    """Buy public offers from highest price to lowest without investigation.
+
+    Calibration check for whether a simple "expensive means good" public rule
+    can approach Oracle performance.
+    """
+    name = "blind_expensive"
+
+    def rank_farmers(self, obs, item):
+        return sorted(obs.offers, key=lambda f: obs.offers[f][item], reverse=True)
+
+
 class InvestigatorPolicy(BasePolicy):
     """初日に安値上位k軒を有料調査し、価格÷推定信頼度で選ぶ。"""
     name = "investigator"
@@ -243,7 +255,7 @@ def main() -> None:
     args = parser.parse_args()
 
     client = ORS(base_url=BASE_URL)
-    policies = [BlindPolicy, InvestigatorPolicy, OraclePolicy]
+    policies = [BlindPolicy, BlindExpensivePolicy, InvestigatorPolicy, OraclePolicy]
     rows: list[dict] = []
 
     try:
