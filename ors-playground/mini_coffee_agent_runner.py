@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -22,8 +23,10 @@ AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "20"))
 FARMER_IDS = list(FARMER_PROFILES)
-MAX_TURNS = 60
-AUTO_FINISH_MARKER = "All days are complete. Call finish_episode."
+MAX_TURNS = 90
+AUTO_FINISH_MARKER = "horizon is complete. Call finish_episode."
+# Frozen for the v2 calibration. Changing this hint changes the LLM treatment
+# and requires rerunning robot calibration and LLM smoke comparisons.
 STRATEGY_HINT = (
     "Balance cheap but risky direct procurement against immediate trader inventory. "
     "Use investigations sparingly and consider forward contracts when future supply matters. "
@@ -148,10 +151,27 @@ OPENAI_TOOL_SCHEMAS = [
 assert all(not tool["name"].startswith("debug_") for tool in TOOL_SCHEMAS)
 assert all(not tool["function"]["name"].startswith("debug_") for tool in OPENAI_TOOL_SCHEMAS)
 
+PROMPT_DAYS_RE = re.compile(r"\bfor\s+(\d+)\s+days\b", re.IGNORECASE)
+
 
 def _call_ors_tool(session, tool_name: str, arguments: dict) -> tuple[str, bool, float]:
     result = session.call_tool(tool_name, arguments)
     return "\n".join(block.text for block in result.blocks), result.finished, result.reward
+
+
+def _prompt_total_days(prompt_text: str) -> int:
+    match = PROMPT_DAYS_RE.search(prompt_text)
+    if not match:
+        raise RuntimeError("Could not find the episode horizon in the environment prompt.")
+    return int(match.group(1))
+
+
+def _validate_prompt_total_days(prompt_text: str) -> None:
+    prompt_days = _prompt_total_days(prompt_text)
+    if prompt_days != TOTAL_DAYS:
+        raise RuntimeError(
+            f"Prompt horizon mismatch: runner TOTAL_DAYS={TOTAL_DAYS}, prompt says {prompt_days} days."
+        )
 
 
 def _print_llm_note(text: str) -> None:
@@ -184,6 +204,44 @@ def _auto_continue_after_no_tool_call(session, turn: int) -> tuple[str, bool, fl
     print(finish_text)
     combined = f"{result_text}\n\n{finish_text}"
     return combined, finished, reward
+
+
+def _force_finish_after_max_turns(session, agent_logger) -> float:
+    final_reward = 0.0
+    for step in range(1, TOTAL_DAYS + 2):
+        result_text, finished, reward = _call_ors_tool(session, "advance_day", {})
+        print(f"[AUTO] max_turns cleanup advance_day step {step}")
+        print(result_text)
+        agent_logger.emit(
+            "tool_result",
+            turn=MAX_TURNS,
+            tool="advance_day",
+            tool_call_id=f"max-turns-advance-{step}",
+            result=result_text,
+            finished=finished,
+            reward=reward,
+            reason="max_turns",
+        )
+        final_reward = reward
+        if finished:
+            return final_reward
+        if AUTO_FINISH_MARKER in result_text:
+            break
+
+    finish_text, finished, reward = _call_ors_tool(session, "finish_episode", {})
+    print("[AUTO] max_turns cleanup finish_episode")
+    print(finish_text)
+    agent_logger.emit(
+        "tool_result",
+        turn=MAX_TURNS,
+        tool="finish_episode",
+        tool_call_id="max-turns-finish",
+        result=finish_text,
+        finished=finished,
+        reward=reward,
+        reason="max_turns",
+    )
+    return reward
 
 
 def _build_initial_messages(prompt_text: str) -> list[dict]:
@@ -232,7 +290,6 @@ def _azure_openai_client():
             credential,
             "https://cognitiveservices.azure.com/.default",
         )
-        kwargs["_enforce_credentials"] = False
     elif bearer_token:
         kwargs["azure_ad_token"] = bearer_token
     elif api_key:
@@ -255,6 +312,7 @@ def _run_agent_anthropic(session, prompt_text: str) -> float:
         provider="anthropic",
         model=ANTHROPIC_MODEL,
         total_days=TOTAL_DAYS,
+        max_turns=MAX_TURNS,
         prompt=prompt_text,
         strategy_hint=STRATEGY_HINT,
     )
@@ -336,6 +394,8 @@ def _run_agent_anthropic(session, prompt_text: str) -> float:
 
             messages.append({"role": "user", "content": tool_results})
 
+        final_reward = _force_finish_after_max_turns(session, agent_logger)
+        agent_logger.emit("agent_stop", turn=MAX_TURNS, reason="max_turns", final_reward=final_reward)
         return final_reward
     finally:
         agent_logger.close()
@@ -349,6 +409,7 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
         provider="azure_openai",
         deployment=deployment,
         total_days=TOTAL_DAYS,
+        max_turns=MAX_TURNS,
         prompt=prompt_text,
         strategy_hint=STRATEGY_HINT,
     )
@@ -456,6 +517,8 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
                     agent_logger.emit("agent_stop", turn=turn, reason="finished", final_reward=final_reward)
                     return final_reward
 
+        final_reward = _force_finish_after_max_turns(session, agent_logger)
+        agent_logger.emit("agent_stop", turn=MAX_TURNS, reason="max_turns", final_reward=final_reward)
         return final_reward
     finally:
         agent_logger.close()
@@ -469,6 +532,7 @@ def run_agent() -> float:
 
         with env.session(task=task) as session:
             prompt_text = "\n".join(block.text for block in session.get_prompt())
+            _validate_prompt_total_days(prompt_text)
             if LLM_PROVIDER == "anthropic":
                 return _run_agent_anthropic(session, prompt_text)
             if LLM_PROVIDER in {"azure_openai", "azure-openai"}:

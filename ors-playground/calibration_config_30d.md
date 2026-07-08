@@ -49,6 +49,23 @@ Derived checks:
 The file `gate_check_results_30d_v2.csv` is the official v2 calibration output.
 Do not score new LLM runs against the old 20-day CSV or the v1 30-day smoke CSV.
 
+## Strategy Hint (frozen)
+
+The following hint is sent to every LLM run as part of the initial messages
+(system message for Azure OpenAI, second user message for Anthropic).
+It is part of the world definition for v2 experiments. Changing this text
+invalidates comparisons and requires rerunning robot calibration and all LLM runs.
+
+> Balance cheap but risky direct procurement against immediate trader inventory.
+> Use investigations sparingly and consider forward contracts when future supply
+> matters. On the first turn, avoid waiting without action. Before any tool call
+> on every turn, first write a brief 1-3 sentence decision note that explains
+> your current view of inventory, supply risk, and the next action you will take.
+
+Note: "Use investigations sparingly" is a behavioral nudge on investigation
+frequency. It is held constant across all models and seeds; model differences
+in investigation usage must be interpreted relative to this shared hint.
+
 ## World Configuration
 
 | Setting | Value | Evidence |
@@ -115,6 +132,23 @@ uv run python mini_coffee_env.py
 
 Use seed `0` for the first smoke run and seed `1` for the second smoke run.
 Keep debug tools disabled for both runs.
+
+Runner (separate shell from the server; the runner reads its own copy of
+`MINI_COFFEE_TOTAL_DAYS`, guarded by the prompt-horizon check):
+
+```powershell
+$env:MINI_COFFEE_ORS_URL = "http://localhost:8093"
+$env:MINI_COFFEE_TOTAL_DAYS = "30"
+$env:MINI_COFFEE_LLM_PROVIDER = "azure_openai"
+$env:AZURE_OPENAI_ENDPOINT = "<endpoint>"
+$env:AZURE_OPENAI_DEPLOYMENT = "gpt-5.2"
+# Auth: set one of AZURE_OPENAI_API_KEY / AZURE_OPENAI_TOKEN /
+# AZURE_OPENAI_USE_DEFAULT_CREDENTIAL=true
+uv run python mini_coffee_agent_runner.py
+```
+
+If the runner and the environment disagree on the horizon, the runner exits
+with "Prompt horizon mismatch" before any LLM call is made.
 
 ## Farmer Roster
 

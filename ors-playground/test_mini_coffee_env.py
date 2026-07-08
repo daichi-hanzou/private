@@ -123,6 +123,19 @@ class MiniCoffeeEnvTest(unittest.TestCase):
         self.assertEqual(first_history, second_history)
         self.assertEqual(first.demand_series, second.demand_series)
 
+    def test_auto_finish_marker_matches_env_output(self):
+        """Runner AUTO_FINISH_MARKER must match the final-day env output."""
+        from mini_coffee_agent_runner import AUTO_FINISH_MARKER
+
+        env = make_env(seed=3, warm_days=0)
+        env._init_event_logger()
+        text = ""
+        for _ in range(TOTAL_DAYS):
+            text = env.advance_day(NoParams()).blocks[0].text
+        env.event_logger.close()
+
+        self.assertIn(AUTO_FINISH_MARKER, text)
+
     def test_prompt_uses_total_days(self):
         env = MiniCoffeeEnv()
         prompt = env.get_prompt()[0].text
