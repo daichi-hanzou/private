@@ -6,11 +6,13 @@ from mini_coffee_env import (
     INITIAL_CASH,
     INITIAL_ROASTER_INVENTORY,
     ITEMS,
+    INVESTIGATION_COST,
     DebugSetSeedInput,
     InvestigateFarmerInput,
     MiniCoffeeEnv,
     NoParams,
     TOTAL_DAYS,
+    WARM_START_DAYS,
 )
 import mini_coffee_env
 
@@ -127,6 +129,8 @@ class MiniCoffeeEnvTest(unittest.TestCase):
 
         self.assertIn(str(TOTAL_DAYS), prompt)
         self.assertIn(f"for {TOTAL_DAYS} days", prompt)
+        self.assertIn(f"${INVESTIGATION_COST:.0f}", prompt)
+        self.assertIn(f"{WARM_START_DAYS} days", prompt)
 
     def test_debug_seed_reset_is_guarded_and_reproducible(self):
         env = MiniCoffeeEnv()

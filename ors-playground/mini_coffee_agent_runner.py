@@ -20,7 +20,7 @@ LLM_PROVIDER = os.getenv("MINI_COFFEE_LLM_PROVIDER", "anthropic").lower()
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
-TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "7"))
+TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "20"))
 FARMER_IDS = list(FARMER_PROFILES)
 MAX_TURNS = 60
 AUTO_FINISH_MARKER = "All days are complete. Call finish_episode."
@@ -144,6 +144,9 @@ OPENAI_TOOL_SCHEMAS = [
     }
     for tool in TOOL_SCHEMAS
 ]
+
+assert all(not tool["name"].startswith("debug_") for tool in TOOL_SCHEMAS)
+assert all(not tool["function"]["name"].startswith("debug_") for tool in OPENAI_TOOL_SCHEMAS)
 
 
 def _call_ors_tool(session, tool_name: str, arguments: dict) -> tuple[str, bool, float]:

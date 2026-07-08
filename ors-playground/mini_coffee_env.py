@@ -20,11 +20,12 @@ load_dotenv(Path(__file__).with_name(".env"))
 INITIAL_CASH = 1_000.0
 TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "20"))
 DEFAULT_SEED = int(os.getenv("MINI_COFFEE_SEED", "0"))
+RUN_SEED = os.getenv("MINI_COFFEE_RUN_SEED")
 WARM_START_DAYS = int(os.getenv("MINI_COFFEE_WARM_START_DAYS", "90"))
 ENABLE_DEBUG_TOOLS = os.getenv("MINI_COFFEE_DEBUG_TOOLS", "0") == "1"
 HOLDING_COST_PER_KG = 0.5
 SALVAGE_DISCOUNT = 0.5
-INVESTIGATION_COST = 15.0
+INVESTIGATION_COST = 10.0
 TRADER_MARGIN = {"standard": 1.8, "premium": 2.2}
 TERMINAL_OPEN_CONTRACT_RECOVERY = 0.35
 INITIAL_ROASTER_INVENTORY = {"standard": 8, "premium": 3}
@@ -266,7 +267,7 @@ class MiniCoffeeEnv(Environment):
 
     def get_prompt(self):
         self.total_days = TOTAL_DAYS
-        self.seed = getattr(self, "_seed_override", DEFAULT_SEED)
+        self.seed = getattr(self, "_seed_override", int(RUN_SEED) if RUN_SEED is not None else DEFAULT_SEED)
         self._init_rngs(self.seed)
         self._init_demand_series()
         self.day_index = 0
@@ -331,7 +332,8 @@ class MiniCoffeeEnv(Environment):
             "2. Direct forward contract with a farmer: reserve future delivery, but fulfillment is uncertain.",
             "3. Buy from the trader: immediate inventory transfer from trader stock at a markup.",
             "",
-            "Farmer internal state is hidden by default. You can investigate a farmer to reveal ledger-based metrics.",
+            f"Farmer internal state is hidden by default. Investigating a farmer costs ${INVESTIGATION_COST:.0f} "
+            f"and reveals {WARM_START_DAYS} days of ledger-based fulfillment metrics with sample counts.",
             "The trader already sees the full farmer ledger and maintains its own inbound contracts and inventory.",
             "You do not see future harvest schedules, contract break probabilities, or future trader inbound deliveries.",
             "On early turns, do not wait passively. Take at least one concrete action such as viewing state, investigating, procuring, or repricing.",
@@ -348,7 +350,7 @@ class MiniCoffeeEnv(Environment):
             "",
             "Tools available:",
             "  view_state             - inspect cash, inventory, offers, trader inventory, and history",
-            "  investigate_farmer     - pay to reveal one farmer's fulfillment and liquidity metrics",
+            f"  investigate_farmer     - pay ${INVESTIGATION_COST:.0f} to reveal one farmer's {WARM_START_DAYS}-day fulfillment and liquidity metrics",
             "  buy_spot_direct        - buy spot from a farmer for next-step delivery",
             "  create_forward_contract - lock a future direct delivery day with a farmer",
             "  buy_from_trader        - buy immediate guaranteed inventory from trader stock",
