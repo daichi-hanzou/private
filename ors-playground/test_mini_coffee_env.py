@@ -1,3 +1,4 @@
+import json
 import unittest
 from itertools import count
 
@@ -126,11 +127,37 @@ class MiniCoffeeEnvTest(unittest.TestCase):
         env = MiniCoffeeEnv()
         prompt = env.get_prompt()[0].text
         env.event_logger.close()
+        with open(env.log_path, encoding="utf-8") as fh:
+            run_start = json.loads(fh.readline())
 
         self.assertIn(str(TOTAL_DAYS), prompt)
         self.assertIn(f"for {TOTAL_DAYS} days", prompt)
         self.assertIn(f"${INVESTIGATION_COST:.0f}", prompt)
         self.assertIn(f"{WARM_START_DAYS} days", prompt)
+        self.assertEqual(run_start["type"], "run_start")
+        self.assertEqual(run_start["runtime_config"]["total_days"], TOTAL_DAYS)
+        self.assertEqual(run_start["runtime_config"]["investigation_cost"], INVESTIGATION_COST)
+        self.assertEqual(run_start["runtime_config"]["warm_start_days"], WARM_START_DAYS)
+        self.assertIn("disable_incentive", run_start["runtime_config"])
+        self.assertIn("git_commit", run_start["runtime_config"])
+
+    def test_price_does_not_fully_reveal_reliability(self):
+        ranked = sorted(
+            FARMER_PROFILES.items(),
+            key=lambda item: sum(item[1]["spot_prices"]["standard"]) / len(item[1]["spot_prices"]["standard"]),
+        )
+        midpoint = len(ranked) // 2
+        low_price_half = ranked[:midpoint]
+        high_price_half = ranked[midpoint:]
+
+        self.assertTrue(
+            any(profile["fulfillment_reliability"] >= 0.9 for _, profile in low_price_half),
+            "Expected at least one high-reliability farmer in the low-price half.",
+        )
+        self.assertTrue(
+            any(profile["fulfillment_reliability"] <= 0.6 for _, profile in high_price_half),
+            "Expected at least one low-reliability farmer in the high-price half.",
+        )
 
     def test_debug_seed_reset_is_guarded_and_reproducible(self):
         env = MiniCoffeeEnv()

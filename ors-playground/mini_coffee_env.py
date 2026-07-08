@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
 from itertools import count
 from pathlib import Path
 from uuid import uuid4
@@ -155,7 +156,7 @@ FARMER_PROFILES = {
     },
     "loma_dorada": {
         "name": "Loma Dorada Estate",
-        "public_note": "Premium microlot specialist with strong cup scores and concentrated harvest windows.",
+        "public_note": "Prestigious estate with formal awards and concentrated premium harvest windows.",
         "spot_prices": {
             "standard": [4.5, 4.5, 4.8, 4.9, 5.1, 5.2, 5.2],
             "premium": [6.5, 6.6, 7.0, 7.1, 7.4, 7.7, 7.7],
@@ -166,7 +167,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 95.0,
         "short_term_obligations": 150.0,
-        "fulfillment_reliability": 0.8,
+        "fulfillment_reliability": 0.55,
     },
     "norte_azul": {
         "name": "Norte Azul Cooperative",
@@ -185,7 +186,7 @@ FARMER_PROFILES = {
     },
     "rainforest_direct": {
         "name": "Rainforest Direct",
-        "public_note": "Large volume seller with opaque subcontracting and mixed delivery history.",
+        "public_note": "Young direct-trade venture with limited public track record and thin market coverage.",
         "spot_prices": {
             "standard": [3.6, 3.6, 3.8, 4.0, 4.2, 4.3, 4.3],
             "premium": [6.4, 6.4, 6.7, 6.9, 7.1, 7.3, 7.3],
@@ -196,7 +197,7 @@ FARMER_PROFILES = {
         },
         "starting_cash": 85.0,
         "short_term_obligations": 180.0,
-        "fulfillment_reliability": 0.55,
+        "fulfillment_reliability": 0.92,
     },
 }
 
@@ -361,9 +362,35 @@ class MiniCoffeeEnv(Environment):
         self.event_logger.emit(
             "run_start",
             run_id=self.run_id,
+            runtime_config=self._runtime_config_snapshot(),
             snapshot=self._snapshot(),
         )
         return [TextBlock(text="\n".join(lines))]
+
+    def _runtime_config_snapshot(self) -> dict:
+        return {
+            "total_days": TOTAL_DAYS,
+            "disable_incentive": os.getenv("MINI_COFFEE_DISABLE_INCENTIVE", "0"),
+            "investigation_cost": INVESTIGATION_COST,
+            "warm_start_days": WARM_START_DAYS,
+            "debug_tools": ENABLE_DEBUG_TOOLS,
+            "seed": self.seed,
+            "git_commit": self._git_commit_hash(),
+        }
+
+    def _git_commit_hash(self) -> str:
+        env_commit = os.getenv("MINI_COFFEE_GIT_COMMIT")
+        if env_commit:
+            return env_commit
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path(__file__).resolve().parent,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            return "unknown"
 
     def _init_rngs(self, seed: int) -> None:
         seed_source = random.Random(seed)
