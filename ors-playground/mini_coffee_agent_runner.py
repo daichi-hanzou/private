@@ -19,6 +19,7 @@ load_dotenv(Path(__file__).with_name(".env"))
 ORS_BASE_URL = os.getenv("MINI_COFFEE_ORS_URL", "http://localhost:8082")
 LLM_PROVIDER = os.getenv("MINI_COFFEE_LLM_PROVIDER", "anthropic").lower()
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "20"))
@@ -304,6 +305,22 @@ def _azure_openai_client():
     return AzureOpenAI(**kwargs), deployment
 
 
+def _openai_client():
+    from openai import OpenAI
+
+    kwargs = {"api_key": _require_env("OPENAI_API_KEY")}
+    base_url = os.getenv("OPENAI_BASE_URL")
+    organization = os.getenv("OPENAI_ORG_ID")
+    project = os.getenv("OPENAI_PROJECT")
+    if base_url:
+        kwargs["base_url"] = base_url
+    if organization:
+        kwargs["organization"] = organization
+    if project:
+        kwargs["project"] = project
+    return OpenAI(**kwargs), OPENAI_MODEL
+
+
 def _run_agent_anthropic(session, prompt_text: str) -> float:
     llm = _anthropic_client()
     agent_logger = _new_agent_logger("anthropic", ANTHROPIC_MODEL)
@@ -401,18 +418,19 @@ def _run_agent_anthropic(session, prompt_text: str) -> float:
         agent_logger.close()
 
 
-def _run_agent_azure_openai(session, prompt_text: str) -> float:
-    client, deployment = _azure_openai_client()
-    agent_logger = _new_agent_logger("azure_openai", deployment)
-    agent_logger.emit(
-        "agent_start",
-        provider="azure_openai",
-        deployment=deployment,
-        total_days=TOTAL_DAYS,
-        max_turns=MAX_TURNS,
-        prompt=prompt_text,
-        strategy_hint=STRATEGY_HINT,
-    )
+def _run_agent_openai_chat(session, prompt_text: str, client, model: str, provider: str) -> float:
+    agent_logger = _new_agent_logger(provider, model)
+    start_event = {
+        "provider": provider,
+        "model": model,
+        "total_days": TOTAL_DAYS,
+        "max_turns": MAX_TURNS,
+        "prompt": prompt_text,
+        "strategy_hint": STRATEGY_HINT,
+    }
+    if provider == "azure_openai":
+        start_event["deployment"] = model
+    agent_logger.emit("agent_start", **start_event)
     messages = [
         {"role": "system", "content": STRATEGY_HINT},
         {"role": "user", "content": prompt_text},
@@ -423,7 +441,7 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
         for turn in range(1, MAX_TURNS + 1):
             print(f"\nTurn {turn}")
             response = client.chat.completions.create(
-                model=deployment,
+                model=model,
                 messages=messages,
                 tools=OPENAI_TOOL_SCHEMAS,
                 tool_choice="auto",
@@ -524,6 +542,16 @@ def _run_agent_azure_openai(session, prompt_text: str) -> float:
         agent_logger.close()
 
 
+def _run_agent_openai(session, prompt_text: str) -> float:
+    client, model = _openai_client()
+    return _run_agent_openai_chat(session, prompt_text, client, model, "openai")
+
+
+def _run_agent_azure_openai(session, prompt_text: str) -> float:
+    client, deployment = _azure_openai_client()
+    return _run_agent_openai_chat(session, prompt_text, client, deployment, "azure_openai")
+
+
 def run_agent() -> float:
     client = ORS(base_url=ORS_BASE_URL)
     try:
@@ -535,11 +563,13 @@ def run_agent() -> float:
             _validate_prompt_total_days(prompt_text)
             if LLM_PROVIDER == "anthropic":
                 return _run_agent_anthropic(session, prompt_text)
+            if LLM_PROVIDER == "openai":
+                return _run_agent_openai(session, prompt_text)
             if LLM_PROVIDER in {"azure_openai", "azure-openai"}:
                 return _run_agent_azure_openai(session, prompt_text)
 
             print(
-                "ERROR: MINI_COFFEE_LLM_PROVIDER must be 'anthropic' or 'azure_openai'.",
+                "ERROR: MINI_COFFEE_LLM_PROVIDER must be 'anthropic', 'openai', or 'azure_openai'.",
                 file=sys.stderr,
             )
             sys.exit(1)

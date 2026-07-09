@@ -8,12 +8,19 @@ from mini_coffee_env import (
     INITIAL_ROASTER_INVENTORY,
     ITEMS,
     INVESTIGATION_COST,
+    DEMAND_SPIKE_DAY_MAX,
+    DEMAND_SPIKE_DAY_MIN,
+    DEMAND_SPIKE_MIN_GAP,
+    FORECAST_FALSE_POSITIVES_PER_EPISODE,
+    FORECAST_TRUE_POSITIVE_RATE,
     DebugSetSeedInput,
     InvestigateFarmerInput,
+    BuyTraderInput,
     MiniCoffeeEnv,
     NoParams,
     TOTAL_DAYS,
     WARM_START_DAYS,
+    TRADER_EMERGENCY_POINT,
 )
 import mini_coffee_env
 
@@ -41,6 +48,9 @@ def make_env(seed: int = 0, warm_days: int = 90) -> MiniCoffeeEnv:
         "direct_spend": 0.0,
         "trader_spend": 0.0,
     }
+    env.last_shortfall_event = False
+    env.spike_stockout_days = 0
+    env.spike_days_elapsed = 0
     env.farmers = {}
     for farmer_id, profile in FARMER_PROFILES.items():
         env.farmers[farmer_id] = {
@@ -122,6 +132,58 @@ class MiniCoffeeEnvTest(unittest.TestCase):
 
         self.assertEqual(first_history, second_history)
         self.assertEqual(first.demand_series, second.demand_series)
+        self.assertEqual(first.spike_days, second.spike_days)
+        self.assertEqual(first.forecast_days, second.forecast_days)
+
+    def test_demand_spike_days_are_in_range_and_spaced(self):
+        env = make_env(seed=23)
+
+        self.assertEqual(len(env.spike_days), 2)
+        self.assertTrue(all(DEMAND_SPIKE_DAY_MIN <= day <= min(DEMAND_SPIKE_DAY_MAX, TOTAL_DAYS) for day in env.spike_days))
+        self.assertGreaterEqual(abs(env.spike_days[1] - env.spike_days[0]), DEMAND_SPIKE_MIN_GAP)
+
+    def test_forecast_signal_distribution_is_reasonable(self):
+        episodes = 1000
+        true_positive_spikes = 0
+        total_spikes = 0
+        false_positive_count = 0
+        for seed in range(episodes):
+            env = make_env(seed=seed, warm_days=0)
+            for spike_day in env.spike_days:
+                total_spikes += 1
+                if any(spike_day - lead in env.true_positive_forecast_days for lead in mini_coffee_env.FORECAST_LEAD_DAYS):
+                    true_positive_spikes += 1
+            false_positive_count += len(env.false_positive_forecast_days)
+
+        true_positive_rate = true_positive_spikes / total_spikes
+        false_positive_mean = false_positive_count / episodes
+        self.assertGreaterEqual(true_positive_rate, FORECAST_TRUE_POSITIVE_RATE - 0.05)
+        self.assertLessEqual(true_positive_rate, FORECAST_TRUE_POSITIVE_RATE + 0.05)
+        self.assertEqual(false_positive_mean, FORECAST_FALSE_POSITIVES_PER_EPISODE)
+
+    def test_trader_purchase_log_includes_forecast_context(self):
+        env = make_env(seed=5, warm_days=0)
+        env._init_event_logger()
+        env.trader["inventory"]["standard"] = 10
+        env.cash = 500.0
+        env.day_index = next(iter(env.forecast_days)) - 1 if env.forecast_days else 0
+        env.inventory["standard"] = TRADER_EMERGENCY_POINT["standard"] + 3
+        env.last_shortfall_event = True
+
+        env.buy_from_trader(BuyTraderInput(item_id="standard", quantity_kg=1))
+        env.event_logger.close()
+
+        with open(env.log_path, encoding="utf-8") as fh:
+            events = [json.loads(line) for line in fh]
+        purchase = next(event for event in events if event.get("tool") == "buy_from_trader")
+        self.assertIn("inventory_at_purchase", purchase)
+        self.assertIn("active_forecast", purchase)
+        self.assertIn("days_to_next_spike", purchase)
+        self.assertIn("after_shortfall_event", purchase)
+        self.assertIn("proactive_purchase", purchase)
+        self.assertIn("reactive_purchase", purchase)
+        self.assertTrue(purchase["active_forecast"])
+        self.assertTrue(purchase["after_shortfall_event"])
 
     def test_auto_finish_marker_matches_env_output(self):
         """Runner AUTO_FINISH_MARKER must match the final-day env output."""

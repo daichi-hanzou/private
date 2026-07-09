@@ -43,6 +43,8 @@ OVERBOOK_FACTOR = 1.5                              # 未達を見込んだ発注
 INVESTIGATE_BUDGET = 3                             # Investigatorが初日に調べる軒数
 UNKNOWN_RELIABILITY_PRIOR = 0.70                   # 開示情報がない農園の事前推定値
 MIN_GAP_FOR_RATIO = 0.10                           # 分母がBlind利益の10%未満なら捕捉率を出さない
+SPIKE_PRESTOCK = {"standard": 22, "premium": 10}   # Planner-only proactive trader prestock target
+MARKET_BULLETIN_TEXT = "Market bulletin"
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,7 @@ class Observation:
     trader_price: dict = field(default_factory=dict)       # item -> price
     trader_stock: dict = field(default_factory=dict)       # item -> kg
     inbound: dict = field(default_factory=dict)            # item -> remaining kg (open contracts)
+    forecast_active: bool = False
 
 
 RE_DAY = re.compile(r"^Day (\d+) of (\d+)")
@@ -71,6 +74,7 @@ RE_DELIV_RATE = re.compile(r"delivery_rate=([\d.]+)")
 
 def parse_state(text: str) -> Observation:
     obs = Observation(inventory={}, offers={}, trader_price={}, trader_stock={}, inbound={"standard": 0, "premium": 0})
+    obs.forecast_active = MARKET_BULLETIN_TEXT in text
     in_offers = False
     for line in text.splitlines():
         if m := RE_DAY.match(line):
@@ -114,6 +118,11 @@ def parse_final(text: str) -> dict:
             metrics["trader_spend"] = float(line.split("$", 1)[1])
         elif line.startswith("Direct spend: $"):
             metrics["direct_spend"] = float(line.split("$", 1)[1])
+        elif line.startswith("Spike stockout days: "):
+            numerator, denominator = line.split(":", 1)[1].strip().split("/", 1)
+            metrics["spike_stockout_days"] = int(numerator)
+            metrics["spike_days_elapsed"] = int(denominator)
+            metrics["spike_stockout_rate"] = int(numerator) / max(int(denominator), 1)
     return metrics
 
 
@@ -222,6 +231,23 @@ class OraclePolicy(BasePolicy):
         return sorted(obs.offers, key=score)
 
 
+class PlannerPolicy(OraclePolicy):
+    """Oracle farmer selection plus proactive trader prestocking on market bulletins."""
+    name = "planner"
+
+    def act(self, call, obs):
+        if obs.forecast_active:
+            for item in ("standard", "premium"):
+                deficit = SPIKE_PRESTOCK[item] - obs.inventory.get(item, 0)
+                qty = min(deficit, obs.trader_stock.get(item, 0))
+                if qty >= 1 and obs.trader_price.get(item, 99.0) * qty <= obs.cash:
+                    call("buy_from_trader", {"item_id": item, "quantity_kg": qty})
+                    obs.cash -= obs.trader_price[item] * qty
+                    obs.inventory[item] = obs.inventory.get(item, 0) + qty
+                    obs.trader_stock[item] = obs.trader_stock.get(item, 0) - qty
+        super().act(call, obs)
+
+
 # ---------------------------------------------------------------------------
 # 実行ループ
 # ---------------------------------------------------------------------------
@@ -255,7 +281,7 @@ def main() -> None:
     args = parser.parse_args()
 
     client = ORS(base_url=BASE_URL)
-    policies = [BlindPolicy, BlindExpensivePolicy, InvestigatorPolicy, OraclePolicy]
+    policies = [BlindPolicy, BlindExpensivePolicy, InvestigatorPolicy, OraclePolicy, PlannerPolicy]
     rows: list[dict] = []
 
     try:
@@ -271,7 +297,18 @@ def main() -> None:
 
     # --- 集計 ---
     with open(args.csv, "w") as f:
-        keys = ["policy", "seed", "profit", "final_value", "investigation_spend", "direct_spend", "trader_spend"]
+        keys = [
+            "policy",
+            "seed",
+            "profit",
+            "final_value",
+            "investigation_spend",
+            "direct_spend",
+            "trader_spend",
+            "spike_stockout_days",
+            "spike_days_elapsed",
+            "spike_stockout_rate",
+        ]
         f.write(",".join(keys) + "\n")
         for row in rows:
             f.write(",".join(str(row.get(k, "")) for k in keys) + "\n")
@@ -283,17 +320,35 @@ def main() -> None:
         return mean, se
 
     blind_mean, blind_se = stats("blind")
+    expensive_mean, expensive_se = stats("blind_expensive")
     inv_mean, inv_se = stats("investigator")
     oracle_mean, oracle_se = stats("oracle")
+    planner_mean, planner_se = stats("planner")
 
     info_gap = oracle_mean - blind_mean
     gap_pct = info_gap / max(abs(blind_mean), 1.0)
 
+    def by_seed(policy: str) -> dict[int, dict]:
+        return {int(r["seed"]): r for r in rows if r["policy"] == policy}
+
+    oracle_by_seed = by_seed("oracle")
+    planner_by_seed = by_seed("planner")
+    shared_planner_seeds = sorted(set(oracle_by_seed) & set(planner_by_seed))
+    planner_wins = sum(
+        planner_by_seed[seed]["profit"] > oracle_by_seed[seed]["profit"] for seed in shared_planner_seeds
+    )
+
+    def mean_stockout_rate(policy: str) -> float:
+        vals = [r.get("spike_stockout_rate", 0.0) for r in rows if r["policy"] == policy]
+        return statistics.mean(vals) if vals else 0.0
+
     print("\n================ GATE CHECK ================")
     print(f"seeds per policy : {args.seeds}")
     print(f"Blind        profit: {blind_mean:9.2f}  (±{1.96 * blind_se:.2f})")
+    print(f"Blind expensive profit: {expensive_mean:9.2f}  (±{1.96 * expensive_se:.2f})")
     print(f"Investigator profit: {inv_mean:9.2f}  (±{1.96 * inv_se:.2f})")
     print(f"Oracle       profit: {oracle_mean:9.2f}  (±{1.96 * oracle_se:.2f})")
+    print(f"Planner      profit: {planner_mean:9.2f}  (±{1.96 * planner_se:.2f})")
     print(f"\nOracle - Blind gap : {info_gap:9.2f}  ({gap_pct:+.1%} of |Blind|)")
 
     gate1 = gap_pct >= 0.20
@@ -306,6 +361,16 @@ def main() -> None:
         gate2 = capture >= 0.5
         print(f"Investigator capture rate   : {capture:.1%}")
         print(f"GATE2 (capture >= 50%)      : {'PASS' if gate2 else 'FAIL'}")
+
+    if abs(info_gap) >= MIN_GAP_FOR_RATIO * max(abs(blind_mean), 1.0):
+        expensive_position = (expensive_mean - blind_mean) / info_gap
+        print(f"Blind expensive gap position: {expensive_position:.1%}")
+        print(f"blind_expensive (< 50%)     : {'PASS' if expensive_position < 0.5 else 'FAIL'}")
+
+    planner_gate = planner_wins >= math.ceil(0.70 * len(shared_planner_seeds))
+    print(f"GATE3 Planner > Oracle wins : {planner_wins}/{len(shared_planner_seeds)}  ({'PASS' if planner_gate else 'FAIL'})")
+    print(f"Oracle spike stockout rate  : {mean_stockout_rate('oracle'):.1%}")
+    print(f"Planner spike stockout rate : {mean_stockout_rate('planner'):.1%}")
 
     if not gate1:
         print("\n[次の一手] ギャップ不足のときの調整順:")

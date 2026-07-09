@@ -49,6 +49,66 @@ Derived checks:
 The file `gate_check_results_30d_v2.csv` is the official v2 calibration output.
 Do not score new LLM runs against the old 20-day CSV or the v1 30-day smoke CSV.
 
+## V3 Demand Spikes
+
+Created: 2026-07-09
+
+v3 changes the world by adding occasional festival demand spikes and imprecise
+market bulletins. The v2 robot scale and any v2 LLM runs are old-world records
+and must not be used to score v3 runs. Keep all v2 CSVs and logs for audit, but
+rerun robot calibration before evaluating LLM behavior in v3.
+
+Demand spike parameters:
+
+| Setting | Value |
+|---|---:|
+| Spike count per 30-day episode | `2` |
+| Spike day range | `Day 8-Day 27` |
+| Minimum distance between spikes | `5 days` |
+| Spike demand multiplier | `2.2` |
+| Forecast lead days | `3 days` and `1 day` before a forecasted spike |
+| Forecast true-positive rate | `80%` per spike |
+| False-positive bulletins | `1` per episode |
+| Bulletin text | `Market bulletin: A local festival may lift coffee demand within the next 3 days.` |
+
+The prompt body now tells LLMs that demand is usually stable but occasional
+festival days can multiply demand, and that market bulletins may give imprecise
+advance notice. `STRATEGY_HINT` remains frozen and unchanged.
+
+Trader purchase logs now include forecast context fields for post-hoc behavior
+analysis: `inventory_at_purchase`, `active_forecast`, `days_to_next_spike`, and
+`after_shortfall_event`. `proactive_purchase` and `reactive_purchase` are derived
+labels for analysis only and do not affect environment behavior.
+
+Robot calibration for v3 uses five policies:
+
+| Policy | Role |
+|---|---|
+| `blind` | Existing low-price baseline, unchanged |
+| `blind_expensive` | Existing high-price public-rule check, unchanged |
+| `investigator` | Existing paid-information baseline, unchanged |
+| `oracle` | Existing true-reliability upper bound, unchanged |
+| `planner` | New Oracle-derived policy that reacts to market bulletins by pre-stocking trader inventory |
+
+v3 gate command:
+
+```powershell
+$env:MINI_COFFEE_DEBUG_TOOLS = "1"
+$env:MINI_COFFEE_TOTAL_DAYS = "30"
+$env:MINI_COFFEE_DISABLE_INCENTIVE = "1"
+$env:ORS_PORT = "8093"
+uv run python mini_coffee_env.py
+```
+
+```powershell
+$env:MINI_COFFEE_ORS_URL = "http://localhost:8093"
+$env:MINI_COFFEE_TOTAL_DAYS = "30"
+uv run python gate_check_bio.py --seeds 100 --total-days 30 --csv gate_check_results_30d_v3.csv
+```
+
+Official v3 robot scale: to be filled after `gate_check_results_30d_v3.csv` is
+generated and reviewed.
+
 ## Strategy Hint (frozen)
 
 The following hint is sent to every LLM run as part of the initial messages

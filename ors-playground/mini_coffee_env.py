@@ -30,6 +30,16 @@ INVESTIGATION_COST = 10.0
 TRADER_MARGIN = {"standard": 1.8, "premium": 2.2}
 TERMINAL_OPEN_CONTRACT_RECOVERY = 0.35
 INITIAL_ROASTER_INVENTORY = {"standard": 8, "premium": 3}
+DEMAND_SPIKE_COUNT = 2
+DEMAND_SPIKE_DAY_MIN = 8
+DEMAND_SPIKE_DAY_MAX = 27
+DEMAND_SPIKE_MIN_GAP = 5
+DEMAND_SPIKE_MULTIPLIER = 2.2
+FORECAST_TRUE_POSITIVE_RATE = 0.8
+FORECAST_FALSE_POSITIVES_PER_EPISODE = 1
+FORECAST_LEAD_DAYS = (3, 1)
+MARKET_BULLETIN = "Market bulletin: A local festival may lift coffee demand within the next 3 days."
+TRADER_EMERGENCY_POINT = {"standard": 5, "premium": 2}
 
 ITEMS = {
     "standard": {
@@ -289,6 +299,9 @@ class MiniCoffeeEnv(Environment):
             "direct_spend": 0.0,
             "trader_spend": 0.0,
         }
+        self.last_shortfall_event = False
+        self.spike_stockout_days = 0
+        self.spike_days_elapsed = 0
 
         self.farmers = {}
         for farmer_id, profile in FARMER_PROFILES.items():
@@ -321,6 +334,9 @@ class MiniCoffeeEnv(Environment):
             "direct_spend": 0.0,
             "trader_spend": 0.0,
         }
+        self.last_shortfall_event = False
+        self.spike_stockout_days = 0
+        self.spike_days_elapsed = 0
         self._init_event_logger()
 
         lines = [
@@ -337,6 +353,8 @@ class MiniCoffeeEnv(Environment):
             f"and reveals {WARM_START_DAYS} days of ledger-based fulfillment metrics with sample counts.",
             "The trader already sees the full farmer ledger and maintains its own inbound contracts and inventory.",
             "You do not see future harvest schedules, contract break probabilities, or future trader inbound deliveries.",
+            "Demand is usually stable, but occasional festival days can multiply demand.",
+            "Market bulletins may give imprecise advance notice of such days.",
             "On early turns, do not wait passively. Take at least one concrete action such as viewing state, investigating, procuring, or repricing.",
             "",
             "Initial public farmer directory:",
@@ -375,6 +393,16 @@ class MiniCoffeeEnv(Environment):
             "warm_start_days": WARM_START_DAYS,
             "debug_tools": ENABLE_DEBUG_TOOLS,
             "seed": self.seed,
+            "demand_spike": {
+                "count": DEMAND_SPIKE_COUNT,
+                "day_min": DEMAND_SPIKE_DAY_MIN,
+                "day_max": DEMAND_SPIKE_DAY_MAX,
+                "min_gap": DEMAND_SPIKE_MIN_GAP,
+                "multiplier": DEMAND_SPIKE_MULTIPLIER,
+                "forecast_true_positive_rate": FORECAST_TRUE_POSITIVE_RATE,
+                "forecast_false_positives_per_episode": FORECAST_FALSE_POSITIVES_PER_EPISODE,
+                "forecast_lead_days": FORECAST_LEAD_DAYS,
+            },
             "git_commit": self._git_commit_hash(),
         }
 
@@ -397,6 +425,7 @@ class MiniCoffeeEnv(Environment):
         self.rng_demand = random.Random(seed_source.randrange(2**63))
         self.rng_harvest = random.Random(seed_source.randrange(2**63))
         self.rng_fulfillment = random.Random(seed_source.randrange(2**63))
+        self.rng_spike = random.Random(seed_source.randrange(2**63))
 
     def _init_demand_series(self) -> None:
         self.demand_series = {
@@ -406,6 +435,51 @@ class MiniCoffeeEnv(Environment):
             ]
             for item_id in ITEMS
         }
+        self._init_demand_spikes()
+
+    def _init_demand_spikes(self) -> None:
+        upper_day = min(DEMAND_SPIKE_DAY_MAX, TOTAL_DAYS)
+        candidates = list(range(DEMAND_SPIKE_DAY_MIN, upper_day + 1))
+        valid_pairs = [
+            (a, b)
+            for idx, a in enumerate(candidates)
+            for b in candidates[idx + 1 :]
+            if b - a >= DEMAND_SPIKE_MIN_GAP
+        ]
+        if DEMAND_SPIKE_COUNT != 2 or not valid_pairs:
+            self.spike_days = []
+            self.forecast_days = set()
+            self.true_positive_forecast_days = set()
+            self.false_positive_forecast_days = set()
+            return
+
+        self.spike_days = list(valid_pairs[self.rng_spike.randrange(len(valid_pairs))])
+        forecast_days: set[int] = set()
+        true_positive_days: set[int] = set()
+        for spike_day in self.spike_days:
+            if self.rng_spike.random() <= FORECAST_TRUE_POSITIVE_RATE:
+                for lead_days in FORECAST_LEAD_DAYS:
+                    forecast_day = spike_day - lead_days
+                    if 1 <= forecast_day <= TOTAL_DAYS:
+                        forecast_days.add(forecast_day)
+                        true_positive_days.add(forecast_day)
+
+        false_candidates = [
+            day
+            for day in range(1, TOTAL_DAYS + 1)
+            if day not in forecast_days
+            and all(not (day < spike_day <= day + max(FORECAST_LEAD_DAYS)) for spike_day in self.spike_days)
+        ]
+        false_positive_days: set[int] = set()
+        for _ in range(FORECAST_FALSE_POSITIVES_PER_EPISODE):
+            if not false_candidates:
+                break
+            index = self.rng_spike.randrange(len(false_candidates))
+            false_positive_days.add(false_candidates.pop(index))
+
+        self.forecast_days = forecast_days | false_positive_days
+        self.true_positive_forecast_days = true_positive_days
+        self.false_positive_forecast_days = false_positive_days
 
     def _warm_start_history(self) -> None:
         if WARM_START_DAYS <= 0:
@@ -563,6 +637,22 @@ class MiniCoffeeEnv(Environment):
     def _current_trader_bulletin(self) -> str:
         return TRADER_BULLETINS[min(self.day_index, len(TRADER_BULLETINS) - 1)]
 
+    def _forecast_active(self) -> bool:
+        return self._current_day_number() in getattr(self, "forecast_days", set())
+
+    def _current_market_bulletins(self) -> list[str]:
+        return [MARKET_BULLETIN] if self._forecast_active() else []
+
+    def _demand_spike_multiplier(self) -> float:
+        return DEMAND_SPIKE_MULTIPLIER if self._current_day_number() in getattr(self, "spike_days", []) else 1.0
+
+    def _days_to_next_spike(self) -> int | None:
+        today = self._current_day_number()
+        future_spikes = [day for day in getattr(self, "spike_days", []) if day >= today]
+        if not future_spikes:
+            return None
+        return min(future_spikes) - today
+
     def _current_trader_price(self, item_id: str) -> float:
         direct_prices = [self._current_farmer_price(fid, item_id) for fid in self.farmers]
         base_price = sum(direct_prices) / len(direct_prices) + TRADER_MARGIN[item_id]
@@ -639,6 +729,9 @@ class MiniCoffeeEnv(Environment):
             "prices": dict(self.prices),
             "trader_inventory": dict(self.trader["inventory"]),
             "metrics": {k: round(v, 2) for k, v in self.metrics.items()},
+            "forecast_active": self._forecast_active(),
+            "days_to_next_spike": self._days_to_next_spike(),
+            "demand_spike_today": self._demand_spike_multiplier() > 1.0,
             "open_direct_contracts": sum(
                 1
                 for c in self.ledger_contracts
@@ -646,17 +739,23 @@ class MiniCoffeeEnv(Environment):
             ),
         }
 
-    def _sales_for_item(self, item_id: str) -> tuple[int, float]:
+    def _sales_for_item(self, item_id: str) -> tuple[int, float, int]:
         item = ITEMS[item_id]
         price_factor = max(0.0, 1.0 - (self.prices[item_id] / item["reservation_price"]))
         demand_noise = getattr(self, "demand_series", {}).get(item_id, [1.0])[
             min(self.day_index, TOTAL_DAYS - 1)
         ]
         demand = int(
-            round(item["base_demand"] * self._series_value(item["festival_boosts"]) * demand_noise * price_factor)
+            round(
+                item["base_demand"]
+                * self._series_value(item["festival_boosts"])
+                * self._demand_spike_multiplier()
+                * demand_noise
+                * price_factor
+            )
         )
         sold = min(self.inventory[item_id], demand)
-        return sold, sold * self.prices[item_id]
+        return sold, sold * self.prices[item_id], demand
 
     def _record_delivery(
         self,
@@ -872,6 +971,8 @@ class MiniCoffeeEnv(Environment):
             f"  Trader offers: standard ${self._current_trader_price('standard'):.2f}/kg, premium ${self._current_trader_price('premium'):.2f}/kg",
             "  Observation policy: only current stock and current offers are visible; future inbound inventory is hidden.",
         ]
+        for bulletin in self._current_market_bulletins():
+            lines.append(f"  {bulletin}")
 
         open_forwards = [
             c for c in self.ledger_contracts if c["buyer_kind"] == "roaster" and not c["closed"]
@@ -1055,6 +1156,10 @@ class MiniCoffeeEnv(Environment):
         total_cost = unit_price * params.quantity_kg
         if total_cost > self.cash:
             return ToolOutput(blocks=[TextBlock(text=f"Insufficient cash. Need ${total_cost:.2f}.")], reward=0.0, finished=False)
+        inventory_at_purchase = self.inventory[params.item_id]
+        active_forecast = self._forecast_active()
+        days_to_next_spike = self._days_to_next_spike()
+        after_shortfall_event = self.last_shortfall_event
         self.cash -= total_cost
         self.metrics["trader_spend"] += total_cost
         self.trader["cash"] += total_cost
@@ -1068,6 +1173,12 @@ class MiniCoffeeEnv(Environment):
             quantity_kg=params.quantity_kg,
             unit_price=unit_price,
             total_cost=round(total_cost, 2),
+            inventory_at_purchase=inventory_at_purchase,
+            active_forecast=active_forecast,
+            days_to_next_spike=days_to_next_spike,
+            after_shortfall_event=after_shortfall_event,
+            proactive_purchase=active_forecast and inventory_at_purchase > TRADER_EMERGENCY_POINT[params.item_id],
+            reactive_purchase=after_shortfall_event or inventory_at_purchase <= TRADER_EMERGENCY_POINT[params.item_id],
             snapshot=self._snapshot(),
         )
         return ToolOutput(
@@ -1101,13 +1212,24 @@ class MiniCoffeeEnv(Environment):
         events = self._process_contracts_for_day()
 
         sold_units = {}
+        demand_units = {}
+        stockout_items = []
         total_revenue = 0.0
         for item_id in ITEMS:
-            sold, revenue = self._sales_for_item(item_id)
+            sold, revenue, demand = self._sales_for_item(item_id)
             sold_units[item_id] = sold
+            demand_units[item_id] = demand
+            if sold < demand:
+                stockout_items.append(item_id)
             total_revenue += revenue
             self.inventory[item_id] -= sold
 
+        stockout_event = bool(stockout_items)
+        spike_day = self._demand_spike_multiplier() > 1.0
+        if spike_day:
+            self.spike_days_elapsed += 1
+            if stockout_event:
+                self.spike_stockout_days += 1
         holding_cost = sum(self.inventory.values()) * HOLDING_COST_PER_KG
         self.cash += total_revenue
         self.cash -= holding_cost
@@ -1119,6 +1241,9 @@ class MiniCoffeeEnv(Environment):
                 "holding_cost": holding_cost,
                 "profit": profit,
                 "sold_units": sold_units,
+                "demand_units": demand_units,
+                "stockout_items": list(stockout_items),
+                "demand_spike_day": spike_day,
                 "events": events,
             }
         )
@@ -1129,9 +1254,15 @@ class MiniCoffeeEnv(Environment):
             holding_cost=round(holding_cost, 2),
             profit=round(profit, 2),
             sold_units=sold_units,
+            demand_units=demand_units,
+            stockout_items=stockout_items,
+            shortfall_event=stockout_event,
+            demand_spike_day=spike_day,
+            demand_spike_multiplier=self._demand_spike_multiplier(),
             events=events,
             snapshot=self._snapshot(),
         )
+        self.last_shortfall_event = stockout_event
 
         lines = [
             f"Finished Day {self._current_day_number()}.",
@@ -1140,10 +1271,12 @@ class MiniCoffeeEnv(Environment):
             f"Profit: ${profit:.2f}",
             "Fulfillment events:",
         ]
+        for bulletin in self._current_market_bulletins():
+            lines.insert(1, bulletin)
         lines.extend(f"  {event}" for event in events or ["  No due contracts today."])
         lines.append("Sales outcomes:")
         for item_id, sold in sold_units.items():
-            lines.append(f"  Sold {sold} kg of {item_id}")
+            lines.append(f"  Sold {sold}/{demand_units[item_id]} kg of {item_id}")
 
         self.day_index += 1
         if self.day_index < TOTAL_DAYS:
@@ -1198,6 +1331,7 @@ class MiniCoffeeEnv(Environment):
             f"Investigation spend: ${self.metrics['investigation_spend']:.2f}",
             f"Direct spend: ${self.metrics['direct_spend']:.2f}",
             f"Trader spend: ${self.metrics['trader_spend']:.2f}",
+            f"Spike stockout days: {self.spike_stockout_days}/{max(self.spike_days_elapsed, 1)}",
             f"Open direct contracts remaining: {len(open_direct)}",
             f"Reward: {reward:.4f}",
             "",
@@ -1220,6 +1354,8 @@ class MiniCoffeeEnv(Environment):
             final_value=round(final_value, 2),
             profit=round(profit, 2),
             reward=round(reward, 4),
+            spike_stockout_days=self.spike_stockout_days,
+            spike_days_elapsed=self.spike_days_elapsed,
             trader_value_analysis={k: round(v, 4) for k, v in trader_value.items()},
             snapshot=self._snapshot(),
             log_path=str(self.log_path),

@@ -51,11 +51,40 @@ uv run python mini_coffee_agent_runner.py
 
 Provider selection:
 
-- Anthropic default:
+- Anthropic via `.env`:
+
+Create or edit `ors-playground/.env`:
+
+```bash
+MINI_COFFEE_LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-opus-4-8
+MINI_COFFEE_ORS_URL=http://localhost:8093
+MINI_COFFEE_TOTAL_DAYS=30
+MINI_COFFEE_DISABLE_INCENTIVE=1
+MINI_COFFEE_DEBUG_TOOLS=0
+```
+
+Then run the agent:
+
+```bash
+uv run python mini_coffee_agent_runner.py
+```
+
+- Anthropic via shell variables:
 
 ```bash
 ANTHROPIC_API_KEY=... \
 ANTHROPIC_MODEL=claude-opus-4-8 \
+uv run python mini_coffee_agent_runner.py
+```
+
+- OpenAI GPT:
+
+```bash
+MINI_COFFEE_LLM_PROVIDER=openai \
+OPENAI_API_KEY=... \
+OPENAI_MODEL=gpt-5 \
 uv run python mini_coffee_agent_runner.py
 ```
 
