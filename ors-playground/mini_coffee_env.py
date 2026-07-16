@@ -34,11 +34,13 @@ DEMAND_SPIKE_COUNT = 2
 DEMAND_SPIKE_DAY_MIN = 8
 DEMAND_SPIKE_DAY_MAX = 27
 DEMAND_SPIKE_MIN_GAP = 5
+FESTIVAL_DURATION_DAYS = 2
 DEMAND_SPIKE_MULTIPLIER = 2.2
 FORECAST_TRUE_POSITIVE_RATE = 0.8
 FORECAST_FALSE_POSITIVES_PER_EPISODE = 1
 FORECAST_LEAD_DAYS = (3, 1)
 MARKET_BULLETIN = "Market bulletin: A local festival may lift coffee demand within the next 3 days."
+FESTIVAL_LOGISTICS_FREEZE = True
 TRADER_EMERGENCY_POINT = {"standard": 5, "premium": 2}
 
 ITEMS = {
@@ -439,30 +441,43 @@ class MiniCoffeeEnv(Environment):
 
     def _init_demand_spikes(self) -> None:
         upper_day = min(DEMAND_SPIKE_DAY_MAX, TOTAL_DAYS)
-        candidates = list(range(DEMAND_SPIKE_DAY_MIN, upper_day + 1))
+        upper_start = upper_day - FESTIVAL_DURATION_DAYS + 1
+        candidates = list(range(DEMAND_SPIKE_DAY_MIN, upper_start + 1))
         valid_pairs = [
             (a, b)
             for idx, a in enumerate(candidates)
             for b in candidates[idx + 1 :]
-            if b - a >= DEMAND_SPIKE_MIN_GAP
+            if b - a >= DEMAND_SPIKE_MIN_GAP + FESTIVAL_DURATION_DAYS - 1
         ]
         if DEMAND_SPIKE_COUNT != 2 or not valid_pairs:
             self.spike_days = []
+            self.spike_start_days = []
             self.forecast_days = set()
             self.true_positive_forecast_days = set()
             self.false_positive_forecast_days = set()
             return
 
-        self.spike_days = list(valid_pairs[self.rng_spike.randrange(len(valid_pairs))])
+        start_a, start_b = valid_pairs[self.rng_spike.randrange(len(valid_pairs))]
+        self.spike_start_days = [start_a, start_b]
+        self.spike_days = []
+        for start_day in self.spike_start_days:
+            self.spike_days.extend(range(start_day, start_day + FESTIVAL_DURATION_DAYS))
+        self.spike_days.sort()
+
         forecast_days: set[int] = set()
         true_positive_days: set[int] = set()
-        for spike_day in self.spike_days:
+        for start_day in self.spike_start_days:
+            spike_true_days: set[int] = set()
             if self.rng_spike.random() <= FORECAST_TRUE_POSITIVE_RATE:
                 for lead_days in FORECAST_LEAD_DAYS:
-                    forecast_day = spike_day - lead_days
+                    forecast_day = start_day - lead_days
                     if 1 <= forecast_day <= TOTAL_DAYS:
                         forecast_days.add(forecast_day)
                         true_positive_days.add(forecast_day)
+                        spike_true_days.add(forecast_day)
+            if spike_true_days:
+                start_notice = min(spike_true_days)
+                forecast_days |= set(range(start_notice, start_day))
 
         false_candidates = [
             day
@@ -870,6 +885,17 @@ class MiniCoffeeEnv(Environment):
         ]
         contracts.sort(key=lambda c: (c["delivery_day"], c["buyer_kind"] != "trader"))
 
+        # If festival logistics freeze is enabled and today is a spike day,
+        # suspend farmer-origin deliveries for today while keeping trader inbound.
+        if FESTIVAL_LOGISTICS_FREEZE and self._demand_spike_multiplier() > 1.0:
+            farm_contracts = [c for c in contracts if c.get("seller_kind") == "farmer"]
+            nonfarm_contracts = [c for c in contracts if c.get("seller_kind") != "farmer"]
+            if visible_events and farm_contracts:
+                events.append(
+                    "Festival logistics: farm deliveries are suspended today and will resume after the festival."
+                )
+            contracts = nonfarm_contracts
+
         for contract in contracts:
             farmer_id = contract["seller_id"]
             item_id = contract["item_id"]
@@ -1273,6 +1299,9 @@ class MiniCoffeeEnv(Environment):
         ]
         for bulletin in self._current_market_bulletins():
             lines.insert(1, bulletin)
+        spike_day = self._demand_spike_multiplier() > 1.0
+        if FESTIVAL_LOGISTICS_FREEZE and spike_day:
+            lines.insert(2, "  Festival logistics: farm deliveries are suspended today and will resume after the festival.")
         lines.extend(f"  {event}" for event in events or ["  No due contracts today."])
         lines.append("Sales outcomes:")
         for item_id, sold in sold_units.items():

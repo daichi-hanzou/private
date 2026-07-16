@@ -23,8 +23,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 TOTAL_DAYS = int(os.getenv("MINI_COFFEE_TOTAL_DAYS", "20"))
+MOCK_FALLBACK = LLM_PROVIDER == "openai" and not os.getenv("OPENAI_API_KEY")
 FARMER_IDS = list(FARMER_PROFILES)
-MAX_TURNS = 90
+MAX_TURNS = int(os.getenv("MINI_COFFEE_MAX_TURNS", "120"))
 AUTO_FINISH_MARKER = "horizon is complete. Call finish_episode."
 # Frozen for the v2 calibration. Changing this hint changes the LLM treatment
 # and requires rerunning robot calibration and LLM smoke comparisons.
@@ -257,7 +258,7 @@ def _require_env(name: str) -> str:
     if not value:
         print(f"ERROR: {name} is not set.", file=sys.stderr)
         sys.exit(1)
-    return value
+    return value.strip()
 
 
 def _anthropic_client():
@@ -547,6 +548,43 @@ def _run_agent_openai(session, prompt_text: str) -> float:
     return _run_agent_openai_chat(session, prompt_text, client, model, "openai")
 
 
+def _run_agent_mock(session, prompt_text: str) -> float:
+    agent_logger = _new_agent_logger("mock", "mock")
+    start_event = {
+        "provider": "mock",
+        "model": "mock",
+        "total_days": TOTAL_DAYS,
+        "max_turns": MAX_TURNS,
+        "prompt": prompt_text,
+        "strategy_hint": STRATEGY_HINT,
+    }
+    agent_logger.emit("agent_start", **start_event)
+    final_reward = 0.0
+    try:
+        for turn in range(1, min(4, MAX_TURNS) + 1):
+            content = "[MOCK] no tool calls; runner will auto-continue."
+            agent_logger.emit("llm_response", turn=turn, content=content, tool_calls=[] , finish_reason="mock")
+            result_text, finished, reward = _auto_continue_after_no_tool_call(session, turn)
+            agent_logger.emit(
+                "tool_result",
+                turn=turn,
+                tool="auto_continue_after_no_tool_call",
+                tool_call_id=f"mock-auto-{turn}",
+                result=result_text,
+                finished=finished,
+                reward=reward,
+            )
+            if finished:
+                final_reward = reward
+                agent_logger.emit("agent_stop", turn=turn, reason="finished", final_reward=final_reward)
+                return final_reward
+        final_reward = _force_finish_after_max_turns(session, agent_logger)
+        agent_logger.emit("agent_stop", turn=MAX_TURNS, reason="mock_max", final_reward=final_reward)
+        return final_reward
+    finally:
+        agent_logger.close()
+
+
 def _run_agent_azure_openai(session, prompt_text: str) -> float:
     client, deployment = _azure_openai_client()
     return _run_agent_openai_chat(session, prompt_text, client, deployment, "azure_openai")
@@ -561,6 +599,9 @@ def run_agent() -> float:
         with env.session(task=task) as session:
             prompt_text = "\n".join(block.text for block in session.get_prompt())
             _validate_prompt_total_days(prompt_text)
+            if MOCK_FALLBACK:
+                print("WARNING: OPENAI_API_KEY not set — using mock agent fallback.")
+                return _run_agent_mock(session, prompt_text)
             if LLM_PROVIDER == "anthropic":
                 return _run_agent_anthropic(session, prompt_text)
             if LLM_PROVIDER == "openai":

@@ -24,10 +24,7 @@ Created: 2026-07-08
 The v2 roster intentionally breaks the public-price shortcut while preserving
 spot prices, harvest schedules, and financial parameters:
 
-- `rainforest_direct`: reliability `0.55 -> 0.92`; this is the low-price hidden
   gem.
-- `loma_dorada`: reliability `0.80 -> 0.55`; this is the high-price trap.
-- No price ranges, harvest schedules, starting cash, obligations, investigation
   cost, or BasePolicy parameters were changed for v2.
 
 Official 30-day robot scale, 100 seeds:
@@ -41,10 +38,6 @@ Official 30-day robot scale, 100 seeds:
 
 Derived checks:
 
-- Oracle - Blind gap: `346`
-- `blind_expensive` position: `(994 - 889) / (1235 - 889) = 30.3%`
-- Investigator capture: `(1116 - 889) / (1235 - 889) = 65.6%`
-- Gate status: GATE1 pass, GATE2 pass, `blind_expensive` pass.
 
 The file `gate_check_results_30d_v2.csv` is the official v2 calibration output.
 Do not score new LLM runs against the old 20-day CSV or the v1 30-day smoke CSV.
@@ -230,3 +223,43 @@ values are treated as old-world records and are not used for 30-day scoring.
 | `loma_dorada` | Loma Dorada Estate | `0.55` | `$4.50-$5.20` | `$6.50-$7.70` |
 | `norte_azul` | Norte Azul Cooperative | `0.95` | `$4.10-$4.80` | `$6.90-$7.90` |
 | `rainforest_direct` | Rainforest Direct | `0.92` | `$3.60-$4.30` | `$6.40-$7.30` |
+## V3.4 Festival Logistics Freeze
+
+Created: 2026-07-14
+
+v3.4 introduces a logistics channel freeze during festival days: farm-origin deliveries are suspended for the duration of the festival while trader transfers remain immediate. This creates a short-term delivery dead zone that increases the value of proactive trader prestocking and planning. Key changes:
+
+- `FESTIVAL_LOGISTICS_FREEZE = True`
+- Farmer deliveries scheduled on festival days are deferred until after the festival rather than partially refunded immediately.
+- Planner uses a conservative farmer overbook factor (`1.0`) while forecasts are active and must rely on trader prestock for guaranteed inventory.
+
+Official v3.4 robot scale, 100 seeds:
+
+| Policy | Mean profit |
+|---|---:|
+| `blind` | `894.5` |
+| `blind_expensive` | `1087.3` |
+| `investigator` | `1183.7` |
+| `oracle` | `1313.5` |
+| `planner` | `1374.3` |
+
+Derived checks:
+
+- Oracle - Blind gap: `419.0`
+- `blind_expensive` position: `(1087.3 - 894.5) / (1313.5 - 894.5) = 46.3%`
+- Investigator capture: `(1183.7 - 894.5) / (1313.5 - 894.5) = 69.0%`
+- Planner > Oracle wins: `70%` of seeds
+- Gate status: GATE1 pass (gap 46.8%), GATE2 pass (capture 69.0%), GATE3 pass (Planner outperforms Oracle), `blind_expensive` pass.
+
+The file `gate_check_results_30d_v3_4.csv` is the official v3.4 calibration output.
+
+Run the v3.4 calibration with:
+
+```powershell
+$env:MINI_COFFEE_ORS_URL = "http://localhost:8093"
+$env:MINI_COFFEE_TOTAL_DAYS = "30"
+uv run python gate_check_bio.py --seeds 100 --total-days 30 --csv gate_check_results_30d_v3_4.csv
+```
+
+Keep prior CSVs for audit. All LLM runs scored against this v3.4 scale use Planner as the target policy baseline (1374.3 profit).
+

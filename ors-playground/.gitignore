@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.env
+
+# Virtualenv
+.venv/
+
+# Editor
+.vscode/
+
+# Workspace artifacts
+ors-playground/.DS_Store
+.DS_Store
+
+# Gate check / result CSVs
+ors-playground/gate_check_results_*.csv
+
+# Logs and outputs
+workspace/output/*.log
+workspace/output/*.csv
+workspace/output/mini_coffee_agent_logs/*.jsonl
+workspace/output/mini_coffee_runs/*.jsonl

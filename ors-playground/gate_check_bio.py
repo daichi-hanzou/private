@@ -43,7 +43,7 @@ OVERBOOK_FACTOR = 1.5                              # 未達を見込んだ発注
 INVESTIGATE_BUDGET = 3                             # Investigatorが初日に調べる軒数
 UNKNOWN_RELIABILITY_PRIOR = 0.70                   # 開示情報がない農園の事前推定値
 MIN_GAP_FOR_RATIO = 0.10                           # 分母がBlind利益の10%未満なら捕捉率を出さない
-SPIKE_PRESTOCK = {"standard": 22, "premium": 10}   # Planner-only proactive trader prestock target
+SPIKE_PRESTOCK = {"standard": 28, "premium": 12}   # Planner-only proactive trader prestock target
 MARKET_BULLETIN_TEXT = "Market bulletin"
 
 
@@ -143,6 +143,9 @@ class BasePolicy:
         """調達先の優先順位を返す。唯一の差別化点。"""
         raise NotImplementedError
 
+    def _target_stock(self, obs: Observation, item: str) -> int:
+        return TARGET_STOCK[item]
+
     # --- 共通の1日の行動 ---
     def act(self, call, obs: Observation) -> None:
         for item in ("standard", "premium"):
@@ -151,7 +154,8 @@ class BasePolicy:
 
             # 直販発注(リオーダーポイント方式、未達見込みで上乗せ)
             if pipeline < REORDER_POINT[item]:
-                need = TARGET_STOCK[item] - pipeline
+                target_stock = self._target_stock(obs, item)
+                need = target_stock - pipeline
                 qty = max(1, math.ceil(need * OVERBOOK_FACTOR))
                 ranked = self.rank_farmers(obs, item)
                 if ranked:
@@ -235,17 +239,48 @@ class PlannerPolicy(OraclePolicy):
     """Oracle farmer selection plus proactive trader prestocking on market bulletins."""
     name = "planner"
 
-    def act(self, call, obs):
+    def _target_stock(self, obs: Observation, item: str) -> int:
         if obs.forecast_active:
-            for item in ("standard", "premium"):
-                deficit = SPIKE_PRESTOCK[item] - obs.inventory.get(item, 0)
-                qty = min(deficit, obs.trader_stock.get(item, 0))
+            return SPIKE_PRESTOCK[item]
+        return TARGET_STOCK[item]
+
+    def act(self, call, obs):
+        for item in ("standard", "premium"):
+            on_hand = obs.inventory.get(item, 0)
+            pipeline = on_hand + obs.inbound.get(item, 0)
+            target_stock = self._target_stock(obs, item)
+
+            if pipeline < target_stock:
+                need = target_stock - pipeline
+                overbook = 1.0 if obs.forecast_active else OVERBOOK_FACTOR
+                qty = max(1, math.ceil(need * overbook))
+                ranked = self.rank_farmers(obs, item)
+                if ranked:
+                    farmer = ranked[0]
+                    price = obs.offers[farmer][item]
+                    if price * qty <= obs.cash * 0.5:
+                        call("buy_spot_direct", {"farmer_id": farmer, "item_id": item, "quantity_kg": qty})
+                        obs.cash -= price * qty
+                        obs.inbound[item] = obs.inbound.get(item, 0) + qty
+                        pipeline += qty
+
+            if obs.forecast_active:
+                remainder = SPIKE_PRESTOCK[item] - pipeline
+                qty = min(remainder, obs.trader_stock.get(item, 0))
                 if qty >= 1 and obs.trader_price.get(item, 99.0) * qty <= obs.cash:
                     call("buy_from_trader", {"item_id": item, "quantity_kg": qty})
                     obs.cash -= obs.trader_price[item] * qty
                     obs.inventory[item] = obs.inventory.get(item, 0) + qty
                     obs.trader_stock[item] = obs.trader_stock.get(item, 0) - qty
-        super().act(call, obs)
+
+            if on_hand < EMERGENCY_POINT[item]:
+                shortfall = EMERGENCY_POINT[item] + 2 - on_hand
+                qty = min(shortfall, obs.trader_stock.get(item, 0))
+                if qty >= 1:
+                    cost = obs.trader_price.get(item, 99.0) * qty
+                    if cost <= obs.cash:
+                        call("buy_from_trader", {"item_id": item, "quantity_kg": qty})
+                        obs.cash -= cost
 
 
 # ---------------------------------------------------------------------------

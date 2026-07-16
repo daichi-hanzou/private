@@ -11,6 +11,7 @@ from mini_coffee_env import (
     DEMAND_SPIKE_DAY_MAX,
     DEMAND_SPIKE_DAY_MIN,
     DEMAND_SPIKE_MIN_GAP,
+    FESTIVAL_DURATION_DAYS,
     FORECAST_FALSE_POSITIVES_PER_EPISODE,
     FORECAST_TRUE_POSITIVE_RATE,
     DebugSetSeedInput,
@@ -135,12 +136,18 @@ class MiniCoffeeEnvTest(unittest.TestCase):
         self.assertEqual(first.spike_days, second.spike_days)
         self.assertEqual(first.forecast_days, second.forecast_days)
 
-    def test_demand_spike_days_are_in_range_and_spaced(self):
+    def test_demand_spike_start_days_are_in_range_and_spaced(self):
         env = make_env(seed=23)
 
-        self.assertEqual(len(env.spike_days), 2)
+        self.assertEqual(len(env.spike_start_days), 2)
+        self.assertTrue(all(DEMAND_SPIKE_DAY_MIN <= day <= min(DEMAND_SPIKE_DAY_MAX - FESTIVAL_DURATION_DAYS + 1, TOTAL_DAYS) for day in env.spike_start_days))
+        self.assertGreaterEqual(
+            abs(env.spike_start_days[1] - env.spike_start_days[0]),
+            DEMAND_SPIKE_MIN_GAP + FESTIVAL_DURATION_DAYS - 1,
+        )
+        self.assertEqual(len(env.spike_days), FESTIVAL_DURATION_DAYS * 2)
         self.assertTrue(all(DEMAND_SPIKE_DAY_MIN <= day <= min(DEMAND_SPIKE_DAY_MAX, TOTAL_DAYS) for day in env.spike_days))
-        self.assertGreaterEqual(abs(env.spike_days[1] - env.spike_days[0]), DEMAND_SPIKE_MIN_GAP)
+        self.assertEqual(env.spike_days, sorted(env.spike_days))
 
     def test_forecast_signal_distribution_is_reasonable(self):
         episodes = 1000
@@ -149,9 +156,9 @@ class MiniCoffeeEnvTest(unittest.TestCase):
         false_positive_count = 0
         for seed in range(episodes):
             env = make_env(seed=seed, warm_days=0)
-            for spike_day in env.spike_days:
+            for spike_start in env.spike_start_days:
                 total_spikes += 1
-                if any(spike_day - lead in env.true_positive_forecast_days for lead in mini_coffee_env.FORECAST_LEAD_DAYS):
+                if any(spike_start - lead in env.true_positive_forecast_days for lead in mini_coffee_env.FORECAST_LEAD_DAYS):
                     true_positive_spikes += 1
             false_positive_count += len(env.false_positive_forecast_days)
 
@@ -256,6 +263,43 @@ class MiniCoffeeEnvTest(unittest.TestCase):
 
         self.assertEqual(first_state, second_state)
         self.assertEqual(first_true_state, second_true_state)
+
+    def test_festival_logistics_freeze_suspends_farmer_deliveries_but_trader_unaffected(self):
+        env = make_env(seed=23, warm_days=0)
+        env._init_event_logger()
+        start = env.spike_start_days[0]
+        farmer_id = next(iter(env.farmers))
+        # ensure farmer has inventory to deliver
+        env.farmers[farmer_id]["inventory"]["standard"] = 10
+        contract = env._new_contract(
+            buyer_kind="roaster",
+            seller_kind="farmer",
+            seller_id=farmer_id,
+            item_id="standard",
+            quantity_kg=5,
+            unit_price=env._current_farmer_price(farmer_id, "standard"),
+            contract_type="spot",
+            delivery_day=start,
+        )
+        env.ledger_contracts.append(contract)
+        env.day_index = start - 1
+        events = env._process_contracts_for_day(visible_events=True)
+        self.assertTrue(any("Festival logistics" in e for e in events))
+        # farmer delivery should be suspended today
+        self.assertEqual(contract["remaining_qty"], 5)
+        self.assertEqual(env.inventory["standard"], INITIAL_ROASTER_INVENTORY["standard"])
+
+        # trader buys remain immediate
+        env.trader["inventory"]["standard"] = 5
+        buy_out = env.buy_from_trader(BuyTraderInput(item_id="standard", quantity_kg=2))
+        self.assertIn("Inventory transferred immediately", buy_out.blocks[0].text)
+        self.assertEqual(env.inventory["standard"], INITIAL_ROASTER_INVENTORY["standard"] + 2)
+
+        # Advance to the day after the festival and process deliveries; farmer should now deliver
+        env.day_index = start + FESTIVAL_DURATION_DAYS - 1
+        events2 = env._process_contracts_for_day(visible_events=True)
+        self.assertLess(contract["remaining_qty"], 5)
+        env.event_logger.close()
 
 
 if __name__ == "__main__":
