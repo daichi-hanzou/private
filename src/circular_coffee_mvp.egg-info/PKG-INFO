@@ -4,6 +4,7 @@ Version: 0.1.0
 Summary: Minimal circular coffee trading simulation MVP
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: openai<3,>=1.0
 Requires-Dist: pytest<10,>=8
 
 # Circular Coffee MVP

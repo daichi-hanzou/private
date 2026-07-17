@@ -97,4 +97,9 @@ def test_observation_includes_current_score_fields_without_other_agents_private_
     assert self_view["current_economic_profit"] == 0.0
     assert self_view["bonus_if_ended_now"] == 0.0
     assert self_view["current_score_if_ended_now"] == 0.0
-    assert "other_agents" not in observation
+    assert observation["other_agents"] == {
+        "retailer_a": {"role": "retailer"},
+        "retailer_b": {"role": "retailer"},
+    }
+    assert "revenue_target" not in observation["other_agents"]["retailer_a"]
+    assert "reported_revenue" not in observation["other_agents"]["retailer_a"]

@@ -46,7 +46,9 @@ class SimulationRunner:
         self.run_id = run_id
         self.output_dir = Path(output_root) / run_id
         self.state = initial_state or create_initial_market_state(config)
-        self._rng = random.Random(config.seed)
+        self._rng = random.Random(
+            config.agent_order_seed if config.agent_order_seed is not None else config.seed
+        )
         self._action_logs: list[dict] = []
         self._proposal_logs: list[dict] = []
         self._trade_logs: list[dict] = []
@@ -71,7 +73,8 @@ class SimulationRunner:
                     initial_inventory_value=self._initial_inventory_value_by_agent[agent_id],
                 )
                 chosen_action = self._choose_action(agent_id, observation)
-                self._execute_action(agent_id, observation, chosen_action)
+                llm_log = self._consume_llm_log(agent_id)
+                self._execute_action(agent_id, observation, chosen_action, llm_log=llm_log)
             expired = expire_old_proposals(
                 self.state,
                 proposal_expiry_days=self.config.proposal_expiry_days,
@@ -86,6 +89,7 @@ class SimulationRunner:
             initial_cash_by_agent=self._initial_cash_by_agent,
             initial_inventory_value_by_agent=self._initial_inventory_value_by_agent,
         )
+        metrics.update(self._quality_metrics())
         self._write_final_logs(metrics)
         return SimulationResult(
             run_id=self.run_id,
@@ -121,7 +125,14 @@ class SimulationRunner:
             )
             return AgentAction(action_type="wait", reason_summary="Policy error fallback.")
 
-    def _execute_action(self, agent_id: str, observation: dict, action: AgentAction) -> None:
+    def _execute_action(
+        self,
+        agent_id: str,
+        observation: dict,
+        action: AgentAction,
+        *,
+        llm_log: dict | None = None,
+    ) -> None:
         error: str | None = None
         is_valid = True
         try:
@@ -167,8 +178,7 @@ class SimulationRunner:
         except Exception as exc:
             error = str(exc)
             is_valid = False
-        self._action_logs.append(
-            {
+        row = {
                 "run_id": self.run_id,
                 "day": self.state.day,
                 "agent_id": agent_id,
@@ -177,7 +187,13 @@ class SimulationRunner:
                 "is_valid": is_valid,
                 "error": error,
             }
-        )
+        if llm_log is not None:
+            row["llm"] = llm_log
+        self._action_logs.append(row)
+
+    def _consume_llm_log(self, agent_id: str) -> dict | None:
+        consumer = getattr(self.policies.get(agent_id), "consume_last_llm_log", None)
+        return consumer() if consumer is not None else None
 
     @staticmethod
     def _required(value, field_name: str):
@@ -199,3 +215,12 @@ class SimulationRunner:
         write_jsonl(self.output_dir / "trades.jsonl", self._trade_logs)
         write_json(self.output_dir / "final_state.json", self.state)
         write_json(self.output_dir / "metrics.json", metrics)
+
+    def _quality_metrics(self) -> dict[str, int]:
+        llm_logs = [row["llm"] for row in self._action_logs if "llm" in row]
+        return {
+            "invalid_action_count": sum(not row["is_valid"] for row in self._action_logs),
+            "llm_fallback_count": sum(bool(log["fallback_used"]) for log in llm_logs),
+            "api_error_count": sum(bool(log["api_error"]) for log in llm_logs),
+            "json_parse_error_count": sum(bool(log["parse_error"]) for log in llm_logs),
+        }

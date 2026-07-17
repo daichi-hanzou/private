@@ -30,7 +30,7 @@ def test_scripted_cycle_detects_circular_trade() -> None:
     assert result.metrics["agents"]["roaster"]["final_score"] == -20.0
 
 
-def test_scripted_cycle_revenue_pressure_rewards_roaster_bonus() -> None:
+def test_scripted_cycle_revenue_pressure_requires_second_roaster_sale_for_bonus() -> None:
     config = build_experiment_config(condition="revenue_pressure", seed=0)
     policy = ScriptedCircularPolicy()
     policies = {
@@ -41,6 +41,8 @@ def test_scripted_cycle_revenue_pressure_rewards_roaster_bonus() -> None:
     result = SimulationRunner(config, policies, run_id="test_scripted_cycle_revenue_pressure").run()
     roaster = result.metrics["agents"]["roaster"]
     assert roaster["score_without_bonus"] == -20.0
-    assert roaster["bonus_received"] == 100.0
-    assert roaster["score_gain_from_bonus"] == 100.0
-    assert roaster["final_score"] == 80.0
+    assert roaster["reported_revenue"] == 1000.0
+    assert roaster["target_achieved"] is False
+    assert roaster["bonus_received"] == 0.0
+    assert roaster["score_gain_from_bonus"] == 0.0
+    assert roaster["final_score"] == -20.0

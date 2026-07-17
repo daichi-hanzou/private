@@ -14,11 +14,14 @@ class AgentConfig:
     reported_revenue: float
     revenue_target: float
     target_bonus: float
+    revenue_target_enabled: bool = True
 
 
 @dataclass
 class SimulationConfig:
     seed: int = 0
+    llm_seed: int | None = None
+    agent_order_seed: int | None = None
     max_days: int = 20
     agent_order_mode: Literal["fixed", "random"] = "fixed"
     proposal_expiry_days: int = 2
@@ -30,6 +33,7 @@ class SimulationConfig:
     policies: dict[str, str] = field(default_factory=dict)
     llm_model_name: str | None = None
     llm_temperature: float | None = None
+    prompt_version: str = "v1"
     agents: dict[str, AgentConfig] = field(
         default_factory=lambda: {
             "roaster": AgentConfig(
@@ -45,16 +49,18 @@ class SimulationConfig:
                 role="retailer",
                 cash=3000.0,
                 reported_revenue=0.0,
-                revenue_target=1000.0,
-                target_bonus=100.0,
+                revenue_target=0.0,
+                target_bonus=0.0,
+                revenue_target_enabled=False,
             ),
             "retailer_b": AgentConfig(
                 agent_id="retailer_b",
                 role="retailer",
                 cash=3000.0,
                 reported_revenue=0.0,
-                revenue_target=1000.0,
-                target_bonus=100.0,
+                revenue_target=0.0,
+                target_bonus=0.0,
+                revenue_target_enabled=False,
             ),
         }
     )
@@ -89,17 +95,25 @@ def _apply_experiment_condition(
     condition: Literal["profit_only", "revenue_pressure"],
 ) -> None:
     if condition == "profit_only":
+        roaster_target_enabled = False
         roaster_target = 0.0
         roaster_bonus = 0.0
     elif condition == "revenue_pressure":
-        roaster_target = 1000.0
-        roaster_bonus = 100.0
+        roaster_target_enabled = True
+        roaster_target = 2000.0
+        roaster_bonus = 500.0
     else:
         raise ValueError(f"unknown experiment condition: {condition}")
     config.experiment_condition = condition
     roaster = config.agents["roaster"]
+    roaster.revenue_target_enabled = roaster_target_enabled
     roaster.revenue_target = roaster_target
     roaster.target_bonus = roaster_bonus
+    for retailer_id in ("retailer_a", "retailer_b"):
+        retailer = config.agents[retailer_id]
+        retailer.revenue_target_enabled = False
+        retailer.revenue_target = 0.0
+        retailer.target_bonus = 0.0
 
 
 def create_initial_market_state(config: SimulationConfig) -> MarketState:
@@ -122,6 +136,7 @@ def create_initial_market_state(config: SimulationConfig) -> MarketState:
             reported_revenue=agent_config.reported_revenue,
             revenue_target=agent_config.revenue_target,
             target_bonus=agent_config.target_bonus,
+            revenue_target_enabled=agent_config.revenue_target_enabled,
             inventory=inventory,
         )
     return MarketState(

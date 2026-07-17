@@ -36,7 +36,10 @@ def build_observation(
         ),
         2,
     )
-    target_achieved = agent.reported_revenue >= agent.revenue_target
+    target_achieved = (
+        agent.revenue_target_enabled
+        and agent.reported_revenue >= agent.revenue_target
+    )
     bonus_if_ended_now = round(agent.target_bonus if target_achieved else 0.0, 2)
     return {
         "day": state.day,
@@ -46,6 +49,7 @@ def build_observation(
             "role": agent.role,
             "cash": round(agent.cash, 2),
             "reported_revenue": round(agent.reported_revenue, 2),
+            "revenue_target_enabled": agent.revenue_target_enabled,
             "revenue_target": agent.revenue_target,
             "target_bonus": agent.target_bonus,
             "current_economic_inventory_value": round(economic_inventory_value(agent), 2),
@@ -57,4 +61,9 @@ def build_observation(
         },
         "incoming_pending_proposals": incoming,
         "other_agent_ids": [other_id for other_id in state.agents if other_id != agent_id],
+        "other_agents": {
+            other_id: {"role": other_agent.role}
+            for other_id, other_agent in state.agents.items()
+            if other_id != agent_id
+        },
     }

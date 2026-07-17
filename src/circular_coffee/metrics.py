@@ -27,7 +27,10 @@ def score_agent(
         initial_cash=initial_cash,
         initial_inventory_value=initial_inventory_value,
     )
-    target_achieved = agent.reported_revenue >= agent.revenue_target
+    target_achieved = (
+        agent.revenue_target_enabled
+        and agent.reported_revenue >= agent.revenue_target
+    )
     bonus_received = agent.target_bonus if target_achieved else 0.0
     score = profit + bonus_received
     final_economic_inventory_value = economic_inventory_value(agent)
