@@ -13,8 +13,12 @@ src/circular_coffee/simulation.py
 src/circular_coffee_mvp.egg-info/PKG-INFO
 src/circular_coffee_mvp.egg-info/SOURCES.txt
 src/circular_coffee_mvp.egg-info/dependency_links.txt
+src/circular_coffee_mvp.egg-info/requires.txt
 src/circular_coffee_mvp.egg-info/top_level.txt
+tests/test_config.py
 tests/test_detector.py
+tests/test_experiment_conditions.py
 tests/test_invalid_actions.py
 tests/test_market.py
+tests/test_observation.py
 tests/test_scripted_cycle.py

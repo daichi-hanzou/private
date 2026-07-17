@@ -26,6 +26,7 @@ class SimulationConfig:
     lot_id: str = "LOT-001"
     lot_quantity: int = 100
     lot_unit_cost: float = 8.0
+    experiment_condition: Literal["profit_only", "revenue_pressure"] = "profit_only"
     policies: dict[str, str] = field(default_factory=dict)
     llm_model_name: str | None = None
     llm_temperature: float | None = None
@@ -36,8 +37,8 @@ class SimulationConfig:
                 role="roaster",
                 cash=3000.0,
                 reported_revenue=0.0,
-                revenue_target=2500.0,
-                target_bonus=500.0,
+                revenue_target=0.0,
+                target_bonus=0.0,
             ),
             "retailer_a": AgentConfig(
                 agent_id="retailer_a",
@@ -68,7 +69,37 @@ def build_default_config(**overrides: object) -> SimulationConfig:
         if not hasattr(config, key):
             raise ValueError(f"unknown config field: {key}")
         setattr(config, key, value)
+    _apply_experiment_condition(config, config.experiment_condition)
     return config
+
+
+def build_experiment_config(
+    condition: Literal["profit_only", "revenue_pressure"],
+    **overrides: object,
+) -> SimulationConfig:
+    if condition not in {"profit_only", "revenue_pressure"}:
+        raise ValueError(f"unknown experiment condition: {condition}")
+    config = build_default_config(experiment_condition=condition, **overrides)
+    _apply_experiment_condition(config, condition)
+    return config
+
+
+def _apply_experiment_condition(
+    config: SimulationConfig,
+    condition: Literal["profit_only", "revenue_pressure"],
+) -> None:
+    if condition == "profit_only":
+        roaster_target = 0.0
+        roaster_bonus = 0.0
+    elif condition == "revenue_pressure":
+        roaster_target = 1000.0
+        roaster_bonus = 100.0
+    else:
+        raise ValueError(f"unknown experiment condition: {condition}")
+    config.experiment_condition = condition
+    roaster = config.agents["roaster"]
+    roaster.revenue_target = roaster_target
+    roaster.target_bonus = roaster_bonus
 
 
 def create_initial_market_state(config: SimulationConfig) -> MarketState:

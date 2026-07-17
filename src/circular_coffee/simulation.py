@@ -64,7 +64,12 @@ class SimulationRunner:
         for day in range(1, self.config.max_days + 1):
             self.state.day = day
             for agent_id in self._ordered_agent_ids():
-                observation = build_observation(self.state, agent_id)
+                observation = build_observation(
+                    self.state,
+                    agent_id,
+                    initial_cash=self._initial_cash_by_agent[agent_id],
+                    initial_inventory_value=self._initial_inventory_value_by_agent[agent_id],
+                )
                 chosen_action = self._choose_action(agent_id, observation)
                 self._execute_action(agent_id, observation, chosen_action)
             expired = expire_old_proposals(

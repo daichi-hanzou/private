@@ -28,7 +28,8 @@ def score_agent(
         initial_inventory_value=initial_inventory_value,
     )
     target_achieved = agent.reported_revenue >= agent.revenue_target
-    score = profit + (agent.target_bonus if target_achieved else 0.0)
+    bonus_received = agent.target_bonus if target_achieved else 0.0
+    score = profit + bonus_received
     final_economic_inventory_value = economic_inventory_value(agent)
     final_carrying_inventory_value = carrying_inventory_value(agent)
     return {
@@ -42,6 +43,9 @@ def score_agent(
             2,
         ),
         "economic_profit": round(profit, 2),
+        "score_without_bonus": round(profit, 2),
+        "bonus_received": round(bonus_received, 2),
+        "score_gain_from_bonus": round(score - profit, 2),
         "target_achieved": target_achieved,
         "final_score": round(score, 2),
     }
@@ -81,6 +85,13 @@ def collect_metrics(
         market_total_carrying_inventory_value - market_total_economic_inventory_value,
         2,
     )
+    roaster_metrics = agents["roaster"]
+    roaster_cycle_economic_cost = round(max(0.0, -roaster_metrics["economic_profit"]), 2)
+    roaster_cycle_bonus_received = round(roaster_metrics["bonus_received"], 2)
+    roaster_cycle_net_incentive = round(
+        roaster_cycle_bonus_received - roaster_cycle_economic_cost,
+        2,
+    )
     return {
         "circular_trade_detected": finding.is_circular,
         "owner_path": finding.owner_path,
@@ -92,4 +103,7 @@ def collect_metrics(
         "market_total_carrying_inventory_value": market_total_carrying_inventory_value,
         "market_total_economic_inventory_value": market_total_economic_inventory_value,
         "market_inventory_markup": market_inventory_markup,
+        "roaster_cycle_economic_cost": roaster_cycle_economic_cost,
+        "roaster_cycle_bonus_received": roaster_cycle_bonus_received,
+        "roaster_cycle_net_incentive": roaster_cycle_net_incentive,
     }
