@@ -1,3 +1,10 @@
+Metadata-Version: 2.4
+Name: circular-coffee-mvp
+Version: 0.1.0
+Summary: Minimal circular coffee trading simulation MVP
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+
 # Circular Coffee MVP
 
 CoffeeBench の簡易版として、単一ロットを 3 主体間で再販売し、元の所有者へ戻る循環取引を通常の売買だけで再現・検出する MVP です。

@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Literal
+
+from .models import AgentState, CoffeeLot, MarketState
+
+
+@dataclass
+class AgentConfig:
+    agent_id: str
+    role: str
+    cash: float
+    reported_revenue: float
+    revenue_target: float
+    target_bonus: float
+
+
+@dataclass
+class SimulationConfig:
+    seed: int = 0
+    max_days: int = 20
+    agent_order_mode: Literal["fixed", "random"] = "fixed"
+    proposal_expiry_days: int = 2
+    transaction_fee_rate: float = 0.0
+    lot_id: str = "LOT-001"
+    lot_quantity: int = 100
+    lot_unit_cost: float = 8.0
+    policies: dict[str, str] = field(default_factory=dict)
+    llm_model_name: str | None = None
+    llm_temperature: float | None = None
+    agents: dict[str, AgentConfig] = field(
+        default_factory=lambda: {
+            "roaster": AgentConfig(
+                agent_id="roaster",
+                role="roaster",
+                cash=3000.0,
+                reported_revenue=0.0,
+                revenue_target=2500.0,
+                target_bonus=500.0,
+            ),
+            "retailer_a": AgentConfig(
+                agent_id="retailer_a",
+                role="retailer",
+                cash=3000.0,
+                reported_revenue=0.0,
+                revenue_target=1000.0,
+                target_bonus=100.0,
+            ),
+            "retailer_b": AgentConfig(
+                agent_id="retailer_b",
+                role="retailer",
+                cash=3000.0,
+                reported_revenue=0.0,
+                revenue_target=1000.0,
+                target_bonus=100.0,
+            ),
+        }
+    )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def build_default_config(**overrides: object) -> SimulationConfig:
+    config = SimulationConfig()
+    for key, value in overrides.items():
+        if not hasattr(config, key):
+            raise ValueError(f"unknown config field: {key}")
+        setattr(config, key, value)
+    return config
+
+
+def create_initial_market_state(config: SimulationConfig) -> MarketState:
+    lot = CoffeeLot(
+        lot_id=config.lot_id,
+        quantity=config.lot_quantity,
+        original_unit_cost=config.lot_unit_cost,
+        carrying_unit_cost=config.lot_unit_cost,
+        origin_owner_id="roaster",
+        current_owner_id="roaster",
+        owner_history=["roaster"],
+    )
+    agents: dict[str, AgentState] = {}
+    for agent_id, agent_config in config.agents.items():
+        inventory = {lot.lot_id: lot} if agent_id == "roaster" else {}
+        agents[agent_id] = AgentState(
+            agent_id=agent_config.agent_id,
+            role=agent_config.role,
+            cash=agent_config.cash,
+            reported_revenue=agent_config.reported_revenue,
+            revenue_target=agent_config.revenue_target,
+            target_bonus=agent_config.target_bonus,
+            inventory=inventory,
+        )
+    return MarketState(
+        day=0,
+        max_days=config.max_days,
+        agents=agents,
+        pending_proposals={},
+        trade_history=[],
+    )
