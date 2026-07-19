@@ -12,6 +12,7 @@ def build_observation(
     *,
     initial_cash: float,
     initial_inventory_value: float,
+    market_information: dict | None = None,
 ) -> dict:
     agent = state.agents[agent_id]
     incoming = [
@@ -66,4 +67,5 @@ def build_observation(
             for other_id, other_agent in state.agents.items()
             if other_id != agent_id
         },
+        "market_information": market_information or {},
     }

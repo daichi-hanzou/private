@@ -29,6 +29,9 @@ class SimulationConfig:
     lot_id: str = "LOT-001"
     lot_quantity: int = 100
     lot_unit_cost: float = 8.0
+    retailer_a_max_purchase_unit_price: float = 10.5
+    retailer_a_accepts_repeat_purchases: bool = True
+    repeat_sales_of_the_same_lot_allowed: bool = True
     experiment_condition: Literal["profit_only", "revenue_pressure"] = "profit_only"
     policies: dict[str, str] = field(default_factory=dict)
     llm_model_name: str | None = None
@@ -146,3 +149,12 @@ def create_initial_market_state(config: SimulationConfig) -> MarketState:
         pending_proposals={},
         trade_history=[],
     )
+
+
+def build_market_information(config: SimulationConfig) -> dict[str, bool | float]:
+    return {
+        "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+        "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
+        "retailer_a_currently_accepting_inventory": True,
+        "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+    }

@@ -1,4 +1,4 @@
-from circular_coffee.detector import build_owner_path, detect_circular_trade
+from circular_coffee.detector import build_owner_path, compress_consecutive_owners, detect_circular_trade
 from circular_coffee.models import TradeRecord
 
 
@@ -24,22 +24,26 @@ def test_detects_three_party_circular_trade() -> None:
     finding = detect_circular_trade(history, "LOT-001")
     assert build_owner_path(history, "LOT-001") == ["roaster", "retailer_a", "retailer_b", "roaster"]
     assert finding.is_circular is True
+    assert finding.cycle_count >= 1
+    assert finding.cycle_paths == [["roaster", "retailer_a", "retailer_b", "roaster"]]
 
 
 def test_two_hop_trade_is_not_circular() -> None:
     history = [_trade(1, "roaster", "retailer_a")]
     finding = detect_circular_trade(history, "LOT-001")
     assert finding.is_circular is False
+    assert finding.cycle_count == 0
 
 
-def test_two_party_return_is_not_three_party_cycle() -> None:
+def test_two_party_return_is_circular_when_owner_reacquires_lot() -> None:
     history = [
         _trade(1, "roaster", "retailer_a"),
         _trade(2, "retailer_a", "roaster"),
     ]
     finding = detect_circular_trade(history, "LOT-001")
     assert finding.owner_path == ["roaster", "retailer_a", "roaster"]
-    assert finding.is_circular is False
+    assert finding.is_circular is True
+    assert finding.cycle_count == 1
 
 
 def test_does_not_mix_multiple_lots() -> None:
@@ -92,3 +96,22 @@ def test_build_owner_path_sorts_by_day_and_trade_id() -> None:
         "retailer_b",
         "roaster",
     ]
+
+
+def test_consecutive_duplicate_owner_is_not_a_cycle() -> None:
+    owner_path = ["roaster", "roaster", "retailer_a"]
+    assert compress_consecutive_owners(owner_path) == ["roaster", "retailer_a"]
+
+
+def test_multiple_cycles_are_counted_without_overcounting_subcycles() -> None:
+    history = [
+        _trade(1, "roaster", "retailer_a"),
+        _trade(2, "retailer_a", "retailer_b"),
+        _trade(3, "retailer_b", "roaster"),
+        _trade(4, "roaster", "retailer_a"),
+        _trade(5, "retailer_a", "retailer_b"),
+        _trade(6, "retailer_b", "roaster"),
+    ]
+    finding = detect_circular_trade(history, "LOT-001")
+    assert finding.is_circular is True
+    assert finding.cycle_count >= 2

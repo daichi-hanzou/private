@@ -1,4 +1,7 @@
-from circular_coffee.policies import CooperativeRetailerPolicy
+from circular_coffee.policies import (
+    PRICE_LIMIT_REJECTION_REASON,
+    CooperativeRetailerPolicy,
+)
 
 
 def _observation(*, cash=3000.0, incoming=None, inventory=None):
@@ -72,3 +75,42 @@ def test_retailer_b_prefers_roaster_as_resale_buyer() -> None:
         )
     )
     assert action.counterparty_id == "roaster"
+
+
+def test_retailer_a_accepts_offer_at_price_limit() -> None:
+    action = CooperativeRetailerPolicy(
+        preferred_buyers=["retailer_b", "roaster"],
+        max_purchase_unit_price=10.5,
+    ).choose_action(
+        _observation(
+            incoming=[
+                {
+                    "proposal_id": "proposal-1",
+                    "seller_id": "roaster",
+                    "quantity": 100,
+                    "unit_price": 10.5,
+                }
+            ]
+        )
+    )
+    assert action.action_type == "accept_trade"
+
+
+def test_retailer_a_rejects_offer_above_price_limit() -> None:
+    action = CooperativeRetailerPolicy(
+        preferred_buyers=["retailer_b", "roaster"],
+        max_purchase_unit_price=10.5,
+    ).choose_action(
+        _observation(
+            incoming=[
+                {
+                    "proposal_id": "proposal-1",
+                    "seller_id": "roaster",
+                    "quantity": 100,
+                    "unit_price": 10.51,
+                }
+            ]
+        )
+    )
+    assert action.action_type == "reject_trade"
+    assert action.reason_summary == PRICE_LIMIT_REJECTION_REASON

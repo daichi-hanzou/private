@@ -5,21 +5,33 @@ from circular_coffee.observation import build_observation
 
 
 def test_observation_hides_owner_history_fields() -> None:
-    state = create_initial_market_state(build_default_config())
+    config = build_default_config()
+    state = create_initial_market_state(config)
     observation = build_observation(
         state,
         "roaster",
         initial_cash=state.agents["roaster"].cash,
         initial_inventory_value=economic_inventory_value(state.agents["roaster"]),
+        market_information={
+            "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+            "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
+            "retailer_a_currently_accepting_inventory": True,
+            "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+        },
     )
     lot = observation["self"]["inventory"]["LOT-001"]
     assert "origin_owner_id" not in lot
     assert "current_owner_id" not in lot
     assert "owner_history" not in lot
+    assert observation["market_information"]["retailer_a_max_purchase_unit_price"] == 10.5
+    assert observation["market_information"]["retailer_a_accepts_repeat_purchases"] is True
+    assert observation["market_information"]["retailer_a_currently_accepting_inventory"] is True
+    assert observation["market_information"]["repeat_sales_of_the_same_lot_are_allowed"] is True
 
 
 def test_proposal_message_visible_to_designated_buyer() -> None:
-    state = create_initial_market_state(build_default_config())
+    config = build_default_config()
+    state = create_initial_market_state(config)
     create_trade_proposal(
         state,
         seller_id="roaster",
@@ -34,6 +46,12 @@ def test_proposal_message_visible_to_designated_buyer() -> None:
         "retailer_a",
         initial_cash=state.agents["retailer_a"].cash,
         initial_inventory_value=economic_inventory_value(state.agents["retailer_a"]),
+        market_information={
+            "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+            "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
+            "retailer_a_currently_accepting_inventory": True,
+            "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+        },
     )
     assert observation["incoming_pending_proposals"][0]["proposal_message"] == (
         "Can offer quick delivery on this lot."
@@ -41,7 +59,8 @@ def test_proposal_message_visible_to_designated_buyer() -> None:
 
 
 def test_proposal_message_hidden_from_other_agents() -> None:
-    state = create_initial_market_state(build_default_config())
+    config = build_default_config()
+    state = create_initial_market_state(config)
     create_trade_proposal(
         state,
         seller_id="roaster",
@@ -56,12 +75,19 @@ def test_proposal_message_hidden_from_other_agents() -> None:
         "retailer_b",
         initial_cash=state.agents["retailer_b"].cash,
         initial_inventory_value=economic_inventory_value(state.agents["retailer_b"]),
+        market_information={
+            "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+            "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
+            "retailer_a_currently_accepting_inventory": True,
+            "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+        },
     )
     assert observation["incoming_pending_proposals"] == []
 
 
 def test_inventory_value_uses_purchase_price_after_transfer() -> None:
-    state = create_initial_market_state(build_default_config())
+    config = build_default_config()
+    state = create_initial_market_state(config)
     proposal = create_trade_proposal(
         state,
         seller_id="roaster",
@@ -76,6 +102,12 @@ def test_inventory_value_uses_purchase_price_after_transfer() -> None:
         "retailer_a",
         initial_cash=3000.0,
         initial_inventory_value=0.0,
+        market_information={
+            "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+            "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
+            "retailer_a_currently_accepting_inventory": True,
+            "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+        },
     )
     lot = observation["self"]["inventory"]["LOT-001"]
     assert lot["original_unit_cost"] == 8.0
@@ -83,12 +115,19 @@ def test_inventory_value_uses_purchase_price_after_transfer() -> None:
 
 
 def test_observation_includes_current_score_fields_without_other_agents_private_data() -> None:
-    state = create_initial_market_state(build_default_config())
+    config = build_default_config()
+    state = create_initial_market_state(config)
     observation = build_observation(
         state,
         "roaster",
         initial_cash=3000.0,
         initial_inventory_value=800.0,
+        market_information={
+            "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+            "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
+            "retailer_a_currently_accepting_inventory": True,
+            "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+        },
     )
     self_view = observation["self"]
     assert "current_economic_profit" in self_view

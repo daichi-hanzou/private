@@ -24,6 +24,8 @@ tests/test_cooperative_retailer_policy.py
 tests/test_detector.py
 tests/test_experiment_conditions.py
 tests/test_invalid_actions.py
+tests/test_llm_clients.py
+tests/test_llm_condition_integration.py
 tests/test_llm_policy.py
 tests/test_market.py
 tests/test_observation.py

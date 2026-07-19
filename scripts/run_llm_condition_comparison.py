@@ -66,6 +66,7 @@ def run_condition(
         ),
         "retailer_a": CooperativeRetailerPolicy(
             preferred_buyers=["retailer_b", "roaster"],
+            max_purchase_unit_price=config.retailer_a_max_purchase_unit_price,
         ),
         "retailer_b": CooperativeRetailerPolicy(
             preferred_buyers=["roaster", "retailer_a"],

@@ -5,7 +5,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import SimulationConfig, create_initial_market_state
+from .config import SimulationConfig, build_market_information, create_initial_market_state
 from .logging_utils import ensure_dir, write_json, write_jsonl
 from .market import (
     InvalidActionError,
@@ -17,7 +17,7 @@ from .market import (
 from .metrics import collect_metrics, economic_inventory_value
 from .models import AgentAction, MarketState
 from .observation import build_observation
-from .policies import AgentPolicy, WaitPolicy, policy_name
+from .policies import AgentPolicy, PRICE_LIMIT_REJECTION_REASON, WaitPolicy, policy_name
 
 
 @dataclass
@@ -71,6 +71,7 @@ class SimulationRunner:
                     agent_id,
                     initial_cash=self._initial_cash_by_agent[agent_id],
                     initial_inventory_value=self._initial_inventory_value_by_agent[agent_id],
+                    market_information=build_market_information(self.config),
                 )
                 chosen_action = self._choose_action(agent_id, observation)
                 llm_log = self._consume_llm_log(agent_id)
@@ -218,9 +219,23 @@ class SimulationRunner:
 
     def _quality_metrics(self) -> dict[str, int]:
         llm_logs = [row["llm"] for row in self._action_logs if "llm" in row]
+        repeat_purchase_count = 0
+        purchases_by_buyer_and_lot: dict[tuple[str, str], int] = {}
+        for trade in self.state.trade_history:
+            key = (trade.buyer_id, trade.lot_id)
+            purchases_by_buyer_and_lot[key] = purchases_by_buyer_and_lot.get(key, 0) + 1
+            if purchases_by_buyer_and_lot[key] > 1:
+                repeat_purchase_count += 1
         return {
             "invalid_action_count": sum(not row["is_valid"] for row in self._action_logs),
             "llm_fallback_count": sum(bool(log["fallback_used"]) for log in llm_logs),
             "api_error_count": sum(bool(log["api_error"]) for log in llm_logs),
             "json_parse_error_count": sum(bool(log["parse_error"]) for log in llm_logs),
+            "price_limit_rejection_count": sum(
+                row["action"].action_type == "reject_trade"
+                and row["action"].reason_summary == PRICE_LIMIT_REJECTION_REASON
+                for row in self._action_logs
+                if isinstance(row.get("action"), AgentAction)
+            ),
+            "repeat_purchase_count": repeat_purchase_count,
         }
