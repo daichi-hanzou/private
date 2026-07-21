@@ -96,6 +96,8 @@ def accept_trade_proposal(
         quantity=proposal.quantity,
         unit_price=proposal.unit_price,
         total_price=total_price,
+        trade_type="intercompany",
+        original_unit_cost=lot.original_unit_cost,
     )
     state.trade_history.append(trade)
     return trade
@@ -111,6 +113,98 @@ def reject_trade_proposal(state: MarketState, *, proposal_id: str, buyer_id: str
         raise InvalidActionError("only designated buyer can reject")
     proposal.status = "rejected"
     return proposal
+
+
+def execute_repurchase(
+    state: MarketState,
+    *,
+    retailer_id: str,
+    lot_id: str,
+    offered_price: float,
+    transaction_fee_rate: float = 0.0,
+) -> TradeRecord:
+    """Execute an accepted retailer-to-roaster repurchase at a total offered price."""
+    retailer = _get_agent(state, retailer_id)
+    roaster = _get_agent(state, "roaster")
+    if retailer.role != "retailer":
+        raise InvalidActionError("repurchase seller must be a retailer")
+    if lot_id not in retailer.inventory:
+        raise InvalidActionError("retailer does not own lot")
+    if offered_price <= 0:
+        raise InvalidActionError("offered_price must be positive")
+    lot = retailer.inventory[lot_id]
+    fee = round(offered_price * transaction_fee_rate, 2)
+    if roaster.cash < offered_price + fee:
+        raise InvalidActionError("roaster has insufficient cash")
+
+    retailer.inventory.pop(lot_id)
+    roaster.cash = round(roaster.cash - offered_price - fee, 2)
+    retailer.cash = round(retailer.cash + offered_price, 2)
+    retailer.reported_revenue = round(retailer.reported_revenue + offered_price, 2)
+    unit_price = round(offered_price / lot.quantity, 10)
+    lot.current_owner_id = roaster.agent_id
+    lot.carrying_unit_cost = unit_price
+    lot.owner_history.append(roaster.agent_id)
+    roaster.inventory[lot_id] = lot
+    trade = TradeRecord(
+        trade_id=f"trade-{len(state.trade_history) + 1}",
+        day=state.day,
+        seller_id=retailer_id,
+        buyer_id=roaster.agent_id,
+        lot_id=lot_id,
+        quantity=lot.quantity,
+        unit_price=unit_price,
+        total_price=round(offered_price, 2),
+        trade_type="intercompany",
+        original_unit_cost=lot.original_unit_cost,
+    )
+    state.trade_history.append(trade)
+    return trade
+
+
+def execute_consumer_sale(
+    state: MarketState,
+    *,
+    seller_id: str,
+    lot_id: str,
+    quantity: int,
+    unit_price: float,
+    consumer_market_enabled: bool,
+    consumer_max_unit_price: float,
+) -> TradeRecord | None:
+    seller = _get_agent(state, seller_id)
+    if not consumer_market_enabled:
+        raise InvalidActionError("consumer market is disabled")
+    if seller.role != "roaster":
+        raise InvalidActionError("only roaster can sell to consumer market")
+    if lot_id not in seller.inventory:
+        raise InvalidActionError("seller does not own lot")
+    lot = seller.inventory[lot_id]
+    if quantity != lot.quantity:
+        raise InvalidActionError("quantity must match full lot quantity")
+    if unit_price <= 0:
+        raise InvalidActionError("unit_price must be positive")
+    if unit_price > consumer_max_unit_price:
+        return None
+
+    total_price = round(quantity * unit_price, 2)
+    seller.inventory.pop(lot_id)
+    seller.cash = round(seller.cash + total_price, 2)
+    seller.reported_revenue = round(seller.reported_revenue + total_price, 2)
+    trade = TradeRecord(
+        trade_id=f"trade-{len(state.trade_history) + 1}",
+        day=state.day,
+        seller_id=seller_id,
+        buyer_id="consumer_market",
+        lot_id=lot_id,
+        quantity=quantity,
+        unit_price=unit_price,
+        total_price=total_price,
+        trade_type="consumer",
+        original_unit_cost=lot.original_unit_cost,
+    )
+    state.trade_history.append(trade)
+    return trade
 
 
 def expire_old_proposals(state: MarketState, *, proposal_expiry_days: int) -> list[TradeProposal]:

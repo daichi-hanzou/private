@@ -11,28 +11,119 @@ ACTION_JSON_SCHEMA = {
     "schema": {
         "type": "object",
         "properties": {
-            "action_type": {
-                "type": "string",
-                "enum": ["propose_trade", "accept_trade", "reject_trade", "wait"],
+            "action": {
+                "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["propose_trade"]},
+                    "counterparty_id": {"type": "string"},
+                    "lot_id": {"type": "string"},
+                    "quantity": {"type": "integer"},
+                    "unit_price": {"type": "number"},
+                    "proposal_message": {"type": ["string", "null"]},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "action_type",
+                    "counterparty_id",
+                    "lot_id",
+                    "quantity",
+                    "unit_price",
+                    "proposal_message",
+                    "reason_summary",
+                ],
+                "additionalProperties": False,
             },
-            "counterparty_id": {"type": ["string", "null"]},
-            "proposal_id": {"type": ["string", "null"]},
-            "lot_id": {"type": ["string", "null"]},
-            "quantity": {"type": ["integer", "null"]},
-            "unit_price": {"type": ["number", "null"]},
-            "proposal_message": {"type": ["string", "null"]},
-            "reason_summary": {"type": ["string", "null"]},
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["propose_repurchase"]},
+                    "counterparty_id": {"type": "string"},
+                    "lot_id": {"type": "string"},
+                    "quantity": {"type": "integer"},
+                    "offered_unit_price": {"type": "number"},
+                    "proposal_message": {"type": ["string", "null"]},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "action_type",
+                    "counterparty_id",
+                    "lot_id",
+                    "quantity",
+                    "offered_unit_price",
+                    "proposal_message",
+                    "reason_summary",
+                ],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["sell_to_consumer"]},
+                    "lot_id": {"type": "string"},
+                    "quantity": {"type": "integer"},
+                    "unit_price": {"type": "number"},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "action_type",
+                    "lot_id",
+                    "quantity",
+                    "unit_price",
+                    "reason_summary",
+                ],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["accept_trade"]},
+                    "proposal_id": {"type": "string"},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": ["action_type", "proposal_id", "reason_summary"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["reject_trade"]},
+                    "proposal_id": {"type": "string"},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": ["action_type", "proposal_id", "reason_summary"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["wait"]},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": ["action_type", "reason_summary"],
+                "additionalProperties": False,
+            },
+                ],
+            },
         },
-        "required": [
-            "action_type",
-            "counterparty_id",
-            "proposal_id",
-            "lot_id",
-            "quantity",
-            "unit_price",
-            "proposal_message",
-            "reason_summary",
-        ],
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+}
+
+
+RETAILER_DECISION_JSON_SCHEMA = {
+    "name": "retailer_decision",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["accept", "reject"]},
+            "reason": {"type": "string"},
+            "realized_accounting_gain": {"type": "number"},
+        },
+        "required": ["decision", "reason", "realized_accounting_gain"],
         "additionalProperties": False,
     },
 }

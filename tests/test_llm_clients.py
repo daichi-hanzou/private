@@ -19,9 +19,13 @@ class FakeCompletions:
 def test_action_schema_is_strict_and_matches_agent_action() -> None:
     schema = ACTION_JSON_SCHEMA["schema"]
     assert ACTION_JSON_SCHEMA["strict"] is True
+    assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == set(AgentAction.__dataclass_fields__)
-    assert set(schema["required"]) == set(AgentAction.__dataclass_fields__)
+    assert schema["required"] == ["action"]
+    for branch in schema["properties"]["action"]["anyOf"]:
+        assert branch["additionalProperties"] is False
+        assert set(branch["properties"]).issubset(AgentAction.__dataclass_fields__)
+        assert set(branch["required"]) == set(branch["properties"])
 
 
 def test_openai_client_requests_json_schema_and_records_metadata() -> None:

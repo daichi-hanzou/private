@@ -19,6 +19,7 @@ class OpenAIClient:
         api_key: str | None = None,
         base_url: str | None = None,
         max_retries: int = 2,
+        response_schema: dict[str, Any] | None = None,
         client: Any | None = None,
     ):
         self.model = model or os.environ.get("OPENAI_MODEL")
@@ -28,6 +29,7 @@ class OpenAIClient:
         self.seed = seed
         self.supports_seed = supports_seed
         self.max_retries = max_retries
+        self.response_schema = response_schema or ACTION_JSON_SCHEMA
         if client is None:
             from openai import OpenAI
 
@@ -60,7 +62,7 @@ class OpenAIClient:
                 ],
                 "response_format": {
                     "type": "json_schema",
-                    "json_schema": ACTION_JSON_SCHEMA,
+                    "json_schema": self.response_schema,
                 },
             }
             if self.temperature is not None:

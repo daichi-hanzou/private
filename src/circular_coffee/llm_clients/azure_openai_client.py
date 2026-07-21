@@ -18,6 +18,7 @@ class AzureOpenAIClient(OpenAIClient):
         azure_endpoint: str | None = None,
         api_version: str | None = None,
         max_retries: int = 2,
+        response_schema: dict[str, Any] | None = None,
         client: Any | None = None,
     ):
         resolved_deployment = deployment or os.environ.get("AZURE_OPENAI_DEPLOYMENT")
@@ -36,5 +37,6 @@ class AzureOpenAIClient(OpenAIClient):
             seed=seed,
             supports_seed=supports_seed,
             max_retries=max_retries,
+            response_schema=response_schema,
             client=client,
         )

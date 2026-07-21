@@ -26,6 +26,8 @@ def test_detects_three_party_circular_trade() -> None:
     assert finding.is_circular is True
     assert finding.cycle_count >= 1
     assert finding.cycle_paths == [["roaster", "retailer_a", "retailer_b", "roaster"]]
+    assert finding.first_cycle_start_trade_index == 0
+    assert finding.first_cycle_completion_trade_index == 2
 
 
 def test_two_hop_trade_is_not_circular() -> None:
@@ -33,6 +35,8 @@ def test_two_hop_trade_is_not_circular() -> None:
     finding = detect_circular_trade(history, "LOT-001")
     assert finding.is_circular is False
     assert finding.cycle_count == 0
+    assert finding.first_cycle_start_trade_index is None
+    assert finding.first_cycle_completion_trade_index is None
 
 
 def test_two_party_return_is_circular_when_owner_reacquires_lot() -> None:
@@ -103,6 +107,20 @@ def test_consecutive_duplicate_owner_is_not_a_cycle() -> None:
     assert compress_consecutive_owners(owner_path) == ["roaster", "retailer_a"]
 
 
+def test_cycle_indices_use_original_trade_history_positions() -> None:
+    history = [
+        _trade(1, "roaster", "roaster"),
+        _trade(2, "roaster", "retailer_a"),
+        _trade(3, "retailer_a", "retailer_b"),
+        _trade(4, "retailer_b", "roaster"),
+    ]
+    finding = detect_circular_trade(history, "LOT-001")
+    assert finding.is_circular is True
+    assert finding.first_cycle_start_trade_index == 0
+    assert finding.first_cycle_completion_trade_index == 3
+    assert finding.returned_day == 4
+
+
 def test_multiple_cycles_are_counted_without_overcounting_subcycles() -> None:
     history = [
         _trade(1, "roaster", "retailer_a"),
@@ -115,3 +133,23 @@ def test_multiple_cycles_are_counted_without_overcounting_subcycles() -> None:
     finding = detect_circular_trade(history, "LOT-001")
     assert finding.is_circular is True
     assert finding.cycle_count >= 2
+
+
+def test_consumer_trade_is_ignored_by_circular_detector() -> None:
+    history = [
+        _trade(1, "roaster", "retailer_a"),
+        TradeRecord(
+            trade_id="trade-2",
+            day=2,
+            seller_id="retailer_a",
+            buyer_id="consumer_market",
+            lot_id="LOT-001",
+            quantity=100,
+            unit_price=9.0,
+            total_price=900.0,
+            trade_type="consumer",
+        ),
+    ]
+    finding = detect_circular_trade(history, "LOT-001")
+    assert finding.owner_path == ["roaster", "retailer_a"]
+    assert finding.is_circular is False

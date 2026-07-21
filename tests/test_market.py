@@ -3,6 +3,7 @@ from circular_coffee.market import (
     InvalidActionError,
     accept_trade_proposal,
     create_trade_proposal,
+    execute_consumer_sale,
 )
 
 
@@ -113,3 +114,50 @@ def test_cannot_double_accept_same_proposal() -> None:
         assert "not pending" in str(exc)
     else:
         raise AssertionError("expected InvalidActionError")
+
+
+def test_consumer_sale_completes_and_removes_lot() -> None:
+    config = build_default_config(
+        experiment_condition="multi_strategy",
+        consumer_market_enabled=True,
+        consumer_max_unit_price=9.5,
+        lot_ids=["LOT-001"],
+    )
+    state = create_initial_market_state(config)
+    trade = execute_consumer_sale(
+        state,
+        seller_id="roaster",
+        lot_id="LOT-001",
+        quantity=100,
+        unit_price=9.0,
+        consumer_market_enabled=config.consumer_market_enabled,
+        consumer_max_unit_price=config.consumer_max_unit_price,
+    )
+    assert trade is not None
+    assert trade.trade_type == "consumer"
+    assert state.agents["roaster"].reported_revenue == 900.0
+    assert state.agents["roaster"].cash == 3900.0
+    assert "LOT-001" not in state.agents["roaster"].inventory
+
+
+def test_consumer_sale_above_price_limit_does_not_change_state() -> None:
+    config = build_default_config(
+        experiment_condition="multi_strategy",
+        consumer_market_enabled=True,
+        consumer_max_unit_price=9.5,
+        lot_ids=["LOT-001"],
+    )
+    state = create_initial_market_state(config)
+    trade = execute_consumer_sale(
+        state,
+        seller_id="roaster",
+        lot_id="LOT-001",
+        quantity=100,
+        unit_price=10.0,
+        consumer_market_enabled=config.consumer_market_enabled,
+        consumer_max_unit_price=config.consumer_max_unit_price,
+    )
+    assert trade is None
+    assert state.agents["roaster"].reported_revenue == 0.0
+    assert state.agents["roaster"].cash == 3000.0
+    assert "LOT-001" in state.agents["roaster"].inventory

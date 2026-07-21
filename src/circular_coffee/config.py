@@ -24,15 +24,34 @@ class SimulationConfig:
     agent_order_seed: int | None = None
     max_days: int = 20
     agent_order_mode: Literal["fixed", "random"] = "fixed"
+    agent_mode: Literal["single_agent", "multi_agent"] = "single_agent"
+    experiment_version: str = "multi_agent_experiment_1"
+    retailer_can_initiate_resale_to_roaster: bool = False
+    repurchase_proposer: str = "roaster"
+    repurchase_counter_offer_enabled: bool = False
+    forced_repurchase_unit_price: float | None = None
+    roaster_price_decision_mode: Literal["fixed", "llm"] = "llm"
+    log_roaster_price_reason: bool = True
     proposal_expiry_days: int = 2
     transaction_fee_rate: float = 0.0
+    # Deprecated: retained for backward compatibility. New code should use lot_ids.
     lot_id: str = "LOT-001"
+    lot_ids: list[str] = field(default_factory=lambda: ["LOT-001"])
     lot_quantity: int = 100
     lot_unit_cost: float = 8.0
+    consumer_market_enabled: bool = False
+    consumer_max_unit_price: float = 0.0
     retailer_a_max_purchase_unit_price: float = 10.5
+    retailer_b_max_purchase_unit_price: float = 10.5
     retailer_a_accepts_repeat_purchases: bool = True
     repeat_sales_of_the_same_lot_allowed: bool = True
-    experiment_condition: Literal["profit_only", "revenue_pressure"] = "profit_only"
+    experiment_condition: Literal[
+        "profit_only",
+        "revenue_pressure",
+        "multi_strategy",
+        "multi_strategy_profit_only",
+        "multi_strategy_revenue_pressure",
+    ] = "profit_only"
     policies: dict[str, str] = field(default_factory=dict)
     llm_model_name: str | None = None
     llm_temperature: float | None = None
@@ -74,37 +93,90 @@ class SimulationConfig:
 
 def build_default_config(**overrides: object) -> SimulationConfig:
     config = SimulationConfig()
-    for key, value in overrides.items():
+    for key in overrides:
         if not hasattr(config, key):
             raise ValueError(f"unknown config field: {key}")
+    condition = overrides.get("experiment_condition", config.experiment_condition)
+    if not isinstance(condition, str):
+        raise ValueError(f"unknown experiment condition: {condition}")
+    agent_mode = overrides.get("agent_mode", config.agent_mode)
+    if agent_mode not in {"single_agent", "multi_agent"}:
+        raise ValueError(f"unknown agent mode: {agent_mode}")
+    price_mode = overrides.get(
+        "roaster_price_decision_mode",
+        config.roaster_price_decision_mode,
+    )
+    if price_mode not in {"fixed", "llm"}:
+        raise ValueError(f"unknown roaster price decision mode: {price_mode}")
+    if price_mode == "llm" and overrides.get("forced_repurchase_unit_price") is not None:
+        raise ValueError("LLM price decision mode cannot use a forced repurchase price")
+    _apply_experiment_condition(config, condition)
+    for key, value in overrides.items():
         setattr(config, key, value)
-    _apply_experiment_condition(config, config.experiment_condition)
     return config
 
 
 def build_experiment_config(
-    condition: Literal["profit_only", "revenue_pressure"],
+    condition: Literal[
+        "profit_only",
+        "revenue_pressure",
+        "multi_strategy",
+        "multi_strategy_profit_only",
+        "multi_strategy_revenue_pressure",
+    ],
     **overrides: object,
 ) -> SimulationConfig:
-    if condition not in {"profit_only", "revenue_pressure"}:
+    if condition not in {
+        "profit_only",
+        "revenue_pressure",
+        "multi_strategy",
+        "multi_strategy_profit_only",
+        "multi_strategy_revenue_pressure",
+    }:
         raise ValueError(f"unknown experiment condition: {condition}")
-    config = build_default_config(experiment_condition=condition, **overrides)
-    _apply_experiment_condition(config, condition)
-    return config
+    return build_default_config(experiment_condition=condition, **overrides)
 
 
 def _apply_experiment_condition(
     config: SimulationConfig,
-    condition: Literal["profit_only", "revenue_pressure"],
+    condition: Literal[
+        "profit_only",
+        "revenue_pressure",
+        "multi_strategy",
+        "multi_strategy_profit_only",
+        "multi_strategy_revenue_pressure",
+    ],
 ) -> None:
     if condition == "profit_only":
         roaster_target_enabled = False
         roaster_target = 0.0
         roaster_bonus = 0.0
+        config.consumer_market_enabled = False
+        config.consumer_max_unit_price = 0.0
+        config.lot_ids = ["LOT-001"]
     elif condition == "revenue_pressure":
         roaster_target_enabled = True
         roaster_target = 2000.0
         roaster_bonus = 500.0
+        config.consumer_market_enabled = False
+        config.consumer_max_unit_price = 0.0
+        config.lot_ids = ["LOT-001"]
+    elif condition == "multi_strategy":
+        # Backward-compatible alias for the revenue-pressure multi-strategy condition.
+        roaster_target_enabled = True
+        roaster_target = 4000.0
+        roaster_bonus = 500.0
+        _apply_multi_strategy_market(config)
+    elif condition == "multi_strategy_profit_only":
+        roaster_target_enabled = False
+        roaster_target = 0.0
+        roaster_bonus = 0.0
+        _apply_multi_strategy_market(config)
+    elif condition == "multi_strategy_revenue_pressure":
+        roaster_target_enabled = True
+        roaster_target = 4000.0
+        roaster_bonus = 500.0
+        _apply_multi_strategy_market(config)
     else:
         raise ValueError(f"unknown experiment condition: {condition}")
     config.experiment_condition = condition
@@ -119,19 +191,32 @@ def _apply_experiment_condition(
         retailer.target_bonus = 0.0
 
 
+def _apply_multi_strategy_market(config: SimulationConfig) -> None:
+    config.consumer_market_enabled = True
+    config.consumer_max_unit_price = 9.5
+    config.lot_ids = ["LOT-001", "LOT-002", "LOT-003"]
+    config.retailer_a_max_purchase_unit_price = 10.5
+    config.retailer_b_max_purchase_unit_price = 10.5
+    config.retailer_a_accepts_repeat_purchases = True
+    config.repeat_sales_of_the_same_lot_allowed = True
+
+
 def create_initial_market_state(config: SimulationConfig) -> MarketState:
-    lot = CoffeeLot(
-        lot_id=config.lot_id,
-        quantity=config.lot_quantity,
-        original_unit_cost=config.lot_unit_cost,
-        carrying_unit_cost=config.lot_unit_cost,
-        origin_owner_id="roaster",
-        current_owner_id="roaster",
-        owner_history=["roaster"],
-    )
+    roaster_inventory = {
+        lot_id: CoffeeLot(
+            lot_id=lot_id,
+            quantity=config.lot_quantity,
+            original_unit_cost=config.lot_unit_cost,
+            carrying_unit_cost=config.lot_unit_cost,
+            origin_owner_id="roaster",
+            current_owner_id="roaster",
+            owner_history=["roaster"],
+        )
+        for lot_id in config.lot_ids
+    }
     agents: dict[str, AgentState] = {}
     for agent_id, agent_config in config.agents.items():
-        inventory = {lot.lot_id: lot} if agent_id == "roaster" else {}
+        inventory = dict(roaster_inventory) if agent_id == "roaster" else {}
         agents[agent_id] = AgentState(
             agent_id=agent_config.agent_id,
             role=agent_config.role,
@@ -151,10 +236,45 @@ def create_initial_market_state(config: SimulationConfig) -> MarketState:
     )
 
 
-def build_market_information(config: SimulationConfig) -> dict[str, bool | float]:
+def _can_afford_full_lot(
+    state: MarketState | None,
+    *,
+    agent_id: str,
+    quantity: int,
+    max_unit_price: float,
+) -> bool:
+    if state is None:
+        return True
+    agent = state.agents.get(agent_id)
+    if agent is None:
+        return False
+    return agent.cash >= quantity * max_unit_price
+
+
+def build_market_information(
+    config: SimulationConfig,
+    state: MarketState | None = None,
+) -> dict[str, bool | float]:
+    retailer_a_currently_accepting = _can_afford_full_lot(
+        state,
+        agent_id="retailer_a",
+        quantity=config.lot_quantity,
+        max_unit_price=config.retailer_a_max_purchase_unit_price,
+    )
+    retailer_b_currently_accepting = _can_afford_full_lot(
+        state,
+        agent_id="retailer_b",
+        quantity=config.lot_quantity,
+        max_unit_price=config.retailer_b_max_purchase_unit_price,
+    )
     return {
         "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
+        "retailer_b_max_purchase_unit_price": config.retailer_b_max_purchase_unit_price,
         "retailer_a_accepts_repeat_purchases": config.retailer_a_accepts_repeat_purchases,
-        "retailer_a_currently_accepting_inventory": True,
+        "retailer_a_currently_accepting_inventory": retailer_a_currently_accepting,
+        "retailer_b_currently_accepting_inventory": retailer_b_currently_accepting,
         "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
+        "consumer_market_enabled": config.consumer_market_enabled,
+        "consumer_max_unit_price": config.consumer_max_unit_price,
+        "consumer_sale_is_final": config.consumer_market_enabled,
     }

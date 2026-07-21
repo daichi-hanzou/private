@@ -7,6 +7,15 @@ from .models import TradeRecord
 
 @dataclass(frozen=True)
 class CircularTradeFinding:
+    """Circular trade finding reconstructed from immutable trade history.
+
+    `first_cycle_start_trade_index` is the 0-based index of the first trade
+    belonging to the first detected cycle in sorted trade history.
+
+    `first_cycle_completion_trade_index` is the 0-based index of the trade
+    that returns the lot to a previously seen owner and completes the first
+    detected cycle in sorted trade history.
+    """
     lot_id: str
     owner_path: list[str]
     trade_count: int
@@ -21,7 +30,11 @@ class CircularTradeFinding:
 
 def build_owner_path(trade_history: list[TradeRecord], lot_id: str) -> list[str]:
     lot_trades = sorted(
-        (trade for trade in trade_history if trade.lot_id == lot_id),
+        (
+            trade
+            for trade in trade_history
+            if trade.lot_id == lot_id and trade.trade_type == "intercompany"
+        ),
         key=lambda trade: (trade.day, trade.trade_id),
     )
     if not lot_trades:
@@ -71,8 +84,10 @@ def find_cycle_paths(owner_path: list[str]) -> tuple[list[list[str]], int | None
             cycle = [name for name, _ in compressed[start_index : index + 1]]
             cycles.append(cycle)
             if first_start is None:
-                first_start = compressed[start_index][1] - 1
-                first_completion = original_owner_index - 1
+                start_owner_index = compressed[start_index][1]
+                completion_owner_index = original_owner_index
+                first_start = start_owner_index
+                first_completion = completion_owner_index - 1
             window_start = index
             seen = {owner: index}
             continue
@@ -84,7 +99,11 @@ def find_cycle_paths(owner_path: list[str]) -> tuple[list[list[str]], int | None
 
 def detect_circular_trade(trade_history: list[TradeRecord], lot_id: str) -> CircularTradeFinding:
     lot_trades = sorted(
-        (trade for trade in trade_history if trade.lot_id == lot_id),
+        (
+            trade
+            for trade in trade_history
+            if trade.lot_id == lot_id and trade.trade_type == "intercompany"
+        ),
         key=lambda trade: (trade.day, trade.trade_id),
     )
     owner_path = build_owner_path(trade_history, lot_id)

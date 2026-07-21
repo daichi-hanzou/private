@@ -3,19 +3,54 @@ from __future__ import annotations
 import argparse
 import os
 import re
+from pathlib import Path
 
 from circular_coffee.config import build_experiment_config
-from circular_coffee.llm_clients import AzureOpenAIClient, OpenAIClient
-from circular_coffee.policies import CooperativeRetailerPolicy, LLMPolicy
+from circular_coffee.llm_clients import (
+    RETAILER_DECISION_JSON_SCHEMA,
+    AzureOpenAIClient,
+    OpenAIClient,
+)
+from circular_coffee.policies import (
+    MULTI_AGENT_ROASTER_PROMPT_SUFFIX,
+    CooperativeRetailerPolicy,
+    LLMPolicy,
+    RetailerDecisionPolicy,
+    build_llm_system_prompt,
+)
 from circular_coffee.simulation import SimulationRunner
+
+CONDITION_CHOICES = (
+    "profit_only",
+    "revenue_pressure",
+    "multi_strategy",
+    "multi_strategy_profit_only",
+    "multi_strategy_revenue_pressure",
+)
 
 
 def safe_model_name(model: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", model)
 
 
+def safe_number_label(value: float) -> str:
+    return str(float(value)).replace(".", "_")
+
+
+def build_lot_ids(lot_count: int) -> list[str]:
+    if lot_count <= 0:
+        raise ValueError("--lot-count must be positive")
+    return [f"LOT-{index:03d}" for index in range(1, lot_count + 1)]
+
+
 def build_client(
-    *, model: str, temperature: float | None, seed: int, provider: str, send_seed: bool
+    *,
+    model: str,
+    temperature: float | None,
+    seed: int,
+    provider: str,
+    send_seed: bool,
+    response_schema: dict | None = None,
 ):
     if provider == "azure":
         return AzureOpenAIClient(
@@ -23,13 +58,23 @@ def build_client(
             temperature=temperature,
             seed=seed,
             supports_seed=send_seed,
+            response_schema=response_schema,
         )
     return OpenAIClient(
         model=model,
         temperature=temperature,
         seed=seed,
         supports_seed=send_seed,
+        response_schema=response_schema,
     )
+
+
+def uses_multi_strategy_market(condition: str) -> bool:
+    return condition in {
+        "multi_strategy",
+        "multi_strategy_profit_only",
+        "multi_strategy_revenue_pressure",
+    }
 
 
 def run_condition(
@@ -39,87 +84,390 @@ def run_condition(
     seed: int,
     temperature: float | None,
     provider: str,
+    llm_seed: int | None = None,
+    agent_order_seed: int | None = None,
     send_seed: bool = False,
     prompt_version: str = "v1",
+    bonus: float | None = None,
+    target: float | None = None,
+    lot_count: int | None = None,
+    retailer_a_max_purchase_unit_price: float | None = None,
+    retailer_b_max_purchase_unit_price: float | None = None,
+    agent_mode: str = "single_agent",
+    forced_repurchase_unit_price: float | None = None,
+    overwrite: bool = False,
 ):
+    is_experiment_2 = agent_mode == "multi_agent" and forced_repurchase_unit_price is None
+    resolved_llm_seed = seed if llm_seed is None else llm_seed
+    resolved_agent_order_seed = seed if agent_order_seed is None else agent_order_seed
     config = build_experiment_config(
         condition=condition,
         seed=seed,
-        llm_seed=seed,
-        agent_order_seed=seed,
+        llm_seed=resolved_llm_seed,
+        agent_order_seed=resolved_agent_order_seed,
         llm_model_name=model,
         llm_temperature=temperature,
         prompt_version=prompt_version,
+        agent_mode=agent_mode,
+        forced_repurchase_unit_price=forced_repurchase_unit_price,
+        experiment_version=(
+            "multi_agent_experiment_2"
+            if is_experiment_2
+            else "multi_agent_experiment_1"
+        ),
+        roaster_price_decision_mode="llm" if is_experiment_2 else "fixed",
+        log_roaster_price_reason=True,
     )
-    client = build_client(
+    if bonus is not None:
+        config.agents["roaster"].target_bonus = bonus
+    if target is not None:
+        config.agents["roaster"].revenue_target = target
+    if lot_count is not None:
+        config.lot_ids = build_lot_ids(lot_count)
+    if retailer_a_max_purchase_unit_price is not None:
+        config.retailer_a_max_purchase_unit_price = retailer_a_max_purchase_unit_price
+    if retailer_b_max_purchase_unit_price is not None:
+        config.retailer_b_max_purchase_unit_price = retailer_b_max_purchase_unit_price
+    configured_bonus = config.agents["roaster"].target_bonus
+    configured_target = config.agents["roaster"].revenue_target
+    configured_lot_count = len(config.lot_ids)
+    roaster_client = build_client(
         model=model,
         temperature=temperature,
-        seed=seed,
+        seed=resolved_llm_seed,
         provider=provider,
         send_seed=send_seed,
     )
+    retailer_a_preferred_buyers = (
+        ["roaster", "retailer_b"]
+        if uses_multi_strategy_market(condition)
+        else ["retailer_b", "roaster"]
+    )
+    retailer_b_max_purchase_unit_price = (
+        config.retailer_b_max_purchase_unit_price
+        if uses_multi_strategy_market(condition)
+        else None
+    )
     policies = {
         "roaster": LLMPolicy(
-            client=client,
+            client=roaster_client,
             condition=config.experiment_condition,
+            system_prompt=(
+                build_llm_system_prompt(config.experiment_condition)
+                + MULTI_AGENT_ROASTER_PROMPT_SUFFIX
+                if agent_mode == "multi_agent"
+                else None
+            ),
             prompt_version=config.prompt_version,
         ),
         "retailer_a": CooperativeRetailerPolicy(
-            preferred_buyers=["retailer_b", "roaster"],
+            preferred_buyers=retailer_a_preferred_buyers,
             max_purchase_unit_price=config.retailer_a_max_purchase_unit_price,
+            can_initiate_resale=(
+                agent_mode != "multi_agent"
+                or config.retailer_can_initiate_resale_to_roaster
+            ),
         ),
         "retailer_b": CooperativeRetailerPolicy(
             preferred_buyers=["roaster", "retailer_a"],
+            max_purchase_unit_price=retailer_b_max_purchase_unit_price,
+            can_initiate_resale=(
+                agent_mode != "multi_agent"
+                or config.retailer_can_initiate_resale_to_roaster
+            ),
         ),
     }
-    run_id = f"llm_{condition}_{safe_model_name(model)}_seed_{seed}"
-    return SimulationRunner(config, policies, run_id=run_id).run()
+    repurchase_decision_policies = {}
+    if agent_mode == "multi_agent":
+        repurchase_decision_policies = {
+            retailer_id: RetailerDecisionPolicy(
+                client=build_client(
+                    model=model,
+                    temperature=temperature,
+                    seed=resolved_llm_seed,
+                    provider=provider,
+                    send_seed=send_seed,
+                    response_schema=RETAILER_DECISION_JSON_SCHEMA,
+                ),
+                prompt_version=prompt_version,
+            )
+            for retailer_id in ("retailer_a", "retailer_b")
+        }
+    output_root = build_output_root(
+        condition=condition,
+        bonus=configured_bonus,
+        target=configured_target,
+        lot_count=lot_count,
+        retailer_a_max_purchase_unit_price=retailer_a_max_purchase_unit_price,
+        retailer_b_max_purchase_unit_price=retailer_b_max_purchase_unit_price,
+        agent_mode=agent_mode,
+        forced_repurchase_unit_price=forced_repurchase_unit_price,
+    )
+    run_id = f"seed_{seed}"
+    output_dir = Path(output_root) / run_id
+    if output_dir.exists() and not overwrite:
+        raise FileExistsError(
+            f"output already exists: {output_dir}. Use --overwrite to replace it."
+        )
+    print(f"condition: {condition}")
+    print(f"target: {configured_target}")
+    print(f"bonus: {configured_bonus}")
+    print(f"lot_count: {configured_lot_count}")
+    print(
+        "retailer_a_max_purchase_unit_price: "
+        f"{config.retailer_a_max_purchase_unit_price}"
+    )
+    print(
+        "retailer_b_max_purchase_unit_price: "
+        f"{config.retailer_b_max_purchase_unit_price}"
+    )
+    print(f"agent_mode: {agent_mode}")
+    print(f"forced_repurchase_unit_price: {forced_repurchase_unit_price}")
+    print(f"experiment_version: {config.experiment_version}")
+    print(f"roaster_price_decision_mode: {config.roaster_price_decision_mode}")
+    print(f"seed: {seed}")
+    print(f"llm_seed: {resolved_llm_seed}")
+    print(f"agent_order_seed: {resolved_agent_order_seed}")
+    print(f"output_dir: {output_dir}")
+    return SimulationRunner(
+        config,
+        policies,
+        run_id=run_id,
+        output_root=output_root,
+        repurchase_decision_policies=repurchase_decision_policies,
+    ).run()
 
 
-def print_result(result, *, condition: str, model: str, seed: int) -> None:
+def print_result(
+    result,
+    *,
+    condition: str,
+    model: str,
+    seed: int,
+    bonus: float | None,
+    target: float | None,
+    lot_count: int | None,
+    retailer_a_max_purchase_unit_price: float | None,
+    retailer_b_max_purchase_unit_price: float | None,
+    agent_mode: str,
+    forced_repurchase_unit_price: float | None,
+) -> None:
     metrics = result.metrics
     roaster = metrics["agents"]["roaster"]
     fields = {
         "condition": condition,
         "model": model,
         "seed": seed,
+        "configured_roaster_revenue_target": (
+            target if target is not None else result.state.agents["roaster"].revenue_target
+        ),
+        "configured_roaster_target_bonus": (
+            bonus if bonus is not None else result.state.agents["roaster"].target_bonus
+        ),
+        "configured_lot_count": lot_count if lot_count is not None else "default",
+        "configured_retailer_a_max_purchase_unit_price": (
+            retailer_a_max_purchase_unit_price
+            if retailer_a_max_purchase_unit_price is not None
+            else "default"
+        ),
+        "configured_retailer_b_max_purchase_unit_price": (
+            retailer_b_max_purchase_unit_price
+            if retailer_b_max_purchase_unit_price is not None
+            else "default"
+        ),
+        "agent_mode": agent_mode,
+        "forced_repurchase_unit_price": forced_repurchase_unit_price,
         "circular_trade_detected": metrics["circular_trade_detected"],
+        "kpi_gaming_detected": metrics["kpi_gaming_metrics"]["kpi_gaming_detected"],
+        "cycle_count": metrics["cycle_count"],
+        "max_feasible_revenue": metrics["max_feasible_revenue"],
+        "kpi_feasible_at_start": metrics["kpi_feasible_at_start"],
+        "kpi_became_infeasible_day": metrics["kpi_became_infeasible_day"],
+        "cycles_after_kpi_became_infeasible": metrics["cycles_after_kpi_became_infeasible"],
+        "organic_revenue": metrics["organic_revenue"],
+        "cycle_generated_revenue": metrics["cycle_generated_revenue"],
+        "cycle_revenue_share": metrics["cycle_revenue_share"],
         "trades_completed": metrics["trades_completed"],
+        "consumer_sales_completed": metrics["consumer_sales_completed"],
+        "consumer_sales_revenue": metrics["consumer_sales_revenue"],
+        "roaster_consumer_sales_count": metrics["roaster_consumer_sales_count"],
+        "roaster_intercompany_sales_count": metrics["roaster_intercompany_sales_count"],
+        "market_repurchase_after_sale_count": metrics["market_repurchase_after_sale_count"],
+        "roaster_repurchase_after_sale_count": metrics["roaster_repurchase_after_sale_count"],
         "roaster reported_revenue": roaster["reported_revenue"],
         "roaster economic_profit": roaster["economic_profit"],
         "roaster bonus_received": roaster["bonus_received"],
+        "roaster target_achieved": roaster["target_achieved"],
         "roaster final_score": roaster["final_score"],
+        "roaster_total_bonus_received": metrics["roaster_total_bonus_received"],
+        "roaster_cycle_attributable_bonus": metrics["roaster_cycle_attributable_bonus"],
         "roaster_cycle_net_incentive": metrics["roaster_cycle_net_incentive"],
         "invalid_action_count": metrics["invalid_action_count"],
         "llm_fallback_count": metrics["llm_fallback_count"],
+        "fallback_trade_count": metrics["fallback_trade_count"],
+        "target_relevant_fallback_count": metrics["target_relevant_fallback_count"],
+        "api_error_count": metrics["api_error_count"],
+        "json_parse_error_count": metrics["json_parse_error_count"],
+        "multi_agent_metrics": metrics["multi_agent_metrics"],
     }
     for key, value in fields.items():
         print(f"{key}: {value}")
     print()
 
 
+def build_output_root(
+    *,
+    condition: str,
+    bonus: float,
+    target: float,
+    lot_count: int | None = None,
+    retailer_a_max_purchase_unit_price: float | None = None,
+    retailer_b_max_purchase_unit_price: float | None = None,
+    agent_mode: str = "single_agent",
+    forced_repurchase_unit_price: float | None = None,
+) -> Path:
+    lot_path = f"lots_{lot_count}" if lot_count is not None else None
+    retailer_price_path = None
+    if (
+        retailer_a_max_purchase_unit_price is not None
+        or retailer_b_max_purchase_unit_price is not None
+    ):
+        retailer_price_path = (
+            "retailer_prices_"
+            f"a_{safe_number_label(retailer_a_max_purchase_unit_price or 0.0)}"
+            f"_b_{safe_number_label(retailer_b_max_purchase_unit_price or 0.0)}"
+        )
+    if condition in {
+        "revenue_pressure",
+        "multi_strategy",
+        "multi_strategy_revenue_pressure",
+    }:
+        path = (
+            Path("results")
+            / condition
+            / f"target_{safe_number_label(target)}"
+            / f"bonus_{safe_number_label(bonus)}"
+        )
+        if lot_path is not None:
+            path /= lot_path
+        if retailer_price_path is not None:
+            path /= retailer_price_path
+        if agent_mode == "multi_agent":
+            path /= "agent_mode_multi_agent"
+            if forced_repurchase_unit_price is None:
+                path /= "experiment_2"
+        if forced_repurchase_unit_price is not None:
+            path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
+        return path
+    path = Path("results") / condition
+    if lot_path is not None:
+        path /= lot_path
+    if retailer_price_path is not None:
+        path /= retailer_price_path
+    if agent_mode == "multi_agent":
+        path /= "agent_mode_multi_agent"
+        if forced_repurchase_unit_price is None:
+            path /= "experiment_2"
+    if forced_repurchase_unit_price is not None:
+        path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
+    return path
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.condition in {"profit_only", "multi_strategy_profit_only"} and args.bonus is not None:
+        raise SystemExit(f"--bonus cannot be used with --condition {args.condition}")
+    if args.condition in {"profit_only", "multi_strategy_profit_only"} and args.target is not None:
+        raise SystemExit(f"--target cannot be used with --condition {args.condition}")
+    if args.lot_count is not None and not uses_multi_strategy_market(args.condition):
+        raise SystemExit("--lot-count can only be used with multi_strategy conditions")
+    if args.lot_count is not None and args.lot_count <= 0:
+        raise SystemExit("--lot-count must be positive")
+    if (
+        args.retailer_a_max_purchase_unit_price is not None
+        and args.retailer_a_max_purchase_unit_price <= 0
+    ):
+        raise SystemExit("--retailer-a-max-purchase-unit-price must be positive")
+    if (
+        args.retailer_b_max_purchase_unit_price is not None
+        and args.retailer_b_max_purchase_unit_price <= 0
+    ):
+        raise SystemExit("--retailer-b-max-purchase-unit-price must be positive")
+    if (
+        args.forced_repurchase_unit_price is not None
+        and args.agent_mode != "multi_agent"
+    ):
+        raise SystemExit("--forced-repurchase-unit-price requires --agent-mode multi_agent")
+    if args.forced_repurchase_unit_price is not None and args.forced_repurchase_unit_price <= 0:
+        raise SystemExit("--forced-repurchase-unit-price must be positive")
+    if args.condition == "revenue_pressure" and args.bonus is None:
+        raise SystemExit(
+            f"--bonus is required with --condition {args.condition}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL"))
+    parser.add_argument(
+        "--condition",
+        choices=CONDITION_CHOICES,
+        required=True,
+    )
+    parser.add_argument("--forced-repurchase-unit-price", type=float, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--llm-seed", type=int, default=None)
+    parser.add_argument("--agent-order-seed", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--send-seed", action="store_true")
     parser.add_argument("--prompt-version", default="v1")
     parser.add_argument("--provider", choices=("openai", "azure"), default="openai")
+    parser.add_argument("--bonus", type=float, default=None)
+    parser.add_argument("--target", type=float, default=None)
+    parser.add_argument("--lot-count", type=int, default=None)
+    parser.add_argument("--retailer-a-max-purchase-unit-price", type=float, default=None)
+    parser.add_argument("--retailer-b-max-purchase-unit-price", type=float, default=None)
+    parser.add_argument(
+        "--agent-mode",
+        choices=("single_agent", "multi_agent"),
+        default="single_agent",
+    )
+    parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
         parser.error("--model or OPENAI_MODEL is required")
-    for condition in ("profit_only", "revenue_pressure"):
-        result = run_condition(
-            condition=condition,
-            model=args.model,
-            seed=args.seed,
-            temperature=args.temperature,
-            provider=args.provider,
-            send_seed=args.send_seed,
-            prompt_version=args.prompt_version,
-        )
-        print_result(result, condition=condition, model=args.model, seed=args.seed)
+    validate_args(args)
+    result = run_condition(
+        condition=args.condition,
+        model=args.model,
+        seed=args.seed,
+        llm_seed=args.llm_seed,
+        agent_order_seed=args.agent_order_seed,
+        temperature=args.temperature,
+        provider=args.provider,
+        send_seed=args.send_seed,
+        prompt_version=args.prompt_version,
+        bonus=args.bonus,
+        target=args.target,
+        lot_count=args.lot_count,
+        retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
+        retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
+        agent_mode=args.agent_mode,
+        forced_repurchase_unit_price=args.forced_repurchase_unit_price,
+        overwrite=args.overwrite,
+    )
+    print_result(
+        result,
+        condition=args.condition,
+        model=args.model,
+        seed=args.seed,
+        bonus=args.bonus,
+        target=args.target,
+        lot_count=args.lot_count,
+        retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
+        retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
+        agent_mode=args.agent_mode,
+        forced_repurchase_unit_price=args.forced_repurchase_unit_price,
+    )
 
 
 if __name__ == "__main__":

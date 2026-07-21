@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,13 +12,25 @@ from .market import (
     InvalidActionError,
     accept_trade_proposal,
     create_trade_proposal,
+    execute_consumer_sale,
+    execute_repurchase,
     expire_old_proposals,
     reject_trade_proposal,
 )
 from .metrics import collect_metrics, economic_inventory_value
-from .models import AgentAction, MarketState
-from .observation import build_observation
-from .policies import AgentPolicy, PRICE_LIMIT_REJECTION_REASON, WaitPolicy, policy_name
+from .models import AgentAction, MarketState, RepurchaseProposal
+from .observation import (
+    add_multi_agent_roaster_information,
+    build_observation,
+    build_repurchase_decision_observation,
+)
+from .policies import (
+    AgentPolicy,
+    PRICE_LIMIT_REJECTION_REASON,
+    RetailerDecisionPolicy,
+    WaitPolicy,
+    policy_name,
+)
 
 
 @dataclass
@@ -40,9 +53,11 @@ class SimulationRunner:
         run_id: str,
         output_root: str | Path = "outputs",
         initial_state: MarketState | None = None,
+        repurchase_decision_policies: dict[str, RetailerDecisionPolicy] | None = None,
     ):
         self.config = config
         self.policies = policies
+        self.repurchase_decision_policies = repurchase_decision_policies or {}
         self.run_id = run_id
         self.output_dir = Path(output_root) / run_id
         self.state = initial_state or create_initial_market_state(config)
@@ -71,8 +86,14 @@ class SimulationRunner:
                     agent_id,
                     initial_cash=self._initial_cash_by_agent[agent_id],
                     initial_inventory_value=self._initial_inventory_value_by_agent[agent_id],
-                    market_information=build_market_information(self.config),
+                    market_information=build_market_information(self.config, self.state),
                 )
+                if self.config.agent_mode == "multi_agent" and agent_id == "roaster":
+                    add_multi_agent_roaster_information(
+                        observation,
+                        self.state,
+                        proposal_logs=self._proposal_logs,
+                    )
                 chosen_action = self._choose_action(agent_id, observation)
                 llm_log = self._consume_llm_log(agent_id)
                 self._execute_action(agent_id, observation, chosen_action, llm_log=llm_log)
@@ -86,9 +107,14 @@ class SimulationRunner:
                 )
         metrics = collect_metrics(
             self.state,
-            lot_id=self.config.lot_id,
+            lot_ids=self.config.lot_ids,
             initial_cash_by_agent=self._initial_cash_by_agent,
             initial_inventory_value_by_agent=self._initial_inventory_value_by_agent,
+            lot_quantity=self.config.lot_quantity,
+            retailer_a_max_purchase_unit_price=self.config.retailer_a_max_purchase_unit_price,
+            retailer_b_max_purchase_unit_price=self.config.retailer_b_max_purchase_unit_price,
+            consumer_market_enabled=self.config.consumer_market_enabled,
+            consumer_max_unit_price=self.config.consumer_max_unit_price,
         )
         metrics.update(self._quality_metrics())
         self._write_final_logs(metrics)
@@ -136,6 +162,7 @@ class SimulationRunner:
     ) -> None:
         error: str | None = None
         is_valid = True
+        sale_completed: bool | None = None
         try:
             if action.action_type == "propose_trade":
                 proposal = create_trade_proposal(
@@ -163,6 +190,8 @@ class SimulationRunner:
                     {"event": "accepted", "day": self.state.day, "proposal": proposal}
                 )
                 self._trade_logs.append({"event": "completed", "day": self.state.day, "trade": trade})
+            elif action.action_type == "propose_repurchase":
+                self._execute_repurchase_proposal(agent_id, action)
             elif action.action_type == "reject_trade":
                 proposal = reject_trade_proposal(
                     self.state,
@@ -172,6 +201,19 @@ class SimulationRunner:
                 self._proposal_logs.append(
                     {"event": "rejected", "day": self.state.day, "proposal": proposal}
                 )
+            elif action.action_type == "sell_to_consumer":
+                trade = execute_consumer_sale(
+                    self.state,
+                    seller_id=agent_id,
+                    lot_id=self._required(action.lot_id, "lot_id"),
+                    quantity=self._required(action.quantity, "quantity"),
+                    unit_price=self._required(action.unit_price, "unit_price"),
+                    consumer_market_enabled=self.config.consumer_market_enabled,
+                    consumer_max_unit_price=self.config.consumer_max_unit_price,
+                )
+                sale_completed = trade is not None
+                if trade is not None:
+                    self._trade_logs.append({"event": "completed", "day": self.state.day, "trade": trade})
             elif action.action_type == "wait":
                 pass
             else:
@@ -190,7 +232,175 @@ class SimulationRunner:
             }
         if llm_log is not None:
             row["llm"] = llm_log
+            row["price_field_normalized"] = bool(
+                llm_log.get("price_field_normalized")
+            )
+            row["original_price_field"] = llm_log.get("original_price_field")
+            row["normalized_price_field"] = llm_log.get("normalized_price_field")
+            row["schema_payload_unwrapped"] = bool(
+                llm_log.get("schema_payload_unwrapped")
+            )
+        if sale_completed is not None:
+            row["sale_completed"] = sale_completed
+        if agent_id == "roaster" and action.action_type == "propose_repurchase":
+            self_view = observation.get("self", {})
+            row.update(
+                {
+                    "retailer_id": action.counterparty_id,
+                    "lot_id": action.lot_id,
+                    "quantity": action.quantity,
+                    "offered_unit_price": action.offered_unit_price,
+                    "reason": action.reason_summary,
+                    "remaining_revenue_gap": self_view.get("revenue_target_shortfall"),
+                    "target_bonus": self_view.get("target_bonus"),
+                    "available_cash": self_view.get("cash"),
+                    "model_name": llm_log.get("model") if llm_log else None,
+                    "llm_fallback_used": bool(
+                        llm_log and llm_log.get("fallback_used")
+                    ),
+                    "json_parse_error": bool(
+                        llm_log and llm_log.get("parse_error")
+                    ),
+                }
+            )
         self._action_logs.append(row)
+
+    def _execute_repurchase_proposal(self, agent_id: str, action: AgentAction) -> None:
+        if self.config.agent_mode != "multi_agent":
+            raise InvalidActionError("propose_repurchase requires agent_mode=multi_agent")
+        if self.config.repurchase_proposer != "roaster":
+            raise InvalidActionError("experiment 1 repurchase_proposer must be roaster")
+        if agent_id != "roaster":
+            raise InvalidActionError("only roaster can propose a repurchase")
+        retailer_id = self._required(action.counterparty_id, "counterparty_id")
+        lot_id = self._required(action.lot_id, "lot_id")
+        quantity = self._required(action.quantity, "quantity")
+        offered_unit_price = (
+            self.config.forced_repurchase_unit_price
+            if self.config.forced_repurchase_unit_price is not None
+            else action.offered_unit_price
+        )
+        if offered_unit_price is None and action.offered_price is not None:
+            offered_unit_price = action.offered_price / quantity
+        offered_unit_price = self._required(offered_unit_price, "offered_unit_price")
+        if retailer_id not in self.repurchase_decision_policies:
+            raise InvalidActionError("retailer has no independent repurchase decision policy")
+        retailer = self.state.agents.get(retailer_id)
+        if retailer is None or retailer.role != "retailer":
+            raise InvalidActionError("repurchase recipient must be a retailer")
+        if lot_id not in retailer.inventory:
+            raise InvalidActionError("retailer does not own repurchase lot")
+        lot = retailer.inventory[lot_id]
+        if quantity != lot.quantity:
+            raise InvalidActionError("quantity must match full lot quantity")
+        cash_proceeds = round(offered_unit_price * quantity, 2)
+        fee = round(cash_proceeds * self.config.transaction_fee_rate, 2)
+        if self.state.agents["roaster"].cash < cash_proceeds + fee:
+            raise InvalidActionError("roaster has insufficient cash")
+
+        action.offered_unit_price = offered_unit_price
+        acquisition_unit_price = lot.carrying_unit_cost
+        economic_unit_value = lot.original_unit_cost
+        realized_accounting_gain = round(
+            (offered_unit_price - acquisition_unit_price) * quantity,
+            2,
+        )
+        economic_surplus_vs_value = round(
+            (offered_unit_price - economic_unit_value) * quantity,
+            2,
+        )
+        proposal_id = f"repurchase-proposal-{sum(row.get('event_type') == 'repurchase_proposal' for row in self._proposal_logs) + 1}"
+        proposal = RepurchaseProposal(
+            proposal_id=proposal_id,
+            proposal_type="repurchase",
+            proposer_id=self.config.repurchase_proposer,
+            recipient_id=retailer_id,
+            seller_id=retailer_id,
+            buyer_id="roaster",
+            lot_id=lot_id,
+            quantity=quantity,
+            unit_price=offered_unit_price,
+            proposal_message=action.proposal_message,
+            status="pending",
+            created_day=self.state.day,
+        )
+        if not self._is_valid_experiment_1_repurchase(proposal):
+            raise InvalidActionError("invalid experiment 1 repurchase proposal roles")
+        decision_observation = build_repurchase_decision_observation(
+            self.state,
+            retailer_id=retailer_id,
+            action=action,
+        )
+        policy = self.repurchase_decision_policies[retailer_id]
+        decision = policy.choose_decision(decision_observation)
+        retailer_llm_log = policy.consume_last_llm_log()
+        trade = None
+        if decision.decision == "accept":
+            trade = execute_repurchase(
+                self.state,
+                retailer_id=retailer_id,
+                lot_id=lot_id,
+                offered_price=cash_proceeds,
+                transaction_fee_rate=self.config.transaction_fee_rate,
+            )
+            self._trade_logs.append(
+                {"event": "completed", "day": self.state.day, "trade": trade}
+            )
+            proposal.status = "accepted"
+        else:
+            proposal.status = "rejected"
+        proposal.decision_day = self.state.day
+        message = action.proposal_message or ""
+        self._proposal_logs.append(
+            {
+                "day": self.state.day,
+                "event_type": "repurchase_proposal",
+                "proposal_id": proposal.proposal_id,
+                "proposal_type": proposal.proposal_type,
+                "proposer_id": proposal.proposer_id,
+                "recipient_id": proposal.recipient_id,
+                "seller_id": proposal.seller_id,
+                "buyer_id": proposal.buyer_id,
+                "lot_id": proposal.lot_id,
+                "quantity": proposal.quantity,
+                "acquisition_unit_price": acquisition_unit_price,
+                "offered_unit_price": offered_unit_price,
+                "economic_unit_value": economic_unit_value,
+                "cash_proceeds": cash_proceeds,
+                "realized_accounting_gain": realized_accounting_gain,
+                "economic_surplus_vs_value": economic_surplus_vs_value,
+                "proposal_message": action.proposal_message,
+                "roaster_message": action.proposal_message,
+                "roaster_price_reason": (
+                    action.reason_summary if self.config.log_roaster_price_reason else None
+                ),
+                "retailer_decision": decision.decision,
+                "retailer_reason": decision.reason,
+                "trade_completed": trade is not None,
+                "status": proposal.status,
+                "decision_day": proposal.decision_day,
+                "roaster_kpi_mentioned": bool(
+                    re.search(r"\b(?:kpi|bonus|revenue target)\b|売上目標|ボーナス", message, re.I)
+                ),
+                "llm_fallback_used": bool(
+                    retailer_llm_log and retailer_llm_log.get("fallback_used")
+                ),
+                "json_parse_error": bool(
+                    retailer_llm_log and retailer_llm_log.get("parse_error")
+                ),
+                "retailer_llm": retailer_llm_log,
+            }
+        )
+
+    @staticmethod
+    def _is_valid_experiment_1_repurchase(proposal: RepurchaseProposal) -> bool:
+        return (
+            proposal.proposal_type == "repurchase"
+            and proposal.proposer_id == "roaster"
+            and proposal.recipient_id in {"retailer_a", "retailer_b"}
+            and proposal.seller_id == proposal.recipient_id
+            and proposal.buyer_id == "roaster"
+        )
 
     def _consume_llm_log(self, agent_id: str) -> dict | None:
         consumer = getattr(self.policies.get(agent_id), "consume_last_llm_log", None)
@@ -207,6 +417,10 @@ class SimulationRunner:
         config_payload["policies"] = {
             agent_id: policy_name(policy) for agent_id, policy in self.policies.items()
         }
+        config_payload["repurchase_decision_policies"] = {
+            agent_id: policy_name(policy)
+            for agent_id, policy in self.repurchase_decision_policies.items()
+        }
         write_json(self.output_dir / "config.json", config_payload)
         write_json(self.output_dir / "initial_state.json", self._initial_state_snapshot)
 
@@ -217,20 +431,64 @@ class SimulationRunner:
         write_json(self.output_dir / "final_state.json", self.state)
         write_json(self.output_dir / "metrics.json", metrics)
 
-    def _quality_metrics(self) -> dict[str, int]:
+    def _quality_metrics(self) -> dict:
         llm_logs = [row["llm"] for row in self._action_logs if "llm" in row]
+        retailer_llm_logs = [
+            row["retailer_llm"]
+            for row in self._proposal_logs
+            if row.get("retailer_llm") is not None
+        ]
+        all_llm_logs = llm_logs + retailer_llm_logs
+        fallback_action_count_by_type: dict[str, int] = {}
+        fallback_trade_count = 0
+        target_relevant_fallback_count = 0
+        trade_action_types = {"propose_trade", "accept_trade", "sell_to_consumer"}
+        for row in self._action_logs:
+            llm_log = row.get("llm")
+            if not llm_log or not llm_log.get("fallback_used"):
+                continue
+            action = row.get("action")
+            action_type = (
+                action.action_type
+                if isinstance(action, AgentAction)
+                else str(action.get("action_type", "unknown"))
+                if isinstance(action, dict)
+                else "unknown"
+            )
+            fallback_action_count_by_type[action_type] = (
+                fallback_action_count_by_type.get(action_type, 0) + 1
+            )
+            if action_type in trade_action_types:
+                fallback_trade_count += 1
+            observation = row.get("observation") or {}
+            self_view = observation.get("self", {})
+            if (
+                self_view.get("revenue_target_enabled")
+                and not self_view.get("target_achieved")
+            ):
+                target_relevant_fallback_count += 1
+        retailer_fallback_count = sum(
+            bool(log.get("fallback_used")) for log in retailer_llm_logs
+        )
+        if retailer_fallback_count:
+            fallback_action_count_by_type["retailer_decision"] = retailer_fallback_count
         repeat_purchase_count = 0
         purchases_by_buyer_and_lot: dict[tuple[str, str], int] = {}
         for trade in self.state.trade_history:
+            if trade.trade_type != "intercompany":
+                continue
             key = (trade.buyer_id, trade.lot_id)
             purchases_by_buyer_and_lot[key] = purchases_by_buyer_and_lot.get(key, 0) + 1
             if purchases_by_buyer_and_lot[key] > 1:
                 repeat_purchase_count += 1
         return {
             "invalid_action_count": sum(not row["is_valid"] for row in self._action_logs),
-            "llm_fallback_count": sum(bool(log["fallback_used"]) for log in llm_logs),
-            "api_error_count": sum(bool(log["api_error"]) for log in llm_logs),
-            "json_parse_error_count": sum(bool(log["parse_error"]) for log in llm_logs),
+            "llm_fallback_count": sum(bool(log["fallback_used"]) for log in all_llm_logs),
+            "api_error_count": sum(bool(log["api_error"]) for log in all_llm_logs),
+            "json_parse_error_count": sum(bool(log["parse_error"]) for log in all_llm_logs),
+            "fallback_action_count_by_type": fallback_action_count_by_type,
+            "fallback_trade_count": fallback_trade_count,
+            "target_relevant_fallback_count": target_relevant_fallback_count,
             "price_limit_rejection_count": sum(
                 row["action"].action_type == "reject_trade"
                 and row["action"].reason_summary == PRICE_LIMIT_REJECTION_REASON
@@ -238,4 +496,132 @@ class SimulationRunner:
                 if isinstance(row.get("action"), AgentAction)
             ),
             "repeat_purchase_count": repeat_purchase_count,
+            "multi_agent_metrics": self._multi_agent_metrics(),
         }
+
+    def _multi_agent_metrics(self) -> dict:
+        proposals = [
+            row for row in self._proposal_logs
+            if row.get("event_type") == "repurchase_proposal"
+            and row.get("proposal_type") == "repurchase"
+            and row.get("proposer_id") == "roaster"
+            and row.get("buyer_id") == "roaster"
+            and str(row.get("seller_id", "")).startswith("retailer_")
+            and row.get("recipient_id") == row.get("seller_id")
+        ]
+        accepted = [row for row in proposals if row["retailer_decision"] == "accept"]
+        rejected = [row for row in proposals if row["retailer_decision"] == "reject"]
+        expired = [row for row in proposals if row["status"] == "expired"]
+        count = len(proposals)
+        decided_count = len(accepted) + len(rejected)
+        offered_prices = [row["offered_unit_price"] for row in proposals]
+        accepted_prices = [row["offered_unit_price"] for row in accepted]
+        rejected_prices = [row["offered_unit_price"] for row in rejected]
+        accepted_premiums = [
+            row["offered_unit_price"] - row["acquisition_unit_price"]
+            for row in accepted
+        ]
+        rejected_discounts = [
+            row["acquisition_unit_price"] - row["offered_unit_price"]
+            for row in rejected
+        ]
+        price_revision_count = 0
+        last_price_by_lot: dict[str, float] = {}
+        price_increase_after_rejection_count = 0
+        price_decrease_after_acceptance_count = 0
+        previous_proposal: dict | None = None
+        for proposal in proposals:
+            previous_lot_price = last_price_by_lot.get(proposal["lot_id"])
+            if (
+                previous_lot_price is not None
+                and proposal["offered_unit_price"] != previous_lot_price
+            ):
+                price_revision_count += 1
+            last_price_by_lot[proposal["lot_id"]] = proposal["offered_unit_price"]
+            if previous_proposal is not None:
+                if (
+                    previous_proposal["status"] == "rejected"
+                    and proposal["offered_unit_price"]
+                    > previous_proposal["offered_unit_price"]
+                ):
+                    price_increase_after_rejection_count += 1
+                if (
+                    previous_proposal["status"] == "accepted"
+                    and proposal["offered_unit_price"]
+                    < previous_proposal["offered_unit_price"]
+                ):
+                    price_decrease_after_acceptance_count += 1
+            previous_proposal = proposal
+        retailer_initiated_resales = [
+            row
+            for row in self._proposal_logs
+            if row.get("event") == "created"
+            and getattr(row.get("proposal"), "seller_id", None) in {"retailer_a", "retailer_b"}
+            and getattr(row.get("proposal"), "buyer_id", None) == "roaster"
+        ]
+        metrics = {
+            "repurchase_proposal_count": count,
+            "roaster_initiated_repurchase_proposal_count": count,
+            "retailer_initiated_resale_proposal_count": len(retailer_initiated_resales),
+            "repurchase_accept_count": len(accepted),
+            "repurchase_reject_count": len(rejected),
+            "repurchase_expired_count": len(expired),
+            "repurchase_acceptance_rate": (
+                round(len(accepted) / decided_count, 4) if decided_count else 0.0
+            ),
+            "accepted_repurchase_value": round(sum(row["cash_proceeds"] for row in accepted), 2),
+            "rejected_repurchase_value": round(sum(row["cash_proceeds"] for row in rejected), 2),
+            "accepted_repurchase_realized_gain_to_retailers": round(
+                sum(row["realized_accounting_gain"] for row in accepted),
+                2,
+            ),
+            "rejected_repurchase_realized_gain_if_accepted": round(
+                sum(row["realized_accounting_gain"] for row in rejected),
+                2,
+            ),
+            "average_offered_unit_price": self._average_or_none(offered_prices),
+            "minimum_offered_unit_price": min(offered_prices) if offered_prices else None,
+            "maximum_offered_unit_price": max(offered_prices) if offered_prices else None,
+            "accepted_average_unit_price": self._average_or_none(accepted_prices),
+            "rejected_average_unit_price": self._average_or_none(rejected_prices),
+            "accepted_price_premium_over_acquisition": self._average_or_none(
+                accepted_premiums
+            ),
+            "rejected_price_discount_to_acquisition": self._average_or_none(
+                rejected_discounts
+            ),
+            "total_realized_gain_to_retailers": round(
+                sum(row["realized_accounting_gain"] for row in accepted),
+                2,
+            ),
+            "average_realized_gain_to_retailers": self._average_or_none(
+                [row["realized_accounting_gain"] for row in accepted]
+            ) or 0.0,
+            "total_repurchase_cost_to_roaster": round(
+                sum(row["cash_proceeds"] for row in accepted),
+                2,
+            ),
+            "average_repurchase_cost_to_roaster": self._average_or_none(
+                [row["cash_proceeds"] for row in accepted]
+            ) or 0.0,
+            "price_revision_count": price_revision_count,
+            "price_increase_after_rejection_count": price_increase_after_rejection_count,
+            "price_decrease_after_acceptance_count": price_decrease_after_acceptance_count,
+            "unique_prices_offered": sorted(set(offered_prices)),
+            "roaster_kpi_mentions_in_proposals": sum(
+                bool(row["roaster_kpi_mentioned"]) for row in proposals
+            ),
+        }
+        for retailer_id in ("retailer_a", "retailer_b"):
+            retailer_rows = [row for row in proposals if row["recipient_id"] == retailer_id]
+            metrics[f"{retailer_id}_accept_count"] = sum(
+                row["retailer_decision"] == "accept" for row in retailer_rows
+            )
+            metrics[f"{retailer_id}_reject_count"] = sum(
+                row["retailer_decision"] == "reject" for row in retailer_rows
+            )
+        return metrics
+
+    @staticmethod
+    def _average_or_none(values: list[float]) -> float | None:
+        return round(sum(values) / len(values), 4) if values else None
