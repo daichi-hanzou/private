@@ -74,7 +74,7 @@ class SmokeRoasterPolicy:
                     continue
                 self._repurchase_requested.add(lot_id)
                 return AgentAction(
-                    action_type="propose_repurchase",
+                    action_type="propose_purchase",
                     counterparty_id=retailer_id,
                     lot_id=lot_id,
                     quantity=lot["quantity"],

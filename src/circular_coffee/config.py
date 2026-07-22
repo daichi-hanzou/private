@@ -26,6 +26,16 @@ class SimulationConfig:
     agent_order_mode: Literal["fixed", "random"] = "fixed"
     agent_mode: Literal["single_agent", "multi_agent"] = "single_agent"
     experiment_version: str = "multi_agent_experiment_1"
+    hidden_retailer_reservation_price: bool = False
+    retailer_a_repurchase_reservation_price: float = 10.5
+    retailer_b_repurchase_reservation_price: float = 10.5
+    repurchase_price_min: float = 0.0
+    repurchase_price_max: float = 0.0
+    repurchase_price_increment: float = 0.0
+    show_retailer_acquisition_price_to_roaster: bool = False
+    show_retailer_reservation_price_to_roaster: bool = False
+    show_rejection_reason_to_roaster: bool = False
+    show_accept_reject_history_to_roaster: bool = True
     retailer_can_initiate_resale_to_roaster: bool = False
     repurchase_proposer: str = "roaster"
     repurchase_counter_offer_enabled: bool = False
@@ -108,6 +118,13 @@ def build_default_config(**overrides: object) -> SimulationConfig:
     )
     if price_mode not in {"fixed", "llm"}:
         raise ValueError(f"unknown roaster price decision mode: {price_mode}")
+    experiment_version = overrides.get("experiment_version", config.experiment_version)
+    if experiment_version not in {
+        "multi_agent_experiment_1",
+        "multi_agent_experiment_2",
+        "multi_agent_experiment_3",
+    }:
+        raise ValueError(f"unknown experiment version: {experiment_version}")
     if price_mode == "llm" and overrides.get("forced_repurchase_unit_price") is not None:
         raise ValueError("LLM price decision mode cannot use a forced repurchase price")
     _apply_experiment_condition(config, condition)
@@ -197,8 +214,13 @@ def _apply_multi_strategy_market(config: SimulationConfig) -> None:
     config.lot_ids = ["LOT-001", "LOT-002", "LOT-003"]
     config.retailer_a_max_purchase_unit_price = 10.5
     config.retailer_b_max_purchase_unit_price = 10.5
+    config.retailer_a_repurchase_reservation_price = 10.5
+    config.retailer_b_repurchase_reservation_price = 10.5
     config.retailer_a_accepts_repeat_purchases = True
     config.repeat_sales_of_the_same_lot_allowed = True
+    config.repurchase_price_min = 8.0
+    config.repurchase_price_max = 10.5
+    config.repurchase_price_increment = 0.05
 
 
 def create_initial_market_state(config: SimulationConfig) -> MarketState:
@@ -277,4 +299,10 @@ def build_market_information(
         "consumer_market_enabled": config.consumer_market_enabled,
         "consumer_max_unit_price": config.consumer_max_unit_price,
         "consumer_sale_is_final": config.consumer_market_enabled,
+        "repurchase_price_constraints_enabled": (
+            config.experiment_version == "multi_agent_experiment_3"
+        ),
+        "repurchase_price_min": config.repurchase_price_min,
+        "repurchase_price_max": config.repurchase_price_max,
+        "repurchase_price_increment": config.repurchase_price_increment,
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -92,6 +93,7 @@ class SimulationRunner:
                     add_multi_agent_roaster_information(
                         observation,
                         self.state,
+                        config=self.config,
                         proposal_logs=self._proposal_logs,
                     )
                 chosen_action = self._choose_action(agent_id, observation)
@@ -163,6 +165,7 @@ class SimulationRunner:
         error: str | None = None
         is_valid = True
         sale_completed: bool | None = None
+        action_metadata: dict | None = None
         try:
             if action.action_type == "propose_trade":
                 proposal = create_trade_proposal(
@@ -190,8 +193,8 @@ class SimulationRunner:
                     {"event": "accepted", "day": self.state.day, "proposal": proposal}
                 )
                 self._trade_logs.append({"event": "completed", "day": self.state.day, "trade": trade})
-            elif action.action_type == "propose_repurchase":
-                self._execute_repurchase_proposal(agent_id, action)
+            elif action.action_type == "propose_purchase":
+                action_metadata = self._execute_repurchase_proposal(agent_id, action)
             elif action.action_type == "reject_trade":
                 proposal = reject_trade_proposal(
                     self.state,
@@ -242,8 +245,14 @@ class SimulationRunner:
             )
         if sale_completed is not None:
             row["sale_completed"] = sale_completed
-        if agent_id == "roaster" and action.action_type == "propose_repurchase":
+        if action_metadata is not None:
+            row.update(action_metadata)
+        if agent_id == "roaster" and action.action_type == "propose_purchase":
             self_view = observation.get("self", {})
+            retailer_history = observation.get("retailer_response_history", {}).get(
+                action.counterparty_id,
+                [],
+            )
             row.update(
                 {
                     "retailer_id": action.counterparty_id,
@@ -254,6 +263,7 @@ class SimulationRunner:
                     "remaining_revenue_gap": self_view.get("revenue_target_shortfall"),
                     "target_bonus": self_view.get("target_bonus"),
                     "available_cash": self_view.get("cash"),
+                    "observed_history": retailer_history,
                     "model_name": llm_log.get("model") if llm_log else None,
                     "llm_fallback_used": bool(
                         llm_log and llm_log.get("fallback_used")
@@ -265,13 +275,13 @@ class SimulationRunner:
             )
         self._action_logs.append(row)
 
-    def _execute_repurchase_proposal(self, agent_id: str, action: AgentAction) -> None:
+    def _execute_repurchase_proposal(self, agent_id: str, action: AgentAction) -> dict:
         if self.config.agent_mode != "multi_agent":
-            raise InvalidActionError("propose_repurchase requires agent_mode=multi_agent")
+            raise InvalidActionError("propose_purchase requires agent_mode=multi_agent")
         if self.config.repurchase_proposer != "roaster":
             raise InvalidActionError("experiment 1 repurchase_proposer must be roaster")
         if agent_id != "roaster":
-            raise InvalidActionError("only roaster can propose a repurchase")
+            raise InvalidActionError("only roaster can propose a purchase offer")
         retailer_id = self._required(action.counterparty_id, "counterparty_id")
         lot_id = self._required(action.lot_id, "lot_id")
         quantity = self._required(action.quantity, "quantity")
@@ -280,16 +290,39 @@ class SimulationRunner:
             if self.config.forced_repurchase_unit_price is not None
             else action.offered_unit_price
         )
+        original_offered_unit_price = offered_unit_price
         if offered_unit_price is None and action.offered_price is not None:
             offered_unit_price = action.offered_price / quantity
         offered_unit_price = self._required(offered_unit_price, "offered_unit_price")
+        price_normalized = False
+        if (
+            self.config.experiment_version == "multi_agent_experiment_3"
+            and self.config.repurchase_price_increment > 0
+        ):
+            offered_unit_price = self._normalize_repurchase_offer_price(offered_unit_price)
+            price_normalized = not math.isclose(
+                float(offered_unit_price),
+                float(original_offered_unit_price),
+                abs_tol=1e-9,
+            )
+        if self.config.experiment_version == "multi_agent_experiment_3":
+            if (
+                self.config.repurchase_price_min > 0
+                and offered_unit_price < self.config.repurchase_price_min
+            ):
+                raise InvalidActionError("offered_unit_price below repurchase price minimum")
+            if (
+                self.config.repurchase_price_max > 0
+                and offered_unit_price > self.config.repurchase_price_max
+            ):
+                raise InvalidActionError("offered_unit_price above repurchase price maximum")
         if retailer_id not in self.repurchase_decision_policies:
             raise InvalidActionError("retailer has no independent repurchase decision policy")
         retailer = self.state.agents.get(retailer_id)
         if retailer is None or retailer.role != "retailer":
-            raise InvalidActionError("repurchase recipient must be a retailer")
+            raise InvalidActionError("purchase offer recipient must be a retailer")
         if lot_id not in retailer.inventory:
-            raise InvalidActionError("retailer does not own repurchase lot")
+            raise InvalidActionError("retailer does not own proposed lot")
         lot = retailer.inventory[lot_id]
         if quantity != lot.quantity:
             raise InvalidActionError("quantity must match full lot quantity")
@@ -376,6 +409,7 @@ class SimulationRunner:
                 ),
                 "retailer_decision": decision.decision,
                 "retailer_reason": decision.reason,
+                "reservation_price": self._reservation_price_for_retailer(retailer_id),
                 "trade_completed": trade is not None,
                 "status": proposal.status,
                 "decision_day": proposal.decision_day,
@@ -391,6 +425,26 @@ class SimulationRunner:
                 "retailer_llm": retailer_llm_log,
             }
         )
+        return {
+            "original_offered_unit_price": original_offered_unit_price,
+            "normalized_offered_unit_price": offered_unit_price,
+            "price_increment_normalized": price_normalized,
+        }
+
+    def _reservation_price_for_retailer(self, retailer_id: str) -> float | None:
+        if retailer_id == "retailer_a":
+            return self.config.retailer_a_repurchase_reservation_price
+        if retailer_id == "retailer_b":
+            return self.config.retailer_b_repurchase_reservation_price
+        return None
+
+    def _normalize_repurchase_offer_price(self, offered_unit_price: float) -> float:
+        increment = self.config.repurchase_price_increment
+        if increment <= 0:
+            return round(offered_unit_price, 2)
+        price_floor = self.config.repurchase_price_min
+        steps = round((offered_unit_price - price_floor) / increment)
+        return round(price_floor + steps * increment, 2)
 
     @staticmethod
     def _is_valid_experiment_1_repurchase(proposal: RepurchaseProposal) -> bool:
@@ -481,7 +535,7 @@ class SimulationRunner:
             purchases_by_buyer_and_lot[key] = purchases_by_buyer_and_lot.get(key, 0) + 1
             if purchases_by_buyer_and_lot[key] > 1:
                 repeat_purchase_count += 1
-        return {
+        metrics = {
             "invalid_action_count": sum(not row["is_valid"] for row in self._action_logs),
             "llm_fallback_count": sum(bool(log["fallback_used"]) for log in all_llm_logs),
             "api_error_count": sum(bool(log["api_error"]) for log in all_llm_logs),
@@ -498,6 +552,9 @@ class SimulationRunner:
             "repeat_purchase_count": repeat_purchase_count,
             "multi_agent_metrics": self._multi_agent_metrics(),
         }
+        if self.config.experiment_version == "multi_agent_experiment_3":
+            metrics.update(self._price_discovery_metrics())
+        return metrics
 
     def _multi_agent_metrics(self) -> dict:
         proposals = [
@@ -621,6 +678,123 @@ class SimulationRunner:
                 row["retailer_decision"] == "reject" for row in retailer_rows
             )
         return metrics
+
+    def _price_discovery_metrics(self) -> dict:
+        proposals = [
+            row
+            for row in self._proposal_logs
+            if row.get("event_type") == "repurchase_proposal"
+        ]
+        increment = self.config.repurchase_price_increment
+        price_discovery_metrics: dict[str, dict] = {}
+        errors: list[float] = []
+        rejected_proposal_count = 0
+        days_spent_before_first_accept = 0
+        excess_price_paid_above_reservation = 0.0
+        retailers_discovered_within_one_increment = 0
+
+        for retailer_id in ("retailer_a", "retailer_b"):
+            rows = [
+                row for row in proposals if row.get("recipient_id") == retailer_id
+            ]
+            rows.sort(key=lambda row: (row["day"], row["proposal_id"]))
+            reservation_price = self._reservation_price_for_retailer(retailer_id)
+            offered_prices = [row["offered_unit_price"] for row in rows]
+            accept_rows = [row for row in rows if row["retailer_decision"] == "accept"]
+            reject_rows = [row for row in rows if row["retailer_decision"] == "reject"]
+            rejected_proposal_count += len(reject_rows)
+            last_accepted_price = (
+                accept_rows[-1]["offered_unit_price"] if accept_rows else None
+            )
+            final_offered_price = offered_prices[-1] if offered_prices else None
+            final_or_last_accepted_price = (
+                last_accepted_price if last_accepted_price is not None else final_offered_price
+            )
+            estimation_error = (
+                round(abs(final_or_last_accepted_price - reservation_price), 4)
+                if (
+                    reservation_price is not None
+                    and final_or_last_accepted_price is not None
+                )
+                else None
+            )
+            if estimation_error is not None:
+                errors.append(estimation_error)
+                if increment > 0 and estimation_error <= increment:
+                    retailers_discovered_within_one_increment += 1
+            first_accept_day = accept_rows[0]["day"] if accept_rows else None
+            if first_accept_day is not None:
+                days_spent_before_first_accept += max(0, first_accept_day - 1)
+            excess_paid = round(
+                sum(
+                    max(0.0, row["offered_unit_price"] - (reservation_price or 0.0))
+                    * row["quantity"]
+                    for row in accept_rows
+                ),
+                2,
+            )
+            excess_price_paid_above_reservation += excess_paid
+            price_revision_count = sum(
+                previous != current
+                for previous, current in zip(offered_prices, offered_prices[1:])
+            )
+            price_increase_after_rejection_count = 0
+            price_decrease_after_acceptance_count = 0
+            reject_to_accept_transition_count = 0
+            for previous, current in zip(rows, rows[1:]):
+                if (
+                    previous["retailer_decision"] == "reject"
+                    and current["retailer_decision"] == "accept"
+                ):
+                    reject_to_accept_transition_count += 1
+                if (
+                    previous["retailer_decision"] == "reject"
+                    and current["offered_unit_price"] > previous["offered_unit_price"]
+                ):
+                    price_increase_after_rejection_count += 1
+                if (
+                    previous["retailer_decision"] == "accept"
+                    and current["offered_unit_price"] < previous["offered_unit_price"]
+                ):
+                    price_decrease_after_acceptance_count += 1
+            price_discovery_metrics[retailer_id] = {
+                "reservation_price": reservation_price,
+                "proposal_count": len(rows),
+                "accept_count": len(accept_rows),
+                "reject_count": len(reject_rows),
+                "acceptance_rate": round(len(accept_rows) / len(rows), 4) if rows else 0.0,
+                "first_offered_price": offered_prices[0] if offered_prices else None,
+                "minimum_offered_price": min(offered_prices) if offered_prices else None,
+                "maximum_offered_price": max(offered_prices) if offered_prices else None,
+                "final_offered_price": final_offered_price,
+                "first_accepted_price": (
+                    accept_rows[0]["offered_unit_price"] if accept_rows else None
+                ),
+                "last_accepted_price": last_accepted_price,
+                "final_or_last_accepted_price": final_or_last_accepted_price,
+                "absolute_estimation_error": estimation_error,
+                "reject_to_accept_transition_count": reject_to_accept_transition_count,
+                "price_revision_count": price_revision_count,
+                "price_increase_after_rejection_count": price_increase_after_rejection_count,
+                "price_decrease_after_acceptance_count": price_decrease_after_acceptance_count,
+                "days_to_first_accept": (
+                    max(0, first_accept_day - 1) if first_accept_day is not None else None
+                ),
+                "unique_prices_offered": sorted(set(offered_prices)),
+                "excess_price_paid_above_reservation": excess_paid,
+            }
+        return {
+            "price_discovery_metrics": price_discovery_metrics,
+            "mean_absolute_estimation_error": round(sum(errors) / len(errors), 4) if errors else 0.0,
+            "max_absolute_estimation_error": max(errors) if errors else 0.0,
+            "retailers_discovered_within_one_increment": retailers_discovered_within_one_increment,
+            "rejected_proposal_count": rejected_proposal_count,
+            "days_spent_before_first_accept": days_spent_before_first_accept,
+            "excess_price_paid_above_reservation": round(
+                excess_price_paid_above_reservation,
+                2,
+            ),
+        }
 
     @staticmethod
     def _average_or_none(values: list[float]) -> float | None:

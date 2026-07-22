@@ -22,6 +22,15 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--forced-repurchase-unit-price", type=float, default=None)
+    parser.add_argument(
+        "--experiment-version",
+        choices=(
+            "multi_agent_experiment_1",
+            "multi_agent_experiment_2",
+            "multi_agent_experiment_3",
+        ),
+        default=None,
+    )
     parser.add_argument("--seed", type=int)
     parser.add_argument("--seeds", type=int, nargs="+")
     parser.add_argument("--llm-seed", type=int, default=None)
@@ -33,6 +42,10 @@ def main() -> None:
     parser.add_argument("--bonus", type=float, default=None)
     parser.add_argument("--target", type=float, default=None)
     parser.add_argument("--lot-count", type=int, default=None)
+    parser.add_argument("--retailer-a-max-purchase-unit-price", type=float, default=None)
+    parser.add_argument("--retailer-b-max-purchase-unit-price", type=float, default=None)
+    parser.add_argument("--retailer-a-repurchase-reservation-price", type=float, default=None)
+    parser.add_argument("--retailer-b-repurchase-reservation-price", type=float, default=None)
     parser.add_argument(
         "--agent-mode",
         choices=("single_agent", "multi_agent"),
@@ -62,6 +75,11 @@ def main() -> None:
             bonus=args.bonus,
             target=args.target,
             lot_count=args.lot_count,
+            retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
+            retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
+            experiment_version=args.experiment_version,
+            retailer_a_repurchase_reservation_price=args.retailer_a_repurchase_reservation_price,
+            retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
             agent_mode=args.agent_mode,
             forced_repurchase_unit_price=args.forced_repurchase_unit_price,
             overwrite=args.overwrite,
@@ -87,12 +105,19 @@ def main() -> None:
                 "configured_roaster_revenue_target": configured_target,
                 "configured_roaster_target_bonus": configured_bonus,
                 "configured_lot_count": args.lot_count,
+                "configured_retailer_a_max_purchase_unit_price": args.retailer_a_max_purchase_unit_price,
+                "configured_retailer_b_max_purchase_unit_price": args.retailer_b_max_purchase_unit_price,
+                "configured_retailer_a_repurchase_reservation_price": args.retailer_a_repurchase_reservation_price,
+                "configured_retailer_b_repurchase_reservation_price": args.retailer_b_repurchase_reservation_price,
                 "agent_mode": args.agent_mode,
                 "experiment_version": (
-                    "multi_agent_experiment_2"
-                    if args.agent_mode == "multi_agent"
-                    and args.forced_repurchase_unit_price is None
-                    else "multi_agent_experiment_1"
+                    args.experiment_version
+                    or (
+                        "multi_agent_experiment_2"
+                        if args.agent_mode == "multi_agent"
+                        and args.forced_repurchase_unit_price is None
+                        else "multi_agent_experiment_1"
+                    )
                 ),
                 "roaster_price_decision_mode": (
                     "llm"
@@ -132,6 +157,12 @@ def main() -> None:
                 "roaster_total_bonus_received": metrics["roaster_total_bonus_received"],
                 "roaster_cycle_attributable_bonus": metrics["roaster_cycle_attributable_bonus"],
                 "roaster_cycle_net_incentive": metrics["roaster_cycle_net_incentive"],
+                "mean_absolute_estimation_error": metrics.get("mean_absolute_estimation_error"),
+                "max_absolute_estimation_error": metrics.get("max_absolute_estimation_error"),
+                "retailers_discovered_within_one_increment": metrics.get("retailers_discovered_within_one_increment"),
+                "rejected_proposal_count": metrics.get("rejected_proposal_count"),
+                "days_spent_before_first_accept": metrics.get("days_spent_before_first_accept"),
+                "excess_price_paid_above_reservation": metrics.get("excess_price_paid_above_reservation"),
                 "target_achieved": roaster["target_achieved"],
                 "invalid_action_count": metrics["invalid_action_count"],
                 "llm_fallback_count": metrics["llm_fallback_count"],
@@ -147,13 +178,17 @@ def main() -> None:
         target=result.state.agents["roaster"].revenue_target,
         bonus=result.state.agents["roaster"].target_bonus,
         lot_count=args.lot_count,
+        retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
+        retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
+        experiment_version=args.experiment_version,
         agent_mode=args.agent_mode,
         forced_repurchase_unit_price=args.forced_repurchase_unit_price,
     )
     output_name = (
-        "experiment_2_summary.csv"
-        if args.agent_mode == "multi_agent"
-        and args.forced_repurchase_unit_price is None
+        "experiment_3_summary.csv"
+        if args.experiment_version == "multi_agent_experiment_3"
+        else "experiment_2_summary.csv"
+        if args.agent_mode == "multi_agent" and args.forced_repurchase_unit_price is None
         else "summary.csv"
     )
     output_path = output_root / output_name

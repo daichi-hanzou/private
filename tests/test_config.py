@@ -21,6 +21,11 @@ def test_llm_price_mode_rejects_forced_repurchase_price() -> None:
         )
 
 
+def test_build_default_config_rejects_unknown_experiment_version() -> None:
+    with pytest.raises(ValueError, match="unknown experiment version"):
+        build_default_config(experiment_version="multi_agent_experiment_99")
+
+
 def test_prompt_version_is_serialized_in_config() -> None:
     config = build_default_config(prompt_version="v2")
     assert config.prompt_version == "v2"

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 
-from circular_coffee.config import build_experiment_config, create_initial_market_state
+from circular_coffee.config import (
+    build_experiment_config,
+    build_market_information,
+    create_initial_market_state,
+)
 from circular_coffee.market import accept_trade_proposal, create_trade_proposal
 from circular_coffee.models import AgentAction
+from circular_coffee.metrics import economic_inventory_value
+from circular_coffee.observation import add_multi_agent_roaster_information, build_observation
 from circular_coffee.policies import (
     CooperativeRetailerPolicy,
     LLMPolicy,
+    ReservationPriceRetailerDecisionPolicy,
     RetailerDecisionPolicy,
     WaitPolicy,
 )
@@ -23,7 +30,7 @@ class RepurchasePolicy:
     def choose_action(self, observation: dict) -> AgentAction:
         self.call_count += 1
         return AgentAction(
-            action_type="propose_repurchase",
+            action_type="propose_purchase",
             counterparty_id="retailer_a",
             lot_id="LOT-001",
             quantity=100,
@@ -207,9 +214,9 @@ def test_rejection_allows_new_proposal_on_later_day(tmp_path) -> None:
         row["action"] for row in result.action_logs if row["agent_id"] == "roaster"
     ]
     assert [action.action_type for action in roaster_actions] == [
-        "propose_repurchase",
-        "propose_repurchase",
-        "propose_repurchase",
+        "propose_purchase",
+        "propose_purchase",
+        "propose_purchase",
     ]
     assert [row["proposal_id"] for row in result.proposal_logs] == [
         "repurchase-proposal-1",
@@ -321,7 +328,7 @@ class ExcessivePriceClient:
 
     def generate_action(self, system_prompt: str, observation: dict) -> dict:
         return {
-            "action_type": "propose_repurchase",
+            "action_type": "propose_purchase",
             "counterparty_id": "retailer_a",
             "lot_id": "LOT-001",
             "quantity": 100,
@@ -365,7 +372,7 @@ class RepurchaseThenResellPolicy:
     def choose_action(self, observation: dict) -> AgentAction:
         if observation["day"] == 1:
             return AgentAction(
-                action_type="propose_repurchase",
+                action_type="propose_purchase",
                 counterparty_id="retailer_a",
                 lot_id="LOT-001",
                 quantity=100,
@@ -471,3 +478,294 @@ def test_experiment_2_price_search_metrics() -> None:
     assert metrics["price_increase_after_rejection_count"] == 2
     assert metrics["price_decrease_after_acceptance_count"] == 1
     assert metrics["unique_prices_offered"] == [10.0, 10.2, 10.55, 10.6]
+
+
+def test_experiment_3_rejects_offer_below_reservation_price(tmp_path) -> None:
+    config, state = _state_with_retailer_lot()
+    config.experiment_version = "multi_agent_experiment_3"
+    config.retailer_a_repurchase_reservation_price = 9.10
+    result = SimulationRunner(
+        config,
+        {
+            "roaster": RepurchasePolicy(offered_unit_price=9.05),
+            "retailer_a": WaitPolicy(),
+            "retailer_b": WaitPolicy(),
+        },
+        repurchase_decision_policies={
+            "retailer_a": ReservationPriceRetailerDecisionPolicy(reservation_price=9.10),
+        },
+        run_id="experiment_3_reject_below",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+    assert result.proposal_logs[-1]["retailer_decision"] == "reject"
+    assert result.proposal_logs[-1]["trade_completed"] is False
+
+
+def test_experiment_3_accepts_offer_at_reservation_price(tmp_path) -> None:
+    config, state = _state_with_retailer_lot()
+    config.experiment_version = "multi_agent_experiment_3"
+    result = SimulationRunner(
+        config,
+        {
+            "roaster": RepurchasePolicy(offered_unit_price=9.10),
+            "retailer_a": WaitPolicy(),
+            "retailer_b": WaitPolicy(),
+        },
+        repurchase_decision_policies={
+            "retailer_a": ReservationPriceRetailerDecisionPolicy(reservation_price=9.10),
+        },
+        run_id="experiment_3_accept_equal",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+    assert result.proposal_logs[-1]["retailer_decision"] == "accept"
+    assert result.proposal_logs[-1]["trade_completed"] is True
+
+
+def test_experiment_3_accepts_offer_above_reservation_price(tmp_path) -> None:
+    config, state = _state_with_retailer_lot()
+    config.experiment_version = "multi_agent_experiment_3"
+    result = SimulationRunner(
+        config,
+        {
+            "roaster": RepurchasePolicy(offered_unit_price=9.15),
+            "retailer_a": WaitPolicy(),
+            "retailer_b": WaitPolicy(),
+        },
+        repurchase_decision_policies={
+            "retailer_a": ReservationPriceRetailerDecisionPolicy(reservation_price=9.10),
+        },
+        run_id="experiment_3_accept_above",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+    assert result.proposal_logs[-1]["retailer_decision"] == "accept"
+    assert result.proposal_logs[-1]["trade_completed"] is True
+
+
+def test_experiment_3_uses_retailer_specific_reservation_prices(tmp_path) -> None:
+    config = build_experiment_config(
+        "multi_strategy_revenue_pressure",
+        agent_mode="multi_agent",
+        lot_ids=["LOT-001", "LOT-002"],
+        max_days=2,
+        experiment_version="multi_agent_experiment_3",
+    )
+    state = create_initial_market_state(config)
+    for lot_id, retailer_id in (("LOT-001", "retailer_a"), ("LOT-002", "retailer_b")):
+        proposal = create_trade_proposal(
+            state,
+            seller_id="roaster",
+            buyer_id=retailer_id,
+            lot_id=lot_id,
+            quantity=100,
+            unit_price=9.0,
+        )
+        accept_trade_proposal(state, proposal_id=proposal.proposal_id, buyer_id=retailer_id)
+
+    class TwoRetailerRepurchasePolicy:
+        def choose_action(self, observation: dict) -> AgentAction:
+            if observation["day"] == 1:
+                return AgentAction(
+                    action_type="propose_purchase",
+                    counterparty_id="retailer_a",
+                    lot_id="LOT-001",
+                    quantity=100,
+                    offered_unit_price=9.10,
+                    reason_summary="Test retailer-specific thresholds.",
+                )
+            return AgentAction(
+                action_type="propose_purchase",
+                counterparty_id="retailer_b",
+                lot_id="LOT-002",
+                quantity=100,
+                offered_unit_price=9.10,
+                reason_summary="Test retailer-specific thresholds.",
+            )
+
+    result = SimulationRunner(
+        config,
+        {
+            "roaster": TwoRetailerRepurchasePolicy(),
+            "retailer_a": WaitPolicy(),
+            "retailer_b": WaitPolicy(),
+        },
+        repurchase_decision_policies={
+            "retailer_a": ReservationPriceRetailerDecisionPolicy(reservation_price=9.05),
+            "retailer_b": ReservationPriceRetailerDecisionPolicy(reservation_price=9.20),
+        },
+        run_id="experiment_3_retailer_specific_thresholds",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+    assert result.proposal_logs[0]["retailer_decision"] == "accept"
+    assert result.proposal_logs[1]["retailer_decision"] == "reject"
+
+
+class ObservationCapturingClient:
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.observations: list[dict] = []
+        self.last_call_metadata = {"model": "mock-model", "temperature": 0.0}
+
+    def generate_action(self, system_prompt: str, observation: dict) -> dict:
+        self.observations.append(observation)
+        return self.response
+
+
+def test_experiment_3_roaster_prompt_does_not_leak_reservation_price(tmp_path) -> None:
+    config, state = _state_with_retailer_lot()
+    config.experiment_version = "multi_agent_experiment_3"
+    config.retailer_a_repurchase_reservation_price = 9.05
+    config.show_retailer_acquisition_price_to_roaster = False
+    config.show_retailer_reservation_price_to_roaster = False
+    config.show_rejection_reason_to_roaster = False
+    config.show_accept_reject_history_to_roaster = True
+    client = ObservationCapturingClient(
+        {
+            "action_type": "propose_purchase",
+            "counterparty_id": "retailer_a",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "offered_unit_price": 9.00,
+        }
+    )
+    SimulationRunner(
+        config,
+        {
+            "roaster": LLMPolicy(client=client, condition=config.experiment_condition),
+            "retailer_a": WaitPolicy(),
+            "retailer_b": WaitPolicy(),
+        },
+        repurchase_decision_policies={
+            "retailer_a": ReservationPriceRetailerDecisionPolicy(reservation_price=9.05),
+        },
+        run_id="experiment_3_prompt_leak",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+    payload = json.dumps(client.observations[0])
+    assert "reservation_price" not in payload
+    assert "minimum acceptable" not in payload
+    assert "accept if" not in payload
+    assert '"estimated_acquisition_unit_price"' not in payload
+    assert '"9.05"' not in payload
+
+
+def test_experiment_3_history_is_separated_by_retailer() -> None:
+    config = build_experiment_config(
+        "multi_strategy_revenue_pressure",
+        agent_mode="multi_agent",
+        experiment_version="multi_agent_experiment_3",
+        lot_ids=["LOT-001"],
+    )
+    state = create_initial_market_state(config)
+    proposal = create_trade_proposal(
+        state,
+        seller_id="roaster",
+        buyer_id="retailer_a",
+        lot_id="LOT-001",
+        quantity=100,
+        unit_price=9.0,
+    )
+    accept_trade_proposal(state, proposal_id=proposal.proposal_id, buyer_id="retailer_a")
+    observation = build_observation(
+        state,
+        "roaster",
+        initial_cash=state.agents["roaster"].cash,
+        initial_inventory_value=economic_inventory_value(state.agents["roaster"]),
+        market_information=build_market_information(config, state),
+    )
+    add_multi_agent_roaster_information(
+        observation,
+        state,
+        config=config,
+        proposal_logs=[
+            {
+                "event_type": "repurchase_proposal",
+                "day": 6,
+                "proposal_id": "repurchase-proposal-1",
+                "recipient_id": "retailer_a",
+                "lot_id": "LOT-001",
+                "offered_unit_price": 9.00,
+                "retailer_decision": "reject",
+                "status": "rejected",
+                "retailer_reason": "The retailer rejected the offer.",
+            },
+            {
+                "event_type": "repurchase_proposal",
+                "day": 8,
+                "proposal_id": "repurchase-proposal-2",
+                "recipient_id": "retailer_b",
+                "lot_id": "LOT-004",
+                "offered_unit_price": 9.10,
+                "retailer_decision": "reject",
+                "status": "rejected",
+                "retailer_reason": "The retailer rejected the offer.",
+            },
+        ],
+    )
+    assert observation["retailer_response_history"]["retailer_a"] == [
+        {
+            "day": 6,
+            "retailer_id": "retailer_a",
+            "proposal_id": "repurchase-proposal-1",
+            "lot_id": "LOT-001",
+            "offered_unit_price": 9.0,
+            "decision": "reject",
+            "status": "rejected",
+        }
+    ]
+    assert observation["retailer_response_history"]["retailer_b"] == [
+        {
+            "day": 8,
+            "retailer_id": "retailer_b",
+            "proposal_id": "repurchase-proposal-2",
+            "lot_id": "LOT-004",
+            "offered_unit_price": 9.1,
+            "decision": "reject",
+            "status": "rejected",
+        }
+    ]
+
+
+def test_experiment_3_price_discovery_metrics_capture_reject_to_accept_transition() -> None:
+    config = build_experiment_config(
+        "multi_strategy_revenue_pressure",
+        agent_mode="multi_agent",
+        experiment_version="multi_agent_experiment_3",
+    )
+    config.retailer_a_repurchase_reservation_price = 9.05
+    config.retailer_b_repurchase_reservation_price = 9.20
+    runner = SimulationRunner(config, {}, run_id="experiment_3_metrics")
+    runner._proposal_logs = [
+        {
+            "day": 6,
+            "event_type": "repurchase_proposal",
+            "proposal_id": "repurchase-proposal-1",
+            "recipient_id": "retailer_a",
+            "lot_id": "LOT-001",
+            "offered_unit_price": 9.00,
+            "retailer_decision": "reject",
+            "status": "rejected",
+            "quantity": 100,
+        },
+        {
+            "day": 8,
+            "event_type": "repurchase_proposal",
+            "proposal_id": "repurchase-proposal-2",
+            "recipient_id": "retailer_a",
+            "lot_id": "LOT-001",
+            "offered_unit_price": 9.05,
+            "retailer_decision": "accept",
+            "status": "accepted",
+            "quantity": 100,
+        },
+    ]
+    metrics = runner._price_discovery_metrics()
+    retailer_a = metrics["price_discovery_metrics"]["retailer_a"]
+    assert retailer_a["price_revision_count"] >= 1
+    assert retailer_a["price_increase_after_rejection_count"] >= 1
+    assert retailer_a["reject_to_accept_transition_count"] >= 1
+    assert retailer_a["absolute_estimation_error"] == 0.0

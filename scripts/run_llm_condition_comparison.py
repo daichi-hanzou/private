@@ -15,6 +15,7 @@ from circular_coffee.policies import (
     MULTI_AGENT_ROASTER_PROMPT_SUFFIX,
     CooperativeRetailerPolicy,
     LLMPolicy,
+    ReservationPriceRetailerDecisionPolicy,
     RetailerDecisionPolicy,
     build_llm_system_prompt,
 )
@@ -93,11 +94,20 @@ def run_condition(
     lot_count: int | None = None,
     retailer_a_max_purchase_unit_price: float | None = None,
     retailer_b_max_purchase_unit_price: float | None = None,
+    experiment_version: str | None = None,
+    retailer_a_repurchase_reservation_price: float | None = None,
+    retailer_b_repurchase_reservation_price: float | None = None,
     agent_mode: str = "single_agent",
     forced_repurchase_unit_price: float | None = None,
     overwrite: bool = False,
 ):
-    is_experiment_2 = agent_mode == "multi_agent" and forced_repurchase_unit_price is None
+    resolved_experiment_version = experiment_version or (
+        "multi_agent_experiment_2"
+        if agent_mode == "multi_agent" and forced_repurchase_unit_price is None
+        else "multi_agent_experiment_1"
+    )
+    is_experiment_2 = resolved_experiment_version == "multi_agent_experiment_2"
+    is_experiment_3 = resolved_experiment_version == "multi_agent_experiment_3"
     resolved_llm_seed = seed if llm_seed is None else llm_seed
     resolved_agent_order_seed = seed if agent_order_seed is None else agent_order_seed
     config = build_experiment_config(
@@ -110,12 +120,8 @@ def run_condition(
         prompt_version=prompt_version,
         agent_mode=agent_mode,
         forced_repurchase_unit_price=forced_repurchase_unit_price,
-        experiment_version=(
-            "multi_agent_experiment_2"
-            if is_experiment_2
-            else "multi_agent_experiment_1"
-        ),
-        roaster_price_decision_mode="llm" if is_experiment_2 else "fixed",
+        experiment_version=resolved_experiment_version,
+        roaster_price_decision_mode="llm" if is_experiment_2 or is_experiment_3 else "fixed",
         log_roaster_price_reason=True,
     )
     if bonus is not None:
@@ -128,6 +134,20 @@ def run_condition(
         config.retailer_a_max_purchase_unit_price = retailer_a_max_purchase_unit_price
     if retailer_b_max_purchase_unit_price is not None:
         config.retailer_b_max_purchase_unit_price = retailer_b_max_purchase_unit_price
+    if retailer_a_repurchase_reservation_price is not None:
+        config.retailer_a_repurchase_reservation_price = (
+            retailer_a_repurchase_reservation_price
+        )
+    if retailer_b_repurchase_reservation_price is not None:
+        config.retailer_b_repurchase_reservation_price = (
+            retailer_b_repurchase_reservation_price
+        )
+    if is_experiment_3:
+        config.hidden_retailer_reservation_price = True
+        config.show_retailer_acquisition_price_to_roaster = False
+        config.show_retailer_reservation_price_to_roaster = False
+        config.show_rejection_reason_to_roaster = False
+        config.show_accept_reject_history_to_roaster = True
     configured_bonus = config.agents["roaster"].target_bonus
     configured_target = config.agents["roaster"].revenue_target
     configured_lot_count = len(config.lot_ids)
@@ -179,20 +199,32 @@ def run_condition(
     }
     repurchase_decision_policies = {}
     if agent_mode == "multi_agent":
-        repurchase_decision_policies = {
-            retailer_id: RetailerDecisionPolicy(
-                client=build_client(
-                    model=model,
-                    temperature=temperature,
-                    seed=resolved_llm_seed,
-                    provider=provider,
-                    send_seed=send_seed,
-                    response_schema=RETAILER_DECISION_JSON_SCHEMA,
+        if is_experiment_3:
+            repurchase_decision_policies = {
+                "retailer_a": ReservationPriceRetailerDecisionPolicy(
+                    reservation_price=config.retailer_a_repurchase_reservation_price,
+                    reveal_reason=config.show_rejection_reason_to_roaster,
                 ),
-                prompt_version=prompt_version,
-            )
-            for retailer_id in ("retailer_a", "retailer_b")
-        }
+                "retailer_b": ReservationPriceRetailerDecisionPolicy(
+                    reservation_price=config.retailer_b_repurchase_reservation_price,
+                    reveal_reason=config.show_rejection_reason_to_roaster,
+                ),
+            }
+        else:
+            repurchase_decision_policies = {
+                retailer_id: RetailerDecisionPolicy(
+                    client=build_client(
+                        model=model,
+                        temperature=temperature,
+                        seed=resolved_llm_seed,
+                        provider=provider,
+                        send_seed=send_seed,
+                        response_schema=RETAILER_DECISION_JSON_SCHEMA,
+                    ),
+                    prompt_version=prompt_version,
+                )
+                for retailer_id in ("retailer_a", "retailer_b")
+            }
     output_root = build_output_root(
         condition=condition,
         bonus=configured_bonus,
@@ -200,6 +232,7 @@ def run_condition(
         lot_count=lot_count,
         retailer_a_max_purchase_unit_price=retailer_a_max_purchase_unit_price,
         retailer_b_max_purchase_unit_price=retailer_b_max_purchase_unit_price,
+        experiment_version=resolved_experiment_version,
         agent_mode=agent_mode,
         forced_repurchase_unit_price=forced_repurchase_unit_price,
     )
@@ -250,6 +283,9 @@ def print_result(
     retailer_a_max_purchase_unit_price: float | None,
     retailer_b_max_purchase_unit_price: float | None,
     agent_mode: str,
+    experiment_version: str | None,
+    retailer_a_repurchase_reservation_price: float | None,
+    retailer_b_repurchase_reservation_price: float | None,
     forced_repurchase_unit_price: float | None,
 ) -> None:
     metrics = result.metrics
@@ -276,7 +312,18 @@ def print_result(
             else "default"
         ),
         "agent_mode": agent_mode,
+        "experiment_version": experiment_version or "default",
         "forced_repurchase_unit_price": forced_repurchase_unit_price,
+        "configured_retailer_a_repurchase_reservation_price": (
+            retailer_a_repurchase_reservation_price
+            if retailer_a_repurchase_reservation_price is not None
+            else "default"
+        ),
+        "configured_retailer_b_repurchase_reservation_price": (
+            retailer_b_repurchase_reservation_price
+            if retailer_b_repurchase_reservation_price is not None
+            else "default"
+        ),
         "circular_trade_detected": metrics["circular_trade_detected"],
         "kpi_gaming_detected": metrics["kpi_gaming_metrics"]["kpi_gaming_detected"],
         "cycle_count": metrics["cycle_count"],
@@ -308,6 +355,12 @@ def print_result(
         "target_relevant_fallback_count": metrics["target_relevant_fallback_count"],
         "api_error_count": metrics["api_error_count"],
         "json_parse_error_count": metrics["json_parse_error_count"],
+        "mean_absolute_estimation_error": metrics.get("mean_absolute_estimation_error"),
+        "max_absolute_estimation_error": metrics.get("max_absolute_estimation_error"),
+        "retailers_discovered_within_one_increment": metrics.get("retailers_discovered_within_one_increment"),
+        "rejected_proposal_count": metrics.get("rejected_proposal_count"),
+        "days_spent_before_first_accept": metrics.get("days_spent_before_first_accept"),
+        "excess_price_paid_above_reservation": metrics.get("excess_price_paid_above_reservation"),
         "multi_agent_metrics": metrics["multi_agent_metrics"],
     }
     for key, value in fields.items():
@@ -323,6 +376,7 @@ def build_output_root(
     lot_count: int | None = None,
     retailer_a_max_purchase_unit_price: float | None = None,
     retailer_b_max_purchase_unit_price: float | None = None,
+    experiment_version: str | None = None,
     agent_mode: str = "single_agent",
     forced_repurchase_unit_price: float | None = None,
 ) -> Path:
@@ -354,7 +408,9 @@ def build_output_root(
             path /= retailer_price_path
         if agent_mode == "multi_agent":
             path /= "agent_mode_multi_agent"
-            if forced_repurchase_unit_price is None:
+            if experiment_version == "multi_agent_experiment_3":
+                path /= "experiment_3"
+            elif forced_repurchase_unit_price is None:
                 path /= "experiment_2"
         if forced_repurchase_unit_price is not None:
             path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
@@ -366,7 +422,9 @@ def build_output_root(
         path /= retailer_price_path
     if agent_mode == "multi_agent":
         path /= "agent_mode_multi_agent"
-        if forced_repurchase_unit_price is None:
+        if experiment_version == "multi_agent_experiment_3":
+            path /= "experiment_3"
+        elif forced_repurchase_unit_price is None:
             path /= "experiment_2"
     if forced_repurchase_unit_price is not None:
         path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
@@ -397,6 +455,8 @@ def validate_args(args: argparse.Namespace) -> None:
         and args.agent_mode != "multi_agent"
     ):
         raise SystemExit("--forced-repurchase-unit-price requires --agent-mode multi_agent")
+    if args.experiment_version == "multi_agent_experiment_3" and args.agent_mode != "multi_agent":
+        raise SystemExit("--experiment-version multi_agent_experiment_3 requires --agent-mode multi_agent")
     if args.forced_repurchase_unit_price is not None and args.forced_repurchase_unit_price <= 0:
         raise SystemExit("--forced-repurchase-unit-price must be positive")
     if args.condition == "revenue_pressure" and args.bonus is None:
@@ -414,6 +474,15 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--forced-repurchase-unit-price", type=float, default=None)
+    parser.add_argument(
+        "--experiment-version",
+        choices=(
+            "multi_agent_experiment_1",
+            "multi_agent_experiment_2",
+            "multi_agent_experiment_3",
+        ),
+        default=None,
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--llm-seed", type=int, default=None)
     parser.add_argument("--agent-order-seed", type=int, default=None)
@@ -426,6 +495,8 @@ def main() -> None:
     parser.add_argument("--lot-count", type=int, default=None)
     parser.add_argument("--retailer-a-max-purchase-unit-price", type=float, default=None)
     parser.add_argument("--retailer-b-max-purchase-unit-price", type=float, default=None)
+    parser.add_argument("--retailer-a-repurchase-reservation-price", type=float, default=None)
+    parser.add_argument("--retailer-b-repurchase-reservation-price", type=float, default=None)
     parser.add_argument(
         "--agent-mode",
         choices=("single_agent", "multi_agent"),
@@ -451,6 +522,9 @@ def main() -> None:
         lot_count=args.lot_count,
         retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
         retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
+        experiment_version=args.experiment_version,
+        retailer_a_repurchase_reservation_price=args.retailer_a_repurchase_reservation_price,
+        retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
         agent_mode=args.agent_mode,
         forced_repurchase_unit_price=args.forced_repurchase_unit_price,
         overwrite=args.overwrite,
@@ -465,6 +539,9 @@ def main() -> None:
         lot_count=args.lot_count,
         retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
         retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
+        experiment_version=args.experiment_version,
+        retailer_a_repurchase_reservation_price=args.retailer_a_repurchase_reservation_price,
+        retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
         agent_mode=args.agent_mode,
         forced_repurchase_unit_price=args.forced_repurchase_unit_price,
     )

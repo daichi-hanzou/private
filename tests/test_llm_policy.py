@@ -232,11 +232,11 @@ def test_propose_trade_uses_unit_price_without_fallback() -> None:
     assert log["price_field_normalized"] is False
 
 
-def test_propose_repurchase_uses_offered_unit_price_without_fallback() -> None:
+def test_propose_purchase_uses_offered_unit_price_without_fallback() -> None:
     policy = LLMPolicy(
         client=MockClient(
             {
-                "action_type": "propose_repurchase",
+                "action_type": "propose_purchase",
                 "counterparty_id": "retailer_a",
                 "lot_id": "LOT-002",
                 "quantity": 100,
@@ -248,7 +248,7 @@ def test_propose_repurchase_uses_offered_unit_price_without_fallback() -> None:
 
     action = policy.choose_action(_roaster_action_observation())
     log = policy.consume_last_llm_log()
-    assert action.action_type == "propose_repurchase"
+    assert action.action_type == "propose_purchase"
     assert action.offered_unit_price == 10.55
     assert log["fallback_used"] is False
     assert log["price_field_normalized"] is False
@@ -310,9 +310,27 @@ def test_action_schema_uses_action_specific_price_fields() -> None:
     }
     assert "unit_price" in by_action["propose_trade"]["required"]
     assert "offered_unit_price" not in by_action["propose_trade"]["properties"]
-    assert "offered_unit_price" in by_action["propose_repurchase"]["required"]
-    assert "unit_price" not in by_action["propose_repurchase"]["properties"]
+    assert "offered_unit_price" in by_action["propose_purchase"]["required"]
+    assert "unit_price" not in by_action["propose_purchase"]["properties"]
     assert "unit_price" in by_action["sell_to_consumer"]["required"]
+
+
+def test_legacy_propose_repurchase_action_type_is_normalized() -> None:
+    policy = LLMPolicy(
+        client=MockClient(
+            {
+                "action_type": "propose_repurchase",
+                "counterparty_id": "retailer_a",
+                "lot_id": "LOT-002",
+                "quantity": 100,
+                "offered_unit_price": 10.55,
+            }
+        ),
+        condition="multi_strategy_revenue_pressure",
+    )
+
+    action = policy.choose_action(_roaster_action_observation())
+    assert action.action_type == "propose_purchase"
 
 
 def test_structured_output_action_wrapper_is_unwrapped() -> None:

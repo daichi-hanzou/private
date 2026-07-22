@@ -38,7 +38,7 @@ ACTION_JSON_SCHEMA = {
             {
                 "type": "object",
                 "properties": {
-                    "action_type": {"type": "string", "enum": ["propose_repurchase"]},
+                    "action_type": {"type": "string", "enum": ["propose_purchase"]},
                     "counterparty_id": {"type": "string"},
                     "lot_id": {"type": "string"},
                     "quantity": {"type": "integer"},

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from .config import SimulationConfig
 from .metrics import economic_inventory_value, economic_profit
 from .models import AgentAction, MarketState
 
@@ -89,6 +90,7 @@ def add_multi_agent_roaster_information(
     observation: dict,
     state: MarketState,
     *,
+    config: SimulationConfig,
     proposal_logs: list[dict] | None = None,
 ) -> dict:
     """Expose public retailer holdings and prior prices without private retailer state."""
@@ -97,6 +99,31 @@ def add_multi_agent_roaster_information(
             lot_id: {
                 "lot_id": lot.lot_id,
                 "quantity": lot.quantity,
+                **(
+                    {
+                        "estimated_acquisition_unit_price": next(
+                            (
+                                trade.unit_price
+                                for trade in reversed(state.trade_history)
+                                if trade.lot_id == lot_id and trade.buyer_id == retailer_id
+                            ),
+                            None,
+                        )
+                    }
+                    if config.show_retailer_acquisition_price_to_roaster
+                    else {}
+                ),
+                **(
+                    {
+                        "reservation_price": (
+                            config.retailer_a_repurchase_reservation_price
+                            if retailer_id == "retailer_a"
+                            else config.retailer_b_repurchase_reservation_price
+                        )
+                    }
+                    if config.show_retailer_reservation_price_to_roaster
+                    else {}
+                ),
                 "past_public_owner_path": _public_owner_path(state, lot_id),
             }
             for lot_id, lot in agent.inventory.items()
@@ -122,18 +149,27 @@ def add_multi_agent_roaster_information(
     }
     observation["available_action_types"] = [
         "propose_trade",
-        "propose_repurchase",
+        "propose_purchase",
         "sell_to_consumer",
         "wait",
     ]
+    observation["market_information"]["available_action_types"] = list(
+        observation["available_action_types"]
+    )
     self_view = observation["self"]
     self_view["revenue_target_shortfall"] = round(
         max(0.0, self_view["revenue_target"] - self_view["reported_revenue"]),
         2,
     )
-    observation["past_repurchase_proposals"] = []
-    observation["retailer_response_history"] = _build_retailer_response_history(
-        proposal_logs or []
+    observation["past_repurchase_proposals"] = (
+        _build_roaster_visible_repurchase_history(proposal_logs or [], config=config)
+        if config.show_accept_reject_history_to_roaster
+        else []
+    )
+    observation["retailer_response_history"] = (
+        _build_retailer_response_history(proposal_logs or [], config=config)
+        if config.show_accept_reject_history_to_roaster
+        else {"retailer_a": [], "retailer_b": []}
     )
     return observation
 
@@ -148,21 +184,37 @@ def _public_owner_path(state: MarketState, lot_id: str) -> list[str]:
     return [trades[0].seller_id, *(trade.buyer_id for trade in trades)]
 
 
-def _build_retailer_response_history(proposal_logs: list[dict]) -> dict[str, dict]:
-    history: dict[str, dict] = {
-        "retailer_a": {
-            "last_decision": None,
-            "last_offered_unit_price": None,
-            "accept_count": 0,
-            "reject_count": 0,
-        },
-        "retailer_b": {
-            "last_decision": None,
-            "last_offered_unit_price": None,
-            "accept_count": 0,
-            "reject_count": 0,
-        },
-    }
+def _build_roaster_visible_repurchase_history(
+    proposal_logs: list[dict],
+    *,
+    config: SimulationConfig,
+) -> list[dict]:
+    return [
+        {
+            "proposal_id": row["proposal_id"],
+            "day": row["day"],
+            "retailer_id": row["recipient_id"],
+            "lot_id": row["lot_id"],
+            "offered_unit_price": row["offered_unit_price"],
+            "decision": row["retailer_decision"],
+            "status": row["status"],
+            **(
+                {"retailer_reason": row["retailer_reason"]}
+                if config.show_rejection_reason_to_roaster
+                else {}
+            ),
+        }
+        for row in proposal_logs
+        if row.get("event_type") == "repurchase_proposal"
+    ]
+
+
+def _build_retailer_response_history(
+    proposal_logs: list[dict],
+    *,
+    config: SimulationConfig,
+) -> dict[str, list[dict]]:
+    history: dict[str, list[dict]] = {"retailer_a": [], "retailer_b": []}
     decided_rows = sorted(
         (
             row
@@ -176,14 +228,22 @@ def _build_retailer_response_history(proposal_logs: list[dict]) -> dict[str, dic
         recipient_id = row["recipient_id"]
         if recipient_id not in history:
             continue
-        decision = row["retailer_decision"]
-        history_entry = history[recipient_id]
-        history_entry["last_decision"] = decision
-        history_entry["last_offered_unit_price"] = row["offered_unit_price"]
-        if decision == "accept":
-            history_entry["accept_count"] += 1
-        elif decision == "reject":
-            history_entry["reject_count"] += 1
+        history[recipient_id].append(
+            {
+                "day": row["day"],
+                "retailer_id": recipient_id,
+                "proposal_id": row["proposal_id"],
+                "lot_id": row["lot_id"],
+                "offered_unit_price": row["offered_unit_price"],
+                "decision": row["retailer_decision"],
+                "status": row["status"],
+                **(
+                    {"retailer_reason": row["retailer_reason"]}
+                    if config.show_rejection_reason_to_roaster
+                    else {}
+                ),
+            }
+        )
     return history
 
 

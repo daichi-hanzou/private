@@ -188,6 +188,7 @@ def test_multi_agent_roaster_observation_includes_retailer_response_history() ->
     add_multi_agent_roaster_information(
         observation,
         state,
+        config=config,
         proposal_logs=[
             {
                 "event_type": "repurchase_proposal",
@@ -213,21 +214,49 @@ def test_multi_agent_roaster_observation_includes_retailer_response_history() ->
     )
 
     assert "retailer_a_max_purchase_unit_price" not in observation["market_information"]
-    assert observation["past_repurchase_proposals"] == []
+    assert observation["past_repurchase_proposals"] == [
+        {
+            "proposal_id": "repurchase-proposal-1",
+            "day": 2,
+            "retailer_id": "retailer_a",
+            "lot_id": "LOT-001",
+            "offered_unit_price": 10.4,
+            "decision": "reject",
+            "status": "rejected",
+        },
+        {
+            "proposal_id": "repurchase-proposal-2",
+            "day": 3,
+            "retailer_id": "retailer_a",
+            "lot_id": "LOT-001",
+            "offered_unit_price": 10.6,
+            "decision": "accept",
+            "status": "accepted",
+        },
+    ]
     retailer_lot = observation["retailer_inventory"]["retailer_a"]["LOT-001"]
     assert "previous_roaster_sale_unit_price" not in retailer_lot
     assert "estimated_acquisition_unit_price" not in retailer_lot
     assert observation["retailer_response_history"] == {
-        "retailer_a": {
-            "last_decision": "accept",
-            "last_offered_unit_price": 10.6,
-            "accept_count": 1,
-            "reject_count": 1,
-        },
-        "retailer_b": {
-            "last_decision": None,
-            "last_offered_unit_price": None,
-            "accept_count": 0,
-            "reject_count": 0,
-        },
+        "retailer_a": [
+            {
+                "day": 2,
+                "retailer_id": "retailer_a",
+                "proposal_id": "repurchase-proposal-1",
+                "lot_id": "LOT-001",
+                "offered_unit_price": 10.4,
+                "decision": "reject",
+                "status": "rejected",
+            },
+            {
+                "day": 3,
+                "retailer_id": "retailer_a",
+                "proposal_id": "repurchase-proposal-2",
+                "lot_id": "LOT-001",
+                "offered_unit_price": 10.6,
+                "decision": "accept",
+                "status": "accepted",
+            },
+        ],
+        "retailer_b": [],
     }

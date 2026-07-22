@@ -75,7 +75,7 @@ class TradeRecord:
 class AgentAction:
     action_type: Literal[
         "propose_trade",
-        "propose_repurchase",
+        "propose_purchase",
         "accept_trade",
         "reject_trade",
         "sell_to_consumer",
