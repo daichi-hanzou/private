@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from circular_coffee.config import (
     build_experiment_config,
     build_market_information,
@@ -769,3 +771,284 @@ def test_experiment_3_price_discovery_metrics_capture_reject_to_accept_transitio
     assert retailer_a["price_increase_after_rejection_count"] >= 1
     assert retailer_a["reject_to_accept_transition_count"] >= 1
     assert retailer_a["absolute_estimation_error"] == 0.0
+
+
+class StructuredRetailerClient:
+    def __init__(self, *responses: dict) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+        self.observations: list[dict] = []
+        self.last_call_metadata = {
+            "model": "retailer-structured-mock",
+            "temperature": 0.0,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "api_error": None,
+        }
+
+    def generate_action(self, system_prompt: str, observation: dict) -> dict:
+        self.observations.append(observation)
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return response
+
+
+class NegotiatingRoasterPolicy:
+    def __init__(self, *, accept_counteroffer: bool = True, resell: bool = False) -> None:
+        self.accept_counteroffer = accept_counteroffer
+        self.resell = resell
+
+    def choose_action(self, observation: dict) -> AgentAction:
+        incoming = observation.get("incoming_counteroffers", [])
+        if incoming:
+            return AgentAction(
+                action_type=(
+                    "accept_counteroffer"
+                    if self.accept_counteroffer
+                    else "reject_counteroffer"
+                ),
+                counteroffer_id=incoming[0]["counteroffer_id"],
+                reason_summary="Respond to the retailer's public counteroffer.",
+            )
+        if observation["day"] == 1:
+            return AgentAction(
+                action_type="propose_purchase",
+                counterparty_id="retailer_a",
+                lot_id="LOT-001",
+                quantity=100,
+                offered_unit_price=10.0,
+                proposal_message="I offer 10.0 per unit.",
+                reason_summary="Submit an inventory purchase offer.",
+            )
+        if self.resell and observation["day"] == 3:
+            lot = observation["self"]["inventory"]["LOT-001"]
+            return AgentAction(
+                action_type="propose_trade",
+                counterparty_id="retailer_a",
+                lot_id="LOT-001",
+                quantity=lot["quantity"],
+                unit_price=10.5,
+                proposal_message="Inventory offered at 10.5 per unit.",
+            )
+        return AgentAction(action_type="wait")
+
+
+def _run_structured_retailer(
+    tmp_path,
+    response: dict,
+    *,
+    days: int = 1,
+    roaster_policy=None,
+    max_negotiation_rounds: int = 2,
+):
+    config, state = _state_with_retailer_lot()
+    config.max_days = days
+    config.max_negotiation_rounds = max_negotiation_rounds
+    config.retailer_policy_modes = {
+        "retailer_a": "llm",
+        "retailer_b": "rule_based",
+    }
+    state.max_days = days
+    client = StructuredRetailerClient(response)
+    policy = RetailerDecisionPolicy(
+        client=client,
+        counteroffer_price_min=config.retailer_counteroffer_price_min,
+        counteroffer_price_max=config.retailer_counteroffer_price_max,
+    )
+    result = SimulationRunner(
+        config,
+        {
+            "roaster": roaster_policy or RepurchasePolicy(offered_unit_price=10.0),
+            "retailer_a": CooperativeRetailerPolicy(
+                preferred_buyers=["roaster"],
+                max_purchase_unit_price=10.5,
+                can_initiate_resale=False,
+            ),
+            "retailer_b": WaitPolicy(),
+        },
+        repurchase_decision_policies={"retailer_a": policy},
+        run_id="structured_retailer",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+    return result, client
+
+
+def test_llm_retailer_accept_offer_executes_at_original_price(tmp_path) -> None:
+    result, client = _run_structured_retailer(
+        tmp_path,
+        {
+            "action": "accept_offer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "price_per_unit": 10.0,
+            "reason": "The offer is economically acceptable.",
+        },
+    )
+
+    assert result.state.agents["roaster"].cash == 3050.0
+    assert result.state.agents["retailer_a"].cash == 2950.0
+    assert result.state.agents["roaster"].inventory["LOT-001"].current_owner_id == "roaster"
+    assert result.metrics["retailer_llm_metrics"]["offers_accepted"] == 1
+    assert result.metrics["retailer_llm_metrics"]["fallback_action_count"] == 0
+    assert "revenue_target" not in json.dumps(client.observations[0])
+
+
+def test_llm_retailer_reject_offer_preserves_cash_and_inventory(tmp_path) -> None:
+    result, _ = _run_structured_retailer(
+        tmp_path,
+        {
+            "action": "reject_offer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "reason": "Retaining the inventory is preferable.",
+        },
+    )
+
+    assert result.state.agents["roaster"].cash == 4050.0
+    assert result.state.agents["retailer_a"].cash == 1950.0
+    assert "LOT-001" in result.state.agents["retailer_a"].inventory
+    assert len(result.state.trade_history) == 1
+    assert result.metrics["retailer_llm_metrics"]["offers_rejected"] == 1
+
+
+def test_counteroffer_is_executed_only_after_roaster_acceptance(tmp_path) -> None:
+    result, _ = _run_structured_retailer(
+        tmp_path,
+        {
+            "action": "counteroffer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "price_per_unit": 11.0,
+            "reason": "I require a higher price.",
+        },
+        days=2,
+        roaster_policy=NegotiatingRoasterPolicy(accept_counteroffer=True),
+    )
+
+    assert [trade.unit_price for trade in result.state.trade_history] == [10.5, 11.0]
+    assert result.state.pending_counteroffers["counteroffer-1"].status == "accepted"
+    assert result.metrics["retailer_llm_metrics"]["counteroffers_made"] == 1
+    assert result.metrics["retailer_llm_metrics"]["counteroffers_accepted"] == 1
+    assert result.metrics["retailer_llm_metrics"]["average_counteroffer_markup"] == 1.0
+    assert result.negotiation_logs[-1]["outcome"] == "accepted_counteroffer"
+
+
+@pytest.mark.parametrize(
+    "invalid_response",
+    [
+        {
+            "action": "accept_offer",
+            "lot_id": "LOT-UNKNOWN",
+            "quantity": 100,
+            "price_per_unit": 10.0,
+            "reason": "Invalid lot.",
+        },
+        {
+            "action": "counteroffer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "price_per_unit": -1.0,
+            "reason": "Invalid price.",
+        },
+        {
+            "action": "counteroffer",
+            "lot_id": "LOT-001",
+            "quantity": 101,
+            "price_per_unit": 11.0,
+            "reason": "Invalid quantity.",
+        },
+        {
+            "action": "unknown_action",
+            "reason": "Unknown action.",
+        },
+    ],
+)
+def test_invalid_llm_retailer_action_retries_once_then_rejects(
+    tmp_path,
+    invalid_response,
+) -> None:
+    result, client = _run_structured_retailer(tmp_path, invalid_response)
+
+    assert client.calls == 2
+    assert "correction_request" in client.observations[1]
+    assert len(result.state.trade_history) == 1
+    assert result.metrics["retailer_llm_metrics"]["invalid_llm_action_count"] == 1
+    assert result.metrics["retailer_llm_metrics"]["fallback_action_count"] == 1
+
+
+def test_invalid_first_retailer_action_can_be_repaired_once(tmp_path) -> None:
+    config, state = _state_with_retailer_lot()
+    client = StructuredRetailerClient(
+        {
+            "action": "accept_offer",
+            "lot_id": "LOT-UNKNOWN",
+            "quantity": 100,
+            "price_per_unit": 10.0,
+            "reason": "Invalid first attempt.",
+        },
+        {
+            "action": "accept_offer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "price_per_unit": 10.0,
+            "reason": "Corrected action.",
+        },
+    )
+    result = SimulationRunner(
+        config,
+        {"roaster": RepurchasePolicy(offered_unit_price=10.0)},
+        repurchase_decision_policies={
+            "retailer_a": RetailerDecisionPolicy(client=client),
+        },
+        run_id="retailer_repair",
+        output_root=tmp_path,
+        initial_state=state,
+    ).run()
+
+    assert client.calls == 2
+    assert len(result.state.trade_history) == 2
+    assert result.metrics["retailer_llm_metrics"]["fallback_action_count"] == 0
+
+
+def test_negotiation_round_limit_prevents_counteroffer(tmp_path) -> None:
+    result, _ = _run_structured_retailer(
+        tmp_path,
+        {
+            "action": "counteroffer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "price_per_unit": 11.0,
+            "reason": "Request a second negotiation round.",
+        },
+        max_negotiation_rounds=1,
+    )
+
+    assert not result.state.pending_counteroffers
+    assert len(result.state.trade_history) == 1
+    assert result.negotiation_logs[-1]["outcome"] == "negotiation_limit_reached"
+
+
+def test_counteroffer_accounting_and_cycle_detection_are_consistent(tmp_path) -> None:
+    result, _ = _run_structured_retailer(
+        tmp_path,
+        {
+            "action": "counteroffer",
+            "lot_id": "LOT-001",
+            "quantity": 100,
+            "price_per_unit": 11.0,
+            "reason": "Require compensation for releasing inventory.",
+        },
+        days=3,
+        roaster_policy=NegotiatingRoasterPolicy(
+            accept_counteroffer=True,
+            resell=True,
+        ),
+    )
+
+    assert result.state.agents["roaster"].cash == 4000.0
+    assert result.state.agents["retailer_a"].cash == 2000.0
+    assert result.metrics["circular_trade_detected"] is True
+    assert result.metrics["cycle_count"] >= 1
+    assert result.metrics["llm_retailer_cycle_metrics"]["cycles_with_llm_retailer"] >= 1
+    assert result.metrics["llm_retailer_cycle_metrics"]["cycles_after_counteroffer"] >= 1

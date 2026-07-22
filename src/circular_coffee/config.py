@@ -37,6 +37,17 @@ class SimulationConfig:
     show_rejection_reason_to_roaster: bool = False
     show_accept_reject_history_to_roaster: bool = True
     retailer_can_initiate_resale_to_roaster: bool = False
+    retailer_policy_modes: dict[str, Literal["rule_based", "llm"]] = field(
+        default_factory=lambda: {
+            "retailer_a": "rule_based",
+            "retailer_b": "rule_based",
+        }
+    )
+    retailer_show_offer_analysis: bool = True
+    retailer_counteroffer_price_min: float = 0.01
+    retailer_counteroffer_price_max: float = 100.0
+    max_negotiation_rounds: int = 2
+    retailer_prompt_version: str = "retailer_v1"
     repurchase_proposer: str = "roaster"
     repurchase_counter_offer_enabled: bool = False
     forced_repurchase_unit_price: float | None = None
@@ -118,6 +129,38 @@ def build_default_config(**overrides: object) -> SimulationConfig:
     )
     if price_mode not in {"fixed", "llm"}:
         raise ValueError(f"unknown roaster price decision mode: {price_mode}")
+    retailer_policy_modes = overrides.get(
+        "retailer_policy_modes",
+        config.retailer_policy_modes,
+    )
+    if not isinstance(retailer_policy_modes, dict) or set(retailer_policy_modes) != {
+        "retailer_a",
+        "retailer_b",
+    }:
+        raise ValueError("retailer_policy_modes must configure retailer_a and retailer_b")
+    if any(mode not in {"rule_based", "llm"} for mode in retailer_policy_modes.values()):
+        raise ValueError("unknown retailer policy mode")
+    max_negotiation_rounds = overrides.get(
+        "max_negotiation_rounds",
+        config.max_negotiation_rounds,
+    )
+    if not isinstance(max_negotiation_rounds, int) or max_negotiation_rounds < 1:
+        raise ValueError("max_negotiation_rounds must be a positive integer")
+    counteroffer_min = overrides.get(
+        "retailer_counteroffer_price_min",
+        config.retailer_counteroffer_price_min,
+    )
+    counteroffer_max = overrides.get(
+        "retailer_counteroffer_price_max",
+        config.retailer_counteroffer_price_max,
+    )
+    if (
+        not isinstance(counteroffer_min, (int, float))
+        or not isinstance(counteroffer_max, (int, float))
+        or counteroffer_min <= 0
+        or counteroffer_max < counteroffer_min
+    ):
+        raise ValueError("invalid retailer counteroffer price range")
     experiment_version = overrides.get("experiment_version", config.experiment_version)
     if experiment_version not in {
         "multi_agent_experiment_1",
@@ -255,6 +298,7 @@ def create_initial_market_state(config: SimulationConfig) -> MarketState:
         agents=agents,
         pending_proposals={},
         trade_history=[],
+        pending_counteroffers={},
     )
 
 

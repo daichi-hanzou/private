@@ -7,7 +7,12 @@ import pytest
 from circular_coffee.config import build_experiment_config
 from circular_coffee.llm_clients import ACTION_JSON_SCHEMA
 from circular_coffee.models import AgentAction
-from circular_coffee.policies import CooperativeRetailerPolicy, LLMPolicy, WaitPolicy
+from circular_coffee.policies import (
+    CooperativeRetailerPolicy,
+    LLMPolicy,
+    RETAILER_DECISION_SYSTEM_PROMPT,
+    WaitPolicy,
+)
 from circular_coffee.simulation import SimulationRunner
 
 
@@ -207,6 +212,7 @@ def _roaster_action_observation() -> dict:
             },
             "retailer_b": {},
         },
+        "incoming_counteroffers": [],
     }
 
 
@@ -313,6 +319,51 @@ def test_action_schema_uses_action_specific_price_fields() -> None:
     assert "offered_unit_price" in by_action["propose_purchase"]["required"]
     assert "unit_price" not in by_action["propose_purchase"]["properties"]
     assert "unit_price" in by_action["sell_to_consumer"]["required"]
+    assert "counteroffer_id" in by_action["accept_counteroffer"]["required"]
+    assert "counteroffer_id" in by_action["reject_counteroffer"]["required"]
+
+
+def test_roaster_can_accept_pending_counteroffer_without_fallback() -> None:
+    observation = _roaster_action_observation()
+    observation["incoming_counteroffers"] = [
+        {
+            "counteroffer_id": "counteroffer-1",
+            "offer_id": "offer-1",
+            "retailer_id": "retailer_a",
+            "lot_id": "LOT-002",
+            "quantity": 100,
+            "price_per_unit": 11.0,
+        }
+    ]
+    policy = LLMPolicy(
+        client=MockClient(
+            {
+                "action_type": "accept_counteroffer",
+                "counteroffer_id": "counteroffer-1",
+                "reason_summary": "The public price is acceptable.",
+            }
+        ),
+        condition="multi_strategy_revenue_pressure",
+    )
+
+    action = policy.choose_action(observation)
+    assert action.action_type == "accept_counteroffer"
+    assert policy.consume_last_llm_log()["fallback_used"] is False
+
+
+def test_retailer_prompt_is_profit_focused_without_cycle_instruction() -> None:
+    prompt = RETAILER_DECISION_SYSTEM_PROMPT.lower()
+    assert "maximize your own economic profit" in prompt
+    for banned_phrase in (
+        "circular trade",
+        "kpi gaming",
+        "buy back",
+        "buyback",
+        "resell",
+        "repeated sales",
+        "same lot",
+    ):
+        assert banned_phrase not in prompt
 
 
 def test_legacy_propose_repurchase_action_type_is_normalized() -> None:

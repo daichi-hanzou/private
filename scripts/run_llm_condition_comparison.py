@@ -99,6 +99,13 @@ def run_condition(
     retailer_b_repurchase_reservation_price: float | None = None,
     agent_mode: str = "single_agent",
     forced_repurchase_unit_price: float | None = None,
+    retailer_policy_mode: str = "rule_based",
+    retailer_a_policy_mode: str | None = None,
+    retailer_b_policy_mode: str | None = None,
+    max_negotiation_rounds: int = 2,
+    retailer_counteroffer_price_min: float = 0.01,
+    retailer_counteroffer_price_max: float = 100.0,
+    retailer_show_offer_analysis: bool = True,
     overwrite: bool = False,
 ):
     resolved_experiment_version = experiment_version or (
@@ -110,6 +117,10 @@ def run_condition(
     is_experiment_3 = resolved_experiment_version == "multi_agent_experiment_3"
     resolved_llm_seed = seed if llm_seed is None else llm_seed
     resolved_agent_order_seed = seed if agent_order_seed is None else agent_order_seed
+    retailer_policy_modes = {
+        "retailer_a": retailer_a_policy_mode or retailer_policy_mode,
+        "retailer_b": retailer_b_policy_mode or retailer_policy_mode,
+    }
     config = build_experiment_config(
         condition=condition,
         seed=seed,
@@ -123,6 +134,11 @@ def run_condition(
         experiment_version=resolved_experiment_version,
         roaster_price_decision_mode="llm" if is_experiment_2 or is_experiment_3 else "fixed",
         log_roaster_price_reason=True,
+        retailer_policy_modes=retailer_policy_modes,
+        max_negotiation_rounds=max_negotiation_rounds,
+        retailer_counteroffer_price_min=retailer_counteroffer_price_min,
+        retailer_counteroffer_price_max=retailer_counteroffer_price_max,
+        retailer_show_offer_analysis=retailer_show_offer_analysis,
     )
     if bonus is not None:
         config.agents["roaster"].target_bonus = bonus
@@ -199,20 +215,10 @@ def run_condition(
     }
     repurchase_decision_policies = {}
     if agent_mode == "multi_agent":
-        if is_experiment_3:
-            repurchase_decision_policies = {
-                "retailer_a": ReservationPriceRetailerDecisionPolicy(
-                    reservation_price=config.retailer_a_repurchase_reservation_price,
-                    reveal_reason=config.show_rejection_reason_to_roaster,
-                ),
-                "retailer_b": ReservationPriceRetailerDecisionPolicy(
-                    reservation_price=config.retailer_b_repurchase_reservation_price,
-                    reveal_reason=config.show_rejection_reason_to_roaster,
-                ),
-            }
-        else:
-            repurchase_decision_policies = {
-                retailer_id: RetailerDecisionPolicy(
+        repurchase_decision_policies = {}
+        for retailer_id in ("retailer_a", "retailer_b"):
+            if retailer_policy_modes[retailer_id] == "llm":
+                repurchase_decision_policies[retailer_id] = RetailerDecisionPolicy(
                     client=build_client(
                         model=model,
                         temperature=temperature,
@@ -221,10 +227,22 @@ def run_condition(
                         send_seed=send_seed,
                         response_schema=RETAILER_DECISION_JSON_SCHEMA,
                     ),
-                    prompt_version=prompt_version,
+                    prompt_version=config.retailer_prompt_version,
+                    counteroffer_price_min=config.retailer_counteroffer_price_min,
+                    counteroffer_price_max=config.retailer_counteroffer_price_max,
                 )
-                for retailer_id in ("retailer_a", "retailer_b")
-            }
+            else:
+                reservation_price = (
+                    config.retailer_a_repurchase_reservation_price
+                    if retailer_id == "retailer_a"
+                    else config.retailer_b_repurchase_reservation_price
+                )
+                repurchase_decision_policies[retailer_id] = (
+                    ReservationPriceRetailerDecisionPolicy(
+                        reservation_price=reservation_price,
+                        reveal_reason=config.show_rejection_reason_to_roaster,
+                    )
+                )
     output_root = build_output_root(
         condition=condition,
         bonus=configured_bonus,
@@ -235,6 +253,7 @@ def run_condition(
         experiment_version=resolved_experiment_version,
         agent_mode=agent_mode,
         forced_repurchase_unit_price=forced_repurchase_unit_price,
+        retailer_policy_modes=retailer_policy_modes,
     )
     run_id = f"seed_{seed}"
     output_dir = Path(output_root) / run_id
@@ -257,6 +276,7 @@ def run_condition(
     print(f"agent_mode: {agent_mode}")
     print(f"forced_repurchase_unit_price: {forced_repurchase_unit_price}")
     print(f"experiment_version: {config.experiment_version}")
+    print(f"retailer_policy_modes: {retailer_policy_modes}")
     print(f"roaster_price_decision_mode: {config.roaster_price_decision_mode}")
     print(f"seed: {seed}")
     print(f"llm_seed: {resolved_llm_seed}")
@@ -379,6 +399,7 @@ def build_output_root(
     experiment_version: str | None = None,
     agent_mode: str = "single_agent",
     forced_repurchase_unit_price: float | None = None,
+    retailer_policy_modes: dict[str, str] | None = None,
 ) -> Path:
     lot_path = f"lots_{lot_count}" if lot_count is not None else None
     retailer_price_path = None
@@ -412,6 +433,11 @@ def build_output_root(
                 path /= "experiment_3"
             elif forced_repurchase_unit_price is None:
                 path /= "experiment_2"
+            if retailer_policy_modes is not None:
+                path /= (
+                    f"retailers_a_{retailer_policy_modes['retailer_a']}"
+                    f"_b_{retailer_policy_modes['retailer_b']}"
+                )
         if forced_repurchase_unit_price is not None:
             path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
         return path
@@ -426,6 +452,11 @@ def build_output_root(
             path /= "experiment_3"
         elif forced_repurchase_unit_price is None:
             path /= "experiment_2"
+        if retailer_policy_modes is not None:
+            path /= (
+                f"retailers_a_{retailer_policy_modes['retailer_a']}"
+                f"_b_{retailer_policy_modes['retailer_b']}"
+            )
     if forced_repurchase_unit_price is not None:
         path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
     return path
@@ -463,6 +494,32 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"--bonus is required with --condition {args.condition}"
         )
+    for field_name in (
+        "retailer_policy_mode",
+        "retailer_a_policy_mode",
+        "retailer_b_policy_mode",
+    ):
+        value = getattr(args, field_name, None)
+        if value is not None and value not in {"rule_based", "llm"}:
+            raise SystemExit(f"--{field_name.replace('_', '-')} must be rule_based or llm")
+    if (
+        any(
+            getattr(args, field_name, None) == "llm"
+            for field_name in (
+                "retailer_policy_mode",
+                "retailer_a_policy_mode",
+                "retailer_b_policy_mode",
+            )
+        )
+        and args.agent_mode != "multi_agent"
+    ):
+        raise SystemExit("LLM Retailer mode requires --agent-mode multi_agent")
+    if getattr(args, "max_negotiation_rounds", 2) < 1:
+        raise SystemExit("--max-negotiation-rounds must be positive")
+    counteroffer_min = getattr(args, "retailer_counteroffer_price_min", 0.01)
+    counteroffer_max = getattr(args, "retailer_counteroffer_price_max", 100.0)
+    if counteroffer_min <= 0 or counteroffer_max < counteroffer_min:
+        raise SystemExit("invalid Retailer counteroffer price range")
 
 
 def main() -> None:
@@ -502,6 +559,29 @@ def main() -> None:
         choices=("single_agent", "multi_agent"),
         default="single_agent",
     )
+    parser.add_argument(
+        "--retailer-policy-mode",
+        choices=("rule_based", "llm"),
+        default="rule_based",
+    )
+    parser.add_argument(
+        "--retailer-a-policy-mode",
+        choices=("rule_based", "llm"),
+        default=None,
+    )
+    parser.add_argument(
+        "--retailer-b-policy-mode",
+        choices=("rule_based", "llm"),
+        default=None,
+    )
+    parser.add_argument("--max-negotiation-rounds", type=int, default=2)
+    parser.add_argument("--retailer-counteroffer-price-min", type=float, default=0.01)
+    parser.add_argument("--retailer-counteroffer-price-max", type=float, default=100.0)
+    parser.add_argument(
+        "--hide-retailer-offer-analysis",
+        action="store_true",
+        help="Hide derived offer-analysis values from LLM Retailers.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
@@ -527,6 +607,13 @@ def main() -> None:
         retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
         agent_mode=args.agent_mode,
         forced_repurchase_unit_price=args.forced_repurchase_unit_price,
+        retailer_policy_mode=args.retailer_policy_mode,
+        retailer_a_policy_mode=args.retailer_a_policy_mode,
+        retailer_b_policy_mode=args.retailer_b_policy_mode,
+        max_negotiation_rounds=args.max_negotiation_rounds,
+        retailer_counteroffer_price_min=args.retailer_counteroffer_price_min,
+        retailer_counteroffer_price_max=args.retailer_counteroffer_price_max,
+        retailer_show_offer_analysis=not args.hide_retailer_offer_analysis,
         overwrite=args.overwrite,
     )
     print_result(

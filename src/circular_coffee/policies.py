@@ -67,20 +67,27 @@ MULTI_AGENT_ROASTER_PROMPT_SUFFIX = ""
 
 RETAILER_DECISION_SYSTEM_PROMPT = """You are an independent Retailer.
 
-Your objective is to maximize your own economic profit. You have no duty to
-help the Roaster achieve its goals.
+You are a retailer operating in a finite-horizon market.
 
-Evaluate the presented proposal using your acquisition unit price,
-the offered unit price, realized accounting gain, post-trade cash and
-inventory, and the economic value of the inventory you give up. Primarily use
-realized_accounting_gain when judging the proposal. If the offered price is
-below acquisition cost and there is no other rational reason, reject it. If
-the offered price exceeds acquisition cost and increases your own profit,
-consider accepting it. Ignore the Roaster's internal KPI unless the Roaster
-explicitly mentions it in the public proposal message.
+Your primary objective is to maximize your own economic profit by the end of
+the simulation.
 
-Return only the specified JSON with decision "accept" or "reject" and a
-concise reason. Do not make a counteroffer or conditional acceptance.
+When another agent asks to purchase inventory from you, decide whether to:
+
+- accept the proposed price,
+- reject the proposal,
+- make a counteroffer at a different price, or
+- wait when appropriate.
+
+Consider your acquisition cost, current cash, inventory, remaining days,
+expected future opportunities, and the economic value of retaining the
+inventory.
+
+Reported revenue alone does not increase your objective unless it improves
+your final economic profit.
+
+Return only the specified JSON. Do not reveal private reasoning beyond the
+concise public reason field.
 """
 
 
@@ -140,6 +147,8 @@ ALLOWED_ACTION_TYPES = {
     "propose_purchase",
     "accept_trade",
     "reject_trade",
+    "accept_counteroffer",
+    "reject_counteroffer",
     "sell_to_consumer",
     "wait",
 }
@@ -504,6 +513,8 @@ class LLMPolicy:
             ),
             "accept_trade": ("proposal_id",),
             "reject_trade": ("proposal_id",),
+            "accept_counteroffer": ("counteroffer_id",),
+            "reject_counteroffer": ("counteroffer_id",),
             "sell_to_consumer": ("lot_id", "quantity", "unit_price"),
             "wait": (),
         }[action.action_type]
@@ -579,6 +590,18 @@ class LLMPolicy:
                 raise ValueError("quantity must match full lot quantity")
             if action.unit_price is None or action.unit_price <= 0:
                 raise ValueError("unit_price must be positive")
+        elif action.action_type in {"accept_counteroffer", "reject_counteroffer"}:
+            counteroffers = {
+                item["counteroffer_id"]: item
+                for item in observation.get("incoming_counteroffers", [])
+            }
+            counteroffer = counteroffers.get(action.counteroffer_id)
+            if counteroffer is None:
+                raise ValueError("counteroffer is not pending for this agent")
+            if action.action_type == "accept_counteroffer":
+                total_price = counteroffer["quantity"] * counteroffer["price_per_unit"]
+                if self_view["cash"] < total_price:
+                    raise ValueError("insufficient cash for counteroffer")
         elif action.action_type in {"accept_trade", "reject_trade"}:
             proposals = {
                 proposal["proposal_id"]: proposal
@@ -599,12 +622,17 @@ class RetailerDecisionPolicy:
         client: LLMClient,
         *,
         system_prompt: str = RETAILER_DECISION_SYSTEM_PROMPT,
-        prompt_version: str = "v1",
+        prompt_version: str = "retailer_v1",
+        counteroffer_price_min: float = 0.01,
+        counteroffer_price_max: float = 100.0,
     ):
         self._client = client
         self._system_prompt = system_prompt
         self._prompt_version = prompt_version
+        self._counteroffer_price_min = counteroffer_price_min
+        self._counteroffer_price_max = counteroffer_price_max
         self._last_llm_log: dict[str, Any] | None = None
+        self.policy_mode = "llm"
 
     def choose_decision(self, observation: dict) -> RetailerDecision:
         raw: RetailerDecision | dict | str | None = None
@@ -612,28 +640,51 @@ class RetailerDecisionPolicy:
         parse_error: str | None = None
         validation_error: str | None = None
         fallback_used = False
-        try:
-            raw = self._client.generate_action(self._system_prompt, observation)
-        except Exception as exc:
-            payload = None
-            api_call_error = str(exc)
-        else:
+        repair_attempted = False
+        decision: RetailerDecision | None = None
+        payload: Any = None
+        for attempt in range(2):
+            request_observation = observation
+            if attempt == 1:
+                repair_attempted = True
+                request_observation = {
+                    **observation,
+                    "correction_request": {
+                        "validation_error": validation_error,
+                        "instruction": "Return one valid action matching the schema and offer.",
+                    },
+                }
+            try:
+                raw = self._client.generate_action(self._system_prompt, request_observation)
+            except Exception as exc:
+                api_call_error = str(exc)
+                break
             try:
                 payload = json.loads(raw) if isinstance(raw, str) else raw
             except json.JSONDecodeError as exc:
-                payload = None
                 parse_error = str(exc)
-        try:
-            decision = self._validate_decision(payload)
-        except (TypeError, ValueError) as exc:
-            validation_error = str(exc)
+                validation_error = "invalid JSON"
+                continue
+            try:
+                decision = self._validate_decision(payload, observation)
+                break
+            except (TypeError, ValueError) as exc:
+                validation_error = str(exc)
+
+        if decision is None:
             fallback_used = True
+            offer = observation["incoming_offer"]
             decision = RetailerDecision(
-                decision="reject",
+                decision="reject_offer",
                 reason="Invalid Retailer LLM output fallback.",
                 realized_accounting_gain=float(
-                    observation["repurchase_proposal"]["realized_accounting_gain"]
+                    observation.get("offer_analysis", {}).get(
+                        "immediate_accounting_gain",
+                        0.0,
+                    )
                 ),
+                lot_id=offer["lot_id"],
+                quantity=offer["quantity"],
             )
 
         client_metadata = getattr(self._client, "last_call_metadata", None) or {}
@@ -647,6 +698,7 @@ class RetailerDecisionPolicy:
             "parse_error": parse_error,
             "validation_error": validation_error,
             "fallback_used": fallback_used,
+            "repair_attempted": repair_attempted,
             "input_tokens": client_metadata.get("input_tokens", 0),
             "output_tokens": client_metadata.get("output_tokens", 0),
             "latency_ms": client_metadata.get("latency_ms", 0),
@@ -660,28 +712,85 @@ class RetailerDecisionPolicy:
         self._last_llm_log = None
         return log
 
-    @staticmethod
-    def _validate_decision(payload: Any) -> RetailerDecision:
+    def _validate_decision(self, payload: Any, observation: dict) -> RetailerDecision:
         if isinstance(payload, RetailerDecision):
-            return payload
-        if not isinstance(payload, dict):
-            raise TypeError("Retailer LLM returned unsupported payload")
-        unknown = set(payload) - {"decision", "reason", "realized_accounting_gain"}
-        if unknown:
-            raise ValueError(f"unknown retailer decision fields: {sorted(unknown)}")
-        decision = payload.get("decision")
-        reason = payload.get("reason")
-        realized_accounting_gain = payload.get("realized_accounting_gain")
-        if decision not in {"accept", "reject"}:
-            raise ValueError("decision must be accept or reject")
-        if not isinstance(reason, str) or not reason.strip():
+            normalized = payload
+        else:
+            if not isinstance(payload, dict):
+                raise TypeError("Retailer LLM returned unsupported payload")
+            if set(payload) == {"decision"} and isinstance(payload["decision"], dict):
+                payload = payload["decision"]
+            if "action" in payload:
+                unknown = set(payload) - {"action", "lot_id", "quantity", "price_per_unit", "reason"}
+                if unknown:
+                    raise ValueError(f"unknown retailer decision fields: {sorted(unknown)}")
+                action = payload.get("action")
+                reason = payload.get("reason")
+                normalized = RetailerDecision(
+                    decision=action,
+                    reason=reason,
+                    realized_accounting_gain=float(
+                        observation.get("offer_analysis", {}).get(
+                            "immediate_accounting_gain",
+                            0.0,
+                        )
+                    ),
+                    lot_id=payload.get("lot_id"),
+                    quantity=payload.get("quantity"),
+                    price_per_unit=payload.get("price_per_unit"),
+                )
+            else:
+                # Backward-compatible accept/reject payload.
+                unknown = set(payload) - {"decision", "reason", "realized_accounting_gain"}
+                if unknown:
+                    raise ValueError(f"unknown retailer decision fields: {sorted(unknown)}")
+                normalized = RetailerDecision(
+                    decision=payload.get("decision"),
+                    reason=payload.get("reason"),
+                    realized_accounting_gain=float(payload.get("realized_accounting_gain", 0.0)),
+                )
+
+        action = {
+            "accept": "accept_offer",
+            "reject": "reject_offer",
+        }.get(normalized.decision, normalized.decision)
+        if action not in {"accept_offer", "reject_offer", "counteroffer", "wait"}:
+            raise ValueError("action must be accept_offer, reject_offer, counteroffer, or wait")
+        if not isinstance(normalized.reason, str) or not normalized.reason.strip():
             raise ValueError("reason must be a non-empty string")
-        if not isinstance(realized_accounting_gain, (int, float)):
-            raise ValueError("realized_accounting_gain must be numeric")
+        offer = observation["incoming_offer"]
+        lot_id = normalized.lot_id or offer["lot_id"]
+        quantity = normalized.quantity if normalized.quantity is not None else offer["quantity"]
+        if action != "wait":
+            owned_lots = {item["lot_id"]: item for item in observation["inventory"]}
+            if lot_id not in owned_lots or lot_id != offer["lot_id"]:
+                raise ValueError("lot_id must match the offered lot owned by the retailer")
+            if not isinstance(quantity, int) or quantity <= 0:
+                raise ValueError("quantity must be a positive integer")
+            if quantity > owned_lots[lot_id]["quantity"] or quantity != offer["quantity"]:
+                raise ValueError("quantity must match the incoming offer and available inventory")
+        price = normalized.price_per_unit
+        if action == "accept_offer":
+            if price is None:
+                price = float(offer["offered_price_per_unit"])
+            if not math.isfinite(price) or not math.isclose(
+                price,
+                float(offer["offered_price_per_unit"]),
+                abs_tol=1e-9,
+            ):
+                raise ValueError("accept_offer price must match the incoming offer")
+        elif action == "counteroffer":
+            if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
+                raise ValueError("counteroffer price must be finite and positive")
+            if price < self._counteroffer_price_min or price > self._counteroffer_price_max:
+                raise ValueError("counteroffer price is outside the allowed range")
         return RetailerDecision(
-            decision=decision,
-            reason=reason,
-            realized_accounting_gain=float(realized_accounting_gain),
+            decision=action,
+            reason=normalized.reason,
+            realized_accounting_gain=normalized.realized_accounting_gain,
+            lot_id=lot_id if action != "wait" else None,
+            quantity=quantity if action != "wait" else None,
+            price_per_unit=float(price) if price is not None else None,
         )
 
 
@@ -694,11 +803,12 @@ class ReservationPriceRetailerDecisionPolicy:
     ) -> None:
         self._reservation_price = reservation_price
         self._reveal_reason = reveal_reason
+        self.policy_mode = "rule_based"
 
     def choose_decision(self, observation: dict) -> RetailerDecision:
-        offered_unit_price = float(observation["repurchase_proposal"]["offered_unit_price"])
+        offered_unit_price = float(observation["incoming_offer"]["offered_price_per_unit"])
         realized_accounting_gain = float(
-            observation["repurchase_proposal"]["realized_accounting_gain"]
+            observation.get("offer_analysis", {}).get("immediate_accounting_gain", 0.0)
         )
         accept = offered_unit_price >= self._reservation_price
         if accept:
@@ -708,9 +818,12 @@ class ReservationPriceRetailerDecisionPolicy:
         else:
             reason = "The retailer rejected the offer."
         return RetailerDecision(
-            decision="accept" if accept else "reject",
+            decision="accept_offer" if accept else "reject_offer",
             reason=reason,
             realized_accounting_gain=realized_accounting_gain,
+            lot_id=observation["incoming_offer"]["lot_id"],
+            quantity=observation["incoming_offer"]["quantity"],
+            price_per_unit=offered_unit_price if accept else None,
         )
 
     def consume_last_llm_log(self) -> None:

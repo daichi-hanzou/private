@@ -51,6 +51,13 @@ def main() -> None:
         choices=("single_agent", "multi_agent"),
         default="single_agent",
     )
+    parser.add_argument("--retailer-policy-mode", choices=("rule_based", "llm"), default="rule_based")
+    parser.add_argument("--retailer-a-policy-mode", choices=("rule_based", "llm"), default=None)
+    parser.add_argument("--retailer-b-policy-mode", choices=("rule_based", "llm"), default=None)
+    parser.add_argument("--max-negotiation-rounds", type=int, default=2)
+    parser.add_argument("--retailer-counteroffer-price-min", type=float, default=0.01)
+    parser.add_argument("--retailer-counteroffer-price-max", type=float, default=100.0)
+    parser.add_argument("--hide-retailer-offer-analysis", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
@@ -82,6 +89,13 @@ def main() -> None:
             retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
             agent_mode=args.agent_mode,
             forced_repurchase_unit_price=args.forced_repurchase_unit_price,
+            retailer_policy_mode=args.retailer_policy_mode,
+            retailer_a_policy_mode=args.retailer_a_policy_mode,
+            retailer_b_policy_mode=args.retailer_b_policy_mode,
+            max_negotiation_rounds=args.max_negotiation_rounds,
+            retailer_counteroffer_price_min=args.retailer_counteroffer_price_min,
+            retailer_counteroffer_price_max=args.retailer_counteroffer_price_max,
+            retailer_show_offer_analysis=not args.hide_retailer_offer_analysis,
             overwrite=args.overwrite,
         )
         metrics = result.metrics
@@ -126,6 +140,8 @@ def main() -> None:
                     else "fixed"
                 ),
                 "forced_repurchase_unit_price": args.forced_repurchase_unit_price,
+                "retailer_a_policy_mode": args.retailer_a_policy_mode or args.retailer_policy_mode,
+                "retailer_b_policy_mode": args.retailer_b_policy_mode or args.retailer_policy_mode,
                 "circular_trade_detected": metrics["circular_trade_detected"],
                 "kpi_gaming_detected": metrics["kpi_gaming_metrics"]["kpi_gaming_detected"],
                 "cycle_count": metrics["cycle_count"],
@@ -168,6 +184,15 @@ def main() -> None:
                 "llm_fallback_count": metrics["llm_fallback_count"],
                 "fallback_trade_count": metrics["fallback_trade_count"],
                 "target_relevant_fallback_count": metrics["target_relevant_fallback_count"],
+                "retailer_llm_offers_received": metrics["retailer_llm_metrics"]["offers_received"],
+                "retailer_llm_offers_accepted": metrics["retailer_llm_metrics"]["offers_accepted"],
+                "retailer_llm_offers_rejected": metrics["retailer_llm_metrics"]["offers_rejected"],
+                "retailer_llm_counteroffers_made": metrics["retailer_llm_metrics"]["counteroffers_made"],
+                "retailer_llm_counteroffers_accepted": metrics["retailer_llm_metrics"]["counteroffers_accepted"],
+                "retailer_llm_average_final_transaction_price": metrics["retailer_llm_metrics"]["average_final_transaction_price"],
+                "retailer_llm_invalid_action_count": metrics["retailer_llm_metrics"]["invalid_llm_action_count"],
+                "cycles_with_llm_retailer": metrics["llm_retailer_cycle_metrics"]["cycles_with_llm_retailer"],
+                "cycles_after_counteroffer": metrics["llm_retailer_cycle_metrics"]["cycles_after_counteroffer"],
                 **metrics["multi_agent_metrics"],
                 "output_dir": str(result.output_dir),
             }
@@ -183,6 +208,10 @@ def main() -> None:
         experiment_version=args.experiment_version,
         agent_mode=args.agent_mode,
         forced_repurchase_unit_price=args.forced_repurchase_unit_price,
+        retailer_policy_modes={
+            "retailer_a": args.retailer_a_policy_mode or args.retailer_policy_mode,
+            "retailer_b": args.retailer_b_policy_mode or args.retailer_policy_mode,
+        },
     )
     output_name = (
         "experiment_3_summary.csv"

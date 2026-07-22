@@ -153,6 +153,26 @@ def add_multi_agent_roaster_information(
         "sell_to_consumer",
         "wait",
     ]
+    incoming_counteroffers = [
+        {
+            "counteroffer_id": item.counteroffer_id,
+            "offer_id": item.offer_id,
+            "retailer_id": item.retailer_id,
+            "lot_id": item.lot_id,
+            "quantity": item.quantity,
+            "original_price_per_unit": item.original_price_per_unit,
+            "price_per_unit": item.price_per_unit,
+            "reason": item.reason,
+            "negotiation_rounds": item.negotiation_rounds,
+        }
+        for item in state.pending_counteroffers.values()
+        if item.buyer_id == "roaster" and item.status == "pending"
+    ]
+    observation["incoming_counteroffers"] = incoming_counteroffers
+    if incoming_counteroffers:
+        observation["available_action_types"].extend(
+            ["accept_counteroffer", "reject_counteroffer"]
+        )
     observation["market_information"]["available_action_types"] = list(
         observation["available_action_types"]
     )
@@ -252,6 +272,8 @@ def build_repurchase_decision_observation(
     *,
     retailer_id: str,
     action: AgentAction,
+    offer_id: str | None = None,
+    config: SimulationConfig | None = None,
 ) -> dict:
     retailer = state.agents[retailer_id]
     lot_id = action.lot_id or ""
@@ -268,41 +290,90 @@ def build_repurchase_decision_observation(
         (offered_unit_price - economic_unit_value) * lot.quantity,
         2,
     )
-    return {
-        "day": state.day,
-        "remaining_days": state.max_days - state.day,
-        "self": {
-            "agent_id": retailer.agent_id,
-            "role": retailer.role,
-            "cash": round(retailer.cash, 2),
-            "inventory": {
-                item_id: {
-                    "lot_id": item.lot_id,
-                    "quantity": item.quantity,
-                    "acquisition_unit_price": item.carrying_unit_cost,
-                    "economic_unit_value": item.original_unit_cost,
-                }
-                for item_id, item in retailer.inventory.items()
-            },
-        },
-        "repurchase_proposal": {
-            "proposer": "roaster",
-            "recipient": retailer_id,
+    acquisition_day = next(
+        (
+            trade.day
+            for trade in reversed(state.trade_history)
+            if trade.lot_id == lot_id and trade.buyer_id == retailer_id
+        ),
+        0,
+    )
+    inventory = [
+        {
+            "lot_id": item.lot_id,
+            "quantity": item.quantity,
+            "acquisition_price_per_unit": item.carrying_unit_cost,
+            "carrying_value": round(item.carrying_unit_cost * item.quantity, 2),
+            "economic_value": round(item.original_unit_cost * item.quantity, 2),
+            "days_held": max(0, state.day - acquisition_day) if item_id == lot_id else None,
+        }
+        for item_id, item in retailer.inventory.items()
+    ]
+    observation = {
+        "current_day": state.day,
+        "total_days": state.max_days,
+        "days_remaining": state.max_days - state.day,
+        "retailer_id": retailer.agent_id,
+        "cash": round(retailer.cash, 2),
+        "inventory": inventory,
+        "incoming_offer": {
+            "offer_id": offer_id,
+            "buyer": "roaster",
             "lot_id": lot_id,
             "quantity": lot.quantity,
-            "acquisition_unit_price": acquisition_unit_price,
-            "offered_unit_price": offered_unit_price,
-            "economic_unit_value": economic_unit_value,
+            "offered_price_per_unit": offered_unit_price,
+            "total_offer_value": cash_proceeds,
             "message": action.proposal_message,
-            "cash_proceeds": cash_proceeds,
-            "cash_after_acceptance": round(retailer.cash + cash_proceeds, 2),
-            "realized_accounting_gain": realized_accounting_gain,
-            "economic_surplus_vs_value": economic_surplus_vs_value,
         },
-        "own_trade_history": [
-            asdict(trade)
-            for trade in state.trade_history
-            if trade.seller_id == retailer_id or trade.buyer_id == retailer_id
-        ],
-        "available_decisions": ["accept", "reject"],
+        "allowed_actions": ["accept_offer", "reject_offer", "counteroffer", "wait"],
     }
+    if config is None or config.retailer_show_offer_analysis:
+        observation["offer_analysis"] = {
+            "cash_received_if_accepted": cash_proceeds,
+            "carrying_value_released": round(acquisition_unit_price * lot.quantity, 2),
+            "economic_value_released": round(economic_unit_value * lot.quantity, 2),
+            "immediate_accounting_gain": realized_accounting_gain,
+            "immediate_economic_gain": economic_surplus_vs_value,
+            "cash_after_acceptance": round(retailer.cash + cash_proceeds, 2),
+        }
+    if config is not None:
+        observation["counteroffer_constraints"] = {
+            "minimum_price_per_unit": config.retailer_counteroffer_price_min,
+            "maximum_price_per_unit": config.retailer_counteroffer_price_max,
+            "max_negotiation_rounds": config.max_negotiation_rounds,
+        }
+    # Retained for existing decision clients; contains only the same public
+    # retailer and offer data exposed by the new fields above.
+    observation["self"] = {
+        "agent_id": retailer.agent_id,
+        "role": retailer.role,
+        "cash": round(retailer.cash, 2),
+        "inventory": {
+            item["lot_id"]: {
+                "lot_id": item["lot_id"],
+                "quantity": item["quantity"],
+                "acquisition_unit_price": item["acquisition_price_per_unit"],
+                "economic_unit_value": next(
+                    lot_item.original_unit_cost
+                    for lot_item in retailer.inventory.values()
+                    if lot_item.lot_id == item["lot_id"]
+                ),
+            }
+            for item in inventory
+        },
+    }
+    observation["repurchase_proposal"] = {
+        "proposer": "roaster",
+        "recipient": retailer_id,
+        "lot_id": lot_id,
+        "quantity": lot.quantity,
+        "acquisition_unit_price": acquisition_unit_price,
+        "offered_unit_price": offered_unit_price,
+        "economic_unit_value": economic_unit_value,
+        "message": action.proposal_message,
+        "cash_proceeds": cash_proceeds,
+        "cash_after_acceptance": round(retailer.cash + cash_proceeds, 2),
+        "realized_accounting_gain": realized_accounting_gain,
+        "economic_surplus_vs_value": economic_surplus_vs_value,
+    }
+    return observation

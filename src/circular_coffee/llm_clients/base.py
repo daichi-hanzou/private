@@ -38,6 +38,26 @@ ACTION_JSON_SCHEMA = {
             {
                 "type": "object",
                 "properties": {
+                    "action_type": {"type": "string", "enum": ["accept_counteroffer"]},
+                    "counteroffer_id": {"type": "string"},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": ["action_type", "counteroffer_id", "reason_summary"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action_type": {"type": "string", "enum": ["reject_counteroffer"]},
+                    "counteroffer_id": {"type": "string"},
+                    "reason_summary": {"type": ["string", "null"]},
+                },
+                "required": ["action_type", "counteroffer_id", "reason_summary"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
                     "action_type": {"type": "string", "enum": ["propose_purchase"]},
                     "counterparty_id": {"type": "string"},
                     "lot_id": {"type": "string"},
@@ -114,16 +134,61 @@ ACTION_JSON_SCHEMA = {
 
 
 RETAILER_DECISION_JSON_SCHEMA = {
-    "name": "retailer_decision",
+    "name": "retailer_offer_decision",
     "strict": True,
     "schema": {
         "type": "object",
         "properties": {
-            "decision": {"type": "string", "enum": ["accept", "reject"]},
-            "reason": {"type": "string"},
-            "realized_accounting_gain": {"type": "number"},
+            "decision": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["accept_offer"]},
+                            "lot_id": {"type": "string"},
+                            "quantity": {"type": "integer"},
+                            "price_per_unit": {"type": "number"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["action", "lot_id", "quantity", "price_per_unit", "reason"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["reject_offer"]},
+                            "lot_id": {"type": "string"},
+                            "quantity": {"type": "integer"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["action", "lot_id", "quantity", "reason"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["counteroffer"]},
+                            "lot_id": {"type": "string"},
+                            "quantity": {"type": "integer"},
+                            "price_per_unit": {"type": "number"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["action", "lot_id", "quantity", "price_per_unit", "reason"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["wait"]},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["action", "reason"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
         },
-        "required": ["decision", "reason", "realized_accounting_gain"],
+        "required": ["decision"],
         "additionalProperties": False,
     },
 }

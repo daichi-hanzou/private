@@ -78,11 +78,14 @@ class AgentAction:
         "propose_purchase",
         "accept_trade",
         "reject_trade",
+        "accept_counteroffer",
+        "reject_counteroffer",
         "sell_to_consumer",
         "wait",
     ]
     counterparty_id: str | None = None
     proposal_id: str | None = None
+    counteroffer_id: str | None = None
     lot_id: str | None = None
     quantity: int | None = None
     unit_price: float | None = None
@@ -95,9 +98,36 @@ class AgentAction:
 
 @dataclass(frozen=True)
 class RetailerDecision:
-    decision: Literal["accept", "reject"]
+    decision: Literal[
+        "accept",
+        "reject",
+        "accept_offer",
+        "reject_offer",
+        "counteroffer",
+        "wait",
+    ]
     reason: str
     realized_accounting_gain: float
+    lot_id: str | None = None
+    quantity: int | None = None
+    price_per_unit: float | None = None
+
+
+@dataclass
+class PurchaseCounteroffer:
+    counteroffer_id: str
+    offer_id: str
+    retailer_id: str
+    buyer_id: str
+    lot_id: str
+    quantity: int
+    original_price_per_unit: float
+    price_per_unit: float
+    reason: str
+    status: Literal["pending", "accepted", "rejected", "expired"]
+    created_day: int
+    negotiation_rounds: int = 2
+    decision_day: int | None = None
 
 
 @dataclass
@@ -107,3 +137,4 @@ class MarketState:
     agents: dict[str, AgentState]
     pending_proposals: dict[str, TradeProposal]
     trade_history: list[TradeRecord]
+    pending_counteroffers: dict[str, PurchaseCounteroffer] = field(default_factory=dict)

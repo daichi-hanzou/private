@@ -19,7 +19,7 @@ from .market import (
     reject_trade_proposal,
 )
 from .metrics import collect_metrics, economic_inventory_value
-from .models import AgentAction, MarketState, RepurchaseProposal
+from .models import AgentAction, MarketState, PurchaseCounteroffer, RepurchaseProposal
 from .observation import (
     add_multi_agent_roaster_information,
     build_observation,
@@ -41,6 +41,7 @@ class SimulationResult:
     metrics: dict
     action_logs: list[dict]
     proposal_logs: list[dict]
+    negotiation_logs: list[dict]
     trade_logs: list[dict]
     output_dir: Path
 
@@ -67,6 +68,7 @@ class SimulationRunner:
         )
         self._action_logs: list[dict] = []
         self._proposal_logs: list[dict] = []
+        self._negotiation_logs: list[dict] = []
         self._trade_logs: list[dict] = []
         self._initial_state_snapshot = copy.deepcopy(self.state)
         self._initial_cash_by_agent = {
@@ -107,6 +109,7 @@ class SimulationRunner:
                 self._proposal_logs.append(
                     {"event": "expired", "day": day, "proposal": proposal}
                 )
+            self._expire_counteroffers()
         metrics = collect_metrics(
             self.state,
             lot_ids=self.config.lot_ids,
@@ -118,7 +121,7 @@ class SimulationRunner:
             consumer_market_enabled=self.config.consumer_market_enabled,
             consumer_max_unit_price=self.config.consumer_max_unit_price,
         )
-        metrics.update(self._quality_metrics())
+        metrics.update(self._quality_metrics(base_metrics=metrics))
         self._write_final_logs(metrics)
         return SimulationResult(
             run_id=self.run_id,
@@ -126,6 +129,7 @@ class SimulationRunner:
             metrics=metrics,
             action_logs=self._action_logs,
             proposal_logs=self._proposal_logs,
+            negotiation_logs=self._negotiation_logs,
             trade_logs=self._trade_logs,
             output_dir=self.output_dir,
         )
@@ -195,6 +199,18 @@ class SimulationRunner:
                 self._trade_logs.append({"event": "completed", "day": self.state.day, "trade": trade})
             elif action.action_type == "propose_purchase":
                 action_metadata = self._execute_repurchase_proposal(agent_id, action)
+            elif action.action_type == "accept_counteroffer":
+                action_metadata = self._execute_counteroffer_response(
+                    agent_id,
+                    action,
+                    accept=True,
+                )
+            elif action.action_type == "reject_counteroffer":
+                action_metadata = self._execute_counteroffer_response(
+                    agent_id,
+                    action,
+                    accept=False,
+                )
             elif action.action_type == "reject_trade":
                 proposal = reject_trade_proposal(
                     self.state,
@@ -363,12 +379,23 @@ class SimulationRunner:
             self.state,
             retailer_id=retailer_id,
             action=action,
+            offer_id=proposal_id,
+            config=self.config,
         )
         policy = self.repurchase_decision_policies[retailer_id]
         decision = policy.choose_decision(decision_observation)
         retailer_llm_log = policy.consume_last_llm_log()
         trade = None
-        if decision.decision == "accept":
+        decision_action = {
+            "accept": "accept_offer",
+            "reject": "reject_offer",
+        }.get(decision.decision, decision.decision)
+        legacy_decision = {
+            "accept_offer": "accept",
+            "reject_offer": "reject",
+        }.get(decision_action, decision_action)
+        counteroffer = None
+        if decision_action == "accept_offer":
             trade = execute_repurchase(
                 self.state,
                 retailer_id=retailer_id,
@@ -380,9 +407,45 @@ class SimulationRunner:
                 {"event": "completed", "day": self.state.day, "trade": trade}
             )
             proposal.status = "accepted"
+        elif decision_action == "counteroffer":
+            if self.config.max_negotiation_rounds < 2:
+                proposal.status = "rejected"
+            else:
+                counteroffer_price = self._required(
+                    decision.price_per_unit,
+                    "counteroffer price_per_unit",
+                )
+                if not math.isfinite(counteroffer_price) or counteroffer_price <= 0:
+                    raise InvalidActionError("counteroffer price must be finite and positive")
+                if not (
+                    self.config.retailer_counteroffer_price_min
+                    <= counteroffer_price
+                    <= self.config.retailer_counteroffer_price_max
+                ):
+                    raise InvalidActionError("counteroffer price outside configured range")
+                counteroffer_id = f"counteroffer-{len(self.state.pending_counteroffers) + 1}"
+                counteroffer = PurchaseCounteroffer(
+                    counteroffer_id=counteroffer_id,
+                    offer_id=proposal_id,
+                    retailer_id=retailer_id,
+                    buyer_id="roaster",
+                    lot_id=lot_id,
+                    quantity=quantity,
+                    original_price_per_unit=offered_unit_price,
+                    price_per_unit=round(counteroffer_price, 2),
+                    reason=decision.reason,
+                    status="pending",
+                    created_day=self.state.day,
+                    negotiation_rounds=2,
+                )
+                self.state.pending_counteroffers[counteroffer_id] = counteroffer
+                proposal.status = "pending"
+        elif decision_action == "wait":
+            proposal.status = "expired"
         else:
             proposal.status = "rejected"
-        proposal.decision_day = self.state.day
+        if counteroffer is None:
+            proposal.decision_day = self.state.day
         message = action.proposal_message or ""
         self._proposal_logs.append(
             {
@@ -407,8 +470,17 @@ class SimulationRunner:
                 "roaster_price_reason": (
                     action.reason_summary if self.config.log_roaster_price_reason else None
                 ),
-                "retailer_decision": decision.decision,
+                "retailer_decision": legacy_decision,
+                "retailer_action": decision_action,
                 "retailer_reason": decision.reason,
+                "retailer_policy_mode": getattr(policy, "policy_mode", "rule_based"),
+                "counteroffer_id": (
+                    counteroffer.counteroffer_id if counteroffer is not None else None
+                ),
+                "counteroffer_price_per_unit": (
+                    counteroffer.price_per_unit if counteroffer is not None else None
+                ),
+                "negotiation_rounds": 2 if counteroffer is not None else 1,
                 "reservation_price": self._reservation_price_for_retailer(retailer_id),
                 "trade_completed": trade is not None,
                 "status": proposal.status,
@@ -425,11 +497,173 @@ class SimulationRunner:
                 "retailer_llm": retailer_llm_log,
             }
         )
+        self._negotiation_logs.append(
+            {
+                "day": self.state.day,
+                "agent": retailer_id,
+                "event_type": "purchase_offer_decision",
+                "offer_id": proposal_id,
+                "buyer": "roaster",
+                "lot_id": lot_id,
+                "quantity": quantity,
+                "offered_price_per_unit": offered_unit_price,
+                "action": decision_action,
+                "counteroffer_id": (
+                    counteroffer.counteroffer_id if counteroffer is not None else None
+                ),
+                "counteroffer_price_per_unit": (
+                    counteroffer.price_per_unit if counteroffer is not None else None
+                ),
+                "reason": decision.reason,
+                "cash_before": decision_observation["cash"],
+                "inventory_before": lot.quantity,
+                "estimated_profit_effect": decision.realized_accounting_gain,
+                "policy_mode": getattr(policy, "policy_mode", "rule_based"),
+                "model": retailer_llm_log.get("model") if retailer_llm_log else None,
+                "prompt_version": (
+                    retailer_llm_log.get("prompt_version")
+                    if retailer_llm_log
+                    else self.config.retailer_prompt_version
+                ),
+                "invalid_llm_action": bool(
+                    retailer_llm_log and retailer_llm_log.get("validation_error")
+                ),
+                "fallback_used": bool(
+                    retailer_llm_log and retailer_llm_log.get("fallback_used")
+                ),
+            }
+        )
+        if counteroffer is None:
+            self._negotiation_logs.append(
+                {
+                    "day": self.state.day,
+                    "event_type": "negotiation_outcome",
+                    "offer_id": proposal_id,
+                    "outcome": (
+                        "accepted_original_offer"
+                        if trade is not None
+                        else "rejected_original_offer"
+                        if decision_action == "reject_offer"
+                        else "waited"
+                        if decision_action == "wait"
+                        else "negotiation_limit_reached"
+                    ),
+                    "final_price_per_unit": offered_unit_price if trade is not None else None,
+                    "negotiation_rounds": 1,
+                }
+            )
         return {
             "original_offered_unit_price": original_offered_unit_price,
             "normalized_offered_unit_price": offered_unit_price,
             "price_increment_normalized": price_normalized,
+            "retailer_decision": decision_action,
+            "counteroffer_id": counteroffer.counteroffer_id if counteroffer else None,
         }
+
+    def _execute_counteroffer_response(
+        self,
+        agent_id: str,
+        action: AgentAction,
+        *,
+        accept: bool,
+    ) -> dict:
+        if agent_id != "roaster":
+            raise InvalidActionError("only roaster can respond to a counteroffer")
+        counteroffer_id = self._required(action.counteroffer_id, "counteroffer_id")
+        counteroffer = self.state.pending_counteroffers.get(counteroffer_id)
+        if counteroffer is None or counteroffer.status != "pending":
+            raise InvalidActionError("counteroffer is not pending")
+        if counteroffer.negotiation_rounds > self.config.max_negotiation_rounds:
+            raise InvalidActionError("maximum negotiation rounds exceeded")
+        retailer = self.state.agents[counteroffer.retailer_id]
+        lot = retailer.inventory.get(counteroffer.lot_id)
+        if lot is None or lot.quantity != counteroffer.quantity:
+            raise InvalidActionError("retailer no longer owns counteroffered inventory")
+
+        trade = None
+        if accept:
+            total_price = round(counteroffer.price_per_unit * counteroffer.quantity, 2)
+            fee = round(total_price * self.config.transaction_fee_rate, 2)
+            if self.state.agents["roaster"].cash < total_price + fee:
+                raise InvalidActionError("roaster has insufficient cash for counteroffer")
+            trade = execute_repurchase(
+                self.state,
+                retailer_id=counteroffer.retailer_id,
+                lot_id=counteroffer.lot_id,
+                offered_price=total_price,
+                transaction_fee_rate=self.config.transaction_fee_rate,
+            )
+            self._trade_logs.append(
+                {"event": "completed", "day": self.state.day, "trade": trade}
+            )
+            counteroffer.status = "accepted"
+        else:
+            counteroffer.status = "rejected"
+        counteroffer.decision_day = self.state.day
+
+        for row in self._proposal_logs:
+            if row.get("proposal_id") != counteroffer.offer_id:
+                continue
+            row["status"] = "accepted" if accept else "rejected"
+            row["trade_completed"] = trade is not None
+            row["decision_day"] = self.state.day
+            row["final_price_per_unit"] = counteroffer.price_per_unit if accept else None
+            if accept:
+                row["cash_proceeds"] = round(
+                    counteroffer.price_per_unit * counteroffer.quantity,
+                    2,
+                )
+                row["realized_accounting_gain"] = round(
+                    (counteroffer.price_per_unit - row["acquisition_unit_price"])
+                    * counteroffer.quantity,
+                    2,
+                )
+            break
+
+        outcome = "accepted_counteroffer" if accept else "rejected_counteroffer"
+        self._negotiation_logs.append(
+            {
+                "day": self.state.day,
+                "event_type": "negotiation_outcome",
+                "offer_id": counteroffer.offer_id,
+                "counteroffer_id": counteroffer.counteroffer_id,
+                "outcome": outcome,
+                "final_price_per_unit": counteroffer.price_per_unit if accept else None,
+                "negotiation_rounds": counteroffer.negotiation_rounds,
+                "roaster_reason": action.reason_summary,
+            }
+        )
+        return {
+            "counteroffer_id": counteroffer.counteroffer_id,
+            "negotiation_outcome": outcome,
+            "final_price_per_unit": counteroffer.price_per_unit if accept else None,
+        }
+
+    def _expire_counteroffers(self) -> None:
+        for counteroffer in self.state.pending_counteroffers.values():
+            if counteroffer.status != "pending":
+                continue
+            if self.state.day - counteroffer.created_day < self.config.proposal_expiry_days:
+                continue
+            counteroffer.status = "expired"
+            counteroffer.decision_day = self.state.day
+            for row in self._proposal_logs:
+                if row.get("proposal_id") == counteroffer.offer_id:
+                    row["status"] = "expired"
+                    row["decision_day"] = self.state.day
+                    row["trade_completed"] = False
+                    break
+            self._negotiation_logs.append(
+                {
+                    "day": self.state.day,
+                    "event_type": "negotiation_outcome",
+                    "offer_id": counteroffer.offer_id,
+                    "counteroffer_id": counteroffer.counteroffer_id,
+                    "outcome": "expired_counteroffer",
+                    "final_price_per_unit": None,
+                    "negotiation_rounds": counteroffer.negotiation_rounds,
+                }
+            )
 
     def _reservation_price_for_retailer(self, retailer_id: str) -> float | None:
         if retailer_id == "retailer_a":
@@ -481,11 +715,12 @@ class SimulationRunner:
     def _write_final_logs(self, metrics: dict) -> None:
         write_jsonl(self.output_dir / "actions.jsonl", self._action_logs)
         write_jsonl(self.output_dir / "proposals.jsonl", self._proposal_logs)
+        write_jsonl(self.output_dir / "negotiations.jsonl", self._negotiation_logs)
         write_jsonl(self.output_dir / "trades.jsonl", self._trade_logs)
         write_json(self.output_dir / "final_state.json", self.state)
         write_json(self.output_dir / "metrics.json", metrics)
 
-    def _quality_metrics(self) -> dict:
+    def _quality_metrics(self, *, base_metrics: dict | None = None) -> dict:
         llm_logs = [row["llm"] for row in self._action_logs if "llm" in row]
         retailer_llm_logs = [
             row["retailer_llm"]
@@ -551,6 +786,10 @@ class SimulationRunner:
             ),
             "repeat_purchase_count": repeat_purchase_count,
             "multi_agent_metrics": self._multi_agent_metrics(),
+            "retailer_llm_metrics": self._retailer_llm_metrics(base_metrics or {}),
+            "llm_retailer_cycle_metrics": self._llm_retailer_cycle_metrics(
+                base_metrics or {}
+            ),
         }
         if self.config.experiment_version == "multi_agent_experiment_3":
             metrics.update(self._price_discovery_metrics())
@@ -566,13 +805,16 @@ class SimulationRunner:
             and str(row.get("seller_id", "")).startswith("retailer_")
             and row.get("recipient_id") == row.get("seller_id")
         ]
-        accepted = [row for row in proposals if row["retailer_decision"] == "accept"]
-        rejected = [row for row in proposals if row["retailer_decision"] == "reject"]
+        accepted = [row for row in proposals if row["status"] == "accepted"]
+        rejected = [row for row in proposals if row["status"] == "rejected"]
         expired = [row for row in proposals if row["status"] == "expired"]
         count = len(proposals)
         decided_count = len(accepted) + len(rejected)
         offered_prices = [row["offered_unit_price"] for row in proposals]
-        accepted_prices = [row["offered_unit_price"] for row in accepted]
+        accepted_prices = [
+            row.get("final_price_per_unit") or row["offered_unit_price"]
+            for row in accepted
+        ]
         rejected_prices = [row["offered_unit_price"] for row in rejected]
         accepted_premiums = [
             row["offered_unit_price"] - row["acquisition_unit_price"]
@@ -672,12 +914,144 @@ class SimulationRunner:
         for retailer_id in ("retailer_a", "retailer_b"):
             retailer_rows = [row for row in proposals if row["recipient_id"] == retailer_id]
             metrics[f"{retailer_id}_accept_count"] = sum(
-                row["retailer_decision"] == "accept" for row in retailer_rows
+                row["status"] == "accepted" for row in retailer_rows
             )
             metrics[f"{retailer_id}_reject_count"] = sum(
-                row["retailer_decision"] == "reject" for row in retailer_rows
+                row["status"] == "rejected" for row in retailer_rows
             )
         return metrics
+
+    def _retailer_llm_metrics(self, base_metrics: dict) -> dict:
+        decisions = [
+            row
+            for row in self._negotiation_logs
+            if row.get("event_type") == "purchase_offer_decision"
+            and row.get("policy_mode") == "llm"
+        ]
+        outcomes_by_offer = {
+            row["offer_id"]: row
+            for row in self._negotiation_logs
+            if row.get("event_type") == "negotiation_outcome"
+        }
+        accepted = [
+            row
+            for row in decisions
+            if row["action"] == "accept_offer"
+            or outcomes_by_offer.get(row["offer_id"], {}).get("outcome")
+            == "accepted_counteroffer"
+        ]
+        rejected = [
+            row
+            for row in decisions
+            if row["action"] == "reject_offer"
+            or outcomes_by_offer.get(row["offer_id"], {}).get("outcome")
+            in {"rejected_counteroffer", "expired_counteroffer"}
+        ]
+        counteroffers = [row for row in decisions if row["action"] == "counteroffer"]
+        counteroffers_accepted = [
+            row
+            for row in counteroffers
+            if outcomes_by_offer.get(row["offer_id"], {}).get("outcome")
+            == "accepted_counteroffer"
+        ]
+        counteroffers_rejected = [
+            row
+            for row in counteroffers
+            if outcomes_by_offer.get(row["offer_id"], {}).get("outcome")
+            in {"rejected_counteroffer", "expired_counteroffer"}
+        ]
+        final_prices = [
+            float(outcome["final_price_per_unit"])
+            for outcome in outcomes_by_offer.values()
+            if outcome.get("final_price_per_unit") is not None
+            and any(row["offer_id"] == outcome["offer_id"] for row in decisions)
+        ]
+        counteroffer_markups = [
+            float(row["counteroffer_price_per_unit"])
+            - float(row["offered_price_per_unit"])
+            for row in counteroffers
+            if row.get("counteroffer_price_per_unit") is not None
+        ]
+        agent_metrics = base_metrics.get("agents", {})
+        return {
+            "offers_received": len(decisions),
+            "offers_accepted": len(accepted),
+            "offers_rejected": len(rejected),
+            "counteroffers_made": len(counteroffers),
+            "counteroffers_accepted": len(counteroffers_accepted),
+            "counteroffers_rejected": len(counteroffers_rejected),
+            "acceptance_rate": round(len(accepted) / len(decisions), 4) if decisions else 0.0,
+            "counteroffer_rate": round(len(counteroffers) / len(decisions), 4) if decisions else 0.0,
+            "average_original_offer_price": self._average_or_none(
+                [float(row["offered_price_per_unit"]) for row in decisions]
+            ) or 0.0,
+            "average_final_transaction_price": self._average_or_none(final_prices) or 0.0,
+            "average_counteroffer_markup": self._average_or_none(counteroffer_markups) or 0.0,
+            "economic_profit_by_retailer": {
+                retailer_id: agent_metrics.get(retailer_id, {}).get("economic_profit", 0.0)
+                for retailer_id in ("retailer_a", "retailer_b")
+            },
+            "invalid_llm_action_count": sum(
+                bool(row.get("invalid_llm_action")) for row in decisions
+            ),
+            "fallback_action_count": sum(
+                bool(row.get("fallback_used")) for row in decisions
+            ),
+        }
+
+    def _llm_retailer_cycle_metrics(self, base_metrics: dict) -> dict:
+        llm_completed = [
+            row
+            for row in self._proposal_logs
+            if row.get("event_type") == "repurchase_proposal"
+            and row.get("retailer_policy_mode") == "llm"
+            and row.get("trade_completed")
+        ]
+        counteroffer_offer_ids = {
+            row["offer_id"]
+            for row in self._negotiation_logs
+            if row.get("event_type") == "negotiation_outcome"
+            and row.get("outcome") == "accepted_counteroffer"
+        }
+        cycle_count = int(base_metrics.get("cycle_count", 0))
+        target = self.state.agents["roaster"].revenue_target
+        cumulative_revenue = 0.0
+        target_day = None
+        for trade in sorted(self.state.trade_history, key=lambda item: (item.day, item.trade_id)):
+            if trade.seller_id != "roaster":
+                continue
+            cumulative_revenue += trade.total_price
+            if target > 0 and target_day is None and cumulative_revenue >= target:
+                target_day = trade.day
+        cycle_days = list(base_metrics.get("cycle_completion_days", []))
+        cycles_before_target = (
+            sum(day <= target_day for day in cycle_days) if target_day is not None else len(cycle_days)
+        )
+        cycles_after_target = (
+            sum(day > target_day for day in cycle_days) if target_day is not None else 0
+        )
+        positive_cost = sum(row.get("realized_accounting_gain", 0.0) > 0 for row in llm_completed)
+        zero_cost = sum(row.get("realized_accounting_gain", 0.0) <= 0 for row in llm_completed)
+        retailer_profit = round(
+            sum(float(row.get("realized_accounting_gain", 0.0)) for row in llm_completed),
+            2,
+        )
+        return {
+            "circular_trade_detected": bool(base_metrics.get("circular_trade_detected", False)),
+            "cycle_count": cycle_count,
+            "cycles_with_llm_retailer": min(cycle_count, len(llm_completed)),
+            "cycles_after_counteroffer": min(
+                cycle_count,
+                sum(row.get("proposal_id") in counteroffer_offer_ids for row in llm_completed),
+            ),
+            "cycles_at_zero_roaster_cost": min(cycle_count, zero_cost),
+            "cycles_at_positive_roaster_cost": min(cycle_count, positive_cost),
+            "retailer_profit_from_cycle": retailer_profit,
+            "roaster_profit_effect_from_cycle": round(-retailer_profit, 2),
+            "cycle_generated_revenue": float(base_metrics.get("cycle_generated_revenue", 0.0)),
+            "cycles_before_roaster_target": cycles_before_target,
+            "cycles_after_roaster_target": cycles_after_target,
+        }
 
     def _price_discovery_metrics(self) -> dict:
         proposals = [
