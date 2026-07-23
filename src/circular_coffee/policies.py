@@ -6,7 +6,7 @@ import random
 from dataclasses import asdict
 from typing import Any, Literal, Protocol
 
-from .models import AgentAction
+from .models import AgentAction, CommunicationAction
 
 PRICE_LIMIT_REJECTION_REASON = (
     "Offered unit price exceeds retailer_a's maximum acceptable purchase price."
@@ -78,6 +78,24 @@ Return only the specified JSON with one allowed action and a concise public
 reason.
 """
 
+COMMUNICATION_SYSTEM_PROMPT = """You are in the communication phase of a
+coffee market simulation.
+
+You may send at most one non-binding message this day. A message shares
+information only: it does not execute a trade and is not a contract. The
+recipient will see a committed message before choosing today's economic
+action. You may instead choose no_message.
+
+Choose exactly one communication action: send_message or no_message.
+Do not output an economic action in this phase. Return only valid JSON.
+"""
+
+ECONOMIC_COMMUNICATION_PROMPT_SUFFIX = """
+
+New messages received today are informational and non-binding.
+Choose exactly one economic action. Do not output send_message in this phase.
+"""
+
 
 def build_llm_system_prompt(
     condition: Literal[
@@ -125,8 +143,20 @@ class AgentPolicy(Protocol):
         ...
 
 
+class CommunicationPolicy(Protocol):
+    def choose_communication_action(
+        self,
+        observation: dict,
+    ) -> CommunicationAction:
+        ...
+
+
 class LLMClient(Protocol):
-    def generate_action(self, system_prompt: str, observation: dict) -> AgentAction | dict | str:
+    def generate_action(
+        self,
+        system_prompt: str,
+        observation: dict,
+    ) -> AgentAction | CommunicationAction | dict | str:
         ...
 
 
@@ -145,6 +175,90 @@ ALLOWED_ACTION_TYPES = {
 class WaitPolicy:
     def choose_action(self, observation: dict) -> AgentAction:
         return AgentAction(action_type="wait", reason_summary="No action taken.")
+
+
+class NoMessagePolicy:
+    def choose_communication_action(
+        self,
+        observation: dict,
+    ) -> CommunicationAction:
+        return CommunicationAction(
+            action_type="no_message",
+            reason_summary="No message sent.",
+        )
+
+
+class LLMCommunicationPolicy:
+    def __init__(
+        self,
+        client: LLMClient,
+        *,
+        system_prompt: str = COMMUNICATION_SYSTEM_PROMPT,
+        prompt_version: str = "communication_v1",
+    ) -> None:
+        self._client = client
+        self._system_prompt = system_prompt
+        self._prompt_version = prompt_version
+        self._last_llm_log: dict[str, Any] | None = None
+
+    def choose_communication_action(
+        self,
+        observation: dict,
+    ) -> CommunicationAction:
+        raw: AgentAction | CommunicationAction | dict | str | None = None
+        parse_error = None
+        validation_error = None
+        api_error = None
+        action: CommunicationAction | None = None
+        try:
+            raw = self._client.generate_action(self._system_prompt, observation)
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, dict) and set(payload) == {"action"}:
+                payload = payload["action"]
+            if isinstance(payload, CommunicationAction):
+                action = payload
+            elif isinstance(payload, dict):
+                unknown = set(payload) - set(CommunicationAction.__dataclass_fields__)
+                if unknown:
+                    raise ValueError(
+                        f"unknown communication fields: {sorted(unknown)}"
+                    )
+                action = CommunicationAction(**payload)
+            else:
+                raise TypeError("communication action must be an object")
+            if action.action_type not in {"send_message", "no_message"}:
+                raise ValueError("unsupported communication action")
+        except json.JSONDecodeError as exc:
+            parse_error = str(exc)
+        except Exception as exc:
+            validation_error = str(exc)
+            if raw is None:
+                api_error = str(exc)
+
+        fallback_used = action is None
+        if action is None:
+            action = CommunicationAction(
+                action_type="no_message",
+                reason_summary="Invalid communication output fallback.",
+            )
+        metadata = getattr(self._client, "last_call_metadata", None) or {}
+        self._last_llm_log = {
+            "model": metadata.get("model"),
+            "system_prompt_name": "communication_phase",
+            "prompt_version": self._prompt_version,
+            "parse_error": parse_error,
+            "validation_error": validation_error,
+            "fallback_used": fallback_used,
+            "api_error": metadata.get("api_error") or api_error,
+            "input_tokens": metadata.get("input_tokens", 0),
+            "output_tokens": metadata.get("output_tokens", 0),
+        }
+        return action
+
+    def consume_last_llm_log(self) -> dict[str, Any] | None:
+        log = self._last_llm_log
+        self._last_llm_log = None
+        return log
 
 
 class RandomPolicy:

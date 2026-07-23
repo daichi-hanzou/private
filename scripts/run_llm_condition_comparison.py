@@ -7,14 +7,18 @@ from pathlib import Path
 
 from circular_coffee.config import build_experiment_config
 from circular_coffee.llm_clients import (
-    RETAILER_MARKET_ACTION_JSON_SCHEMA,
+    COMMUNICATION_ACTION_JSON_SCHEMA,
     AzureOpenAIClient,
     OpenAIClient,
+    RETAILER_MARKET_ACTION_JSON_SCHEMA,
 )
 from circular_coffee.policies import (
+    ECONOMIC_COMMUNICATION_PROMPT_SUFFIX,
     MULTI_AGENT_ROASTER_PROMPT_SUFFIX,
+    RETAILER_MARKET_SYSTEM_PROMPT,
     ROASTER_CONSUMER_SALE_DISABLED_PROMPT_SUFFIX,
     CooperativeRetailerPolicy,
+    LLMCommunicationPolicy,
     LLMPolicy,
     RetailerMarketPolicy,
     build_llm_system_prompt,
@@ -42,6 +46,15 @@ def build_lot_ids(lot_count: int) -> list[str]:
     if lot_count <= 0:
         raise ValueError("--lot-count must be positive")
     return [f"LOT-{index:03d}" for index in range(1, lot_count + 1)]
+
+
+def build_message_channels(communication_mode: str) -> dict[str, bool]:
+    return {
+        "roaster_to_retailer": communication_mode
+        in {"roaster_only", "bidirectional"},
+        "retailer_to_roaster": communication_mode == "bidirectional",
+        "retailer_to_retailer": communication_mode == "bidirectional",
+    }
 
 
 def build_client(
@@ -112,6 +125,7 @@ def run_condition(
     consumer_daily_demand_capacity: int = 100,
     retailer_revenue_target: float | None = None,
     retailer_target_bonus: float = 500.0,
+    communication_mode: str = "disabled",
     overwrite: bool = False,
 ):
     resolved_experiment_version = experiment_version or (
@@ -139,6 +153,8 @@ def run_condition(
         llm_temperature=temperature,
         prompt_version=prompt_version,
         agent_mode=agent_mode,
+        communication_enabled=communication_mode != "disabled",
+        message_channels=build_message_channels(communication_mode),
         forced_repurchase_unit_price=forced_repurchase_unit_price,
         experiment_version=resolved_experiment_version,
         roaster_price_decision_mode="llm" if is_experiment_2 or is_experiment_3 else "fixed",
@@ -221,6 +237,11 @@ def run_condition(
                     if not config.roaster_consumer_sale_enabled
                     else ""
                 )
+                + (
+                    ECONOMIC_COMMUNICATION_PROMPT_SUFFIX
+                    if config.communication_enabled
+                    else ""
+                )
             ),
             prompt_version=config.prompt_version,
         ),
@@ -246,8 +267,36 @@ def run_condition(
                     send_seed=send_seed,
                     response_schema=RETAILER_MARKET_ACTION_JSON_SCHEMA,
                 ),
+                system_prompt=(
+                    RETAILER_MARKET_SYSTEM_PROMPT
+                    + (
+                        ECONOMIC_COMMUNICATION_PROMPT_SUFFIX
+                        if config.communication_enabled
+                        else ""
+                    )
+                ),
                 prompt_version=config.retailer_prompt_version,
             )
+    communication_policies = {}
+    communication_agent_ids = (
+        ["roaster"]
+        if communication_mode == "roaster_only"
+        else list(config.agents)
+        if communication_mode == "bidirectional"
+        else []
+    )
+    for communication_agent_id in communication_agent_ids:
+        communication_policies[communication_agent_id] = LLMCommunicationPolicy(
+            client=build_client(
+                model=model,
+                temperature=temperature,
+                seed=resolved_llm_seed,
+                provider=provider,
+                send_seed=send_seed,
+                response_schema=COMMUNICATION_ACTION_JSON_SCHEMA,
+            ),
+            prompt_version=f"{config.prompt_version}_communication",
+        )
     output_root = build_output_root(
         condition=condition,
         bonus=configured_bonus,
@@ -261,6 +310,7 @@ def run_condition(
         retailer_policy_modes=retailer_policy_modes,
         retailer_consumer_sale_enabled=retailer_consumer_sale_enabled,
         roaster_consumer_sale_enabled=roaster_consumer_sale_enabled,
+        communication_mode=communication_mode,
     )
     run_id = f"seed_{seed}"
     output_dir = Path(output_root) / run_id
@@ -281,6 +331,7 @@ def run_condition(
         f"{config.retailer_b_max_purchase_unit_price}"
     )
     print(f"agent_mode: {agent_mode}")
+    print(f"communication_mode: {communication_mode}")
     print(f"forced_repurchase_unit_price: {forced_repurchase_unit_price}")
     print(f"experiment_version: {config.experiment_version}")
     print(f"retailer_policy_modes: {retailer_policy_modes}")
@@ -300,6 +351,7 @@ def run_condition(
         policies,
         run_id=run_id,
         output_root=output_root,
+        communication_policies=communication_policies,
     ).run()
 
 
@@ -365,6 +417,7 @@ def build_output_root(
     retailer_policy_modes: dict[str, str] | None = None,
     retailer_consumer_sale_enabled: bool = False,
     roaster_consumer_sale_enabled: bool = True,
+    communication_mode: str = "disabled",
 ) -> Path:
     lot_path = f"lots_{lot_count}" if lot_count is not None else None
     retailer_price_path = None
@@ -409,6 +462,8 @@ def build_output_root(
                 path /= "roaster_consumer_sale_disabled"
         if forced_repurchase_unit_price is not None:
             path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
+        if communication_mode != "disabled":
+            path /= f"communication_{communication_mode}"
         return path
     path = Path("results") / condition
     if lot_path is not None:
@@ -432,6 +487,8 @@ def build_output_root(
             path /= "roaster_consumer_sale_disabled"
     if forced_repurchase_unit_price is not None:
         path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
+    if communication_mode != "disabled":
+        path /= f"communication_{communication_mode}"
     return path
 
 
@@ -461,6 +518,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--forced-repurchase-unit-price requires --agent-mode multi_agent")
     if args.experiment_version == "multi_agent_experiment_3" and args.agent_mode != "multi_agent":
         raise SystemExit("--experiment-version multi_agent_experiment_3 requires --agent-mode multi_agent")
+    if args.communication_mode != "disabled" and args.agent_mode != "multi_agent":
+        raise SystemExit("--communication-mode requires --agent-mode multi_agent")
     if args.forced_repurchase_unit_price is not None and args.forced_repurchase_unit_price <= 0:
         raise SystemExit("--forced-repurchase-unit-price must be positive")
     if args.condition == "revenue_pressure" and args.bonus is None:
@@ -549,6 +608,11 @@ def main() -> None:
         default="single_agent",
     )
     parser.add_argument(
+        "--communication-mode",
+        choices=("disabled", "roaster_only", "bidirectional"),
+        default="disabled",
+    )
+    parser.add_argument(
         "--retailer-policy-mode",
         choices=("rule_based", "llm"),
         default="rule_based",
@@ -601,6 +665,7 @@ def main() -> None:
         retailer_a_repurchase_reservation_price=args.retailer_a_repurchase_reservation_price,
         retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
         agent_mode=args.agent_mode,
+        communication_mode=args.communication_mode,
         forced_repurchase_unit_price=args.forced_repurchase_unit_price,
         retailer_policy_mode=args.retailer_policy_mode,
         retailer_a_policy_mode=args.retailer_a_policy_mode,

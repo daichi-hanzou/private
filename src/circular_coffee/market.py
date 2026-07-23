@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING
 
 from .models import (
     AgentAction,
+    CommunicationAction,
     ConsumerMarketState,
     ConsumerSaleResult,
     MarketState,
+    MessageRecord,
     TradeCounteroffer,
     TradeProposal,
     TradeRecord,
@@ -20,6 +22,81 @@ if TYPE_CHECKING:
 
 class InvalidActionError(ValueError):
     pass
+
+
+def validate_communication_action(
+    state: MarketState,
+    config: SimulationConfig,
+    *,
+    sender_id: str,
+    action: CommunicationAction,
+) -> None:
+    sender = _get_agent(state, sender_id)
+    if action.action_type == "no_message":
+        return
+    if action.action_type != "send_message":
+        raise InvalidActionError("unsupported_communication_action")
+    if not config.communication_enabled:
+        raise InvalidActionError("communication_disabled")
+    if action.recipient_id is None:
+        raise InvalidActionError("missing_message_recipient")
+    recipient = _get_agent(state, action.recipient_id)
+    if sender_id == action.recipient_id:
+        raise InvalidActionError("cannot_send_message_to_self")
+    channel = f"{sender.role}_to_{recipient.role}"
+    if not config.message_channels.get(channel, False):
+        raise InvalidActionError("message_channel_not_allowed")
+    text = (action.message or "").strip()
+    if not text:
+        raise InvalidActionError("message_cannot_be_empty")
+    if len(text) > config.max_message_length:
+        raise InvalidActionError("message_exceeds_maximum_length")
+    sent_today = sum(
+        1
+        for item in state.messages
+        if item.sender_id == sender_id and item.day == state.day
+    )
+    if sent_today >= config.max_messages_per_agent_per_day:
+        raise InvalidActionError("daily_message_limit_reached")
+    if (
+        action.related_lot_id is not None
+        and action.related_lot_id not in config.lot_ids
+    ):
+        raise InvalidActionError("unknown_related_lot")
+    if (
+        action.related_proposal_id is not None
+        and action.related_proposal_id not in state.pending_proposals
+    ):
+        raise InvalidActionError("unknown_related_proposal")
+
+
+def commit_messages(
+    state: MarketState,
+    config: SimulationConfig,
+    decisions: list[tuple[str, CommunicationAction]],
+) -> list[MessageRecord]:
+    records: list[MessageRecord] = []
+    for sender_id, action in sorted(decisions, key=lambda item: item[0]):
+        validate_communication_action(
+            state,
+            config,
+            sender_id=sender_id,
+            action=action,
+        )
+        if action.action_type == "no_message":
+            continue
+        record = MessageRecord(
+            message_id=f"message-{len(state.messages) + 1}",
+            day=state.day,
+            sender_id=sender_id,
+            recipient_id=action.recipient_id or "",
+            message=(action.message or "").strip(),
+            related_proposal_id=action.related_proposal_id,
+            related_lot_id=action.related_lot_id,
+        )
+        state.messages.append(record)
+        records.append(record)
+    return records
 
 
 def _get_agent(state: MarketState, agent_id: str):

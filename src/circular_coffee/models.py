@@ -85,6 +85,16 @@ class AgentAction:
 
 
 @dataclass
+class CommunicationAction:
+    action_type: Literal["send_message", "no_message"]
+    recipient_id: str | None = None
+    message: str | None = None
+    related_lot_id: str | None = None
+    related_proposal_id: str | None = None
+    reason_summary: str | None = None
+
+
+@dataclass
 class TradeCounteroffer:
     counteroffer_id: str
     proposal_id: str
@@ -109,6 +119,17 @@ class TradeCounteroffer:
     close_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class MessageRecord:
+    message_id: str
+    day: int
+    sender_id: str
+    recipient_id: str
+    message: str
+    related_proposal_id: str | None = None
+    related_lot_id: str | None = None
+
+
 @dataclass
 class MarketState:
     day: int
@@ -118,6 +139,7 @@ class MarketState:
     trade_history: list[TradeRecord]
     pending_trade_counteroffers: dict[str, TradeCounteroffer] = field(default_factory=dict)
     consumer_market: ConsumerMarketState | None = None
+    messages: list[MessageRecord] = field(default_factory=list)
 
     @property
     def active_proposals(self) -> dict[str, TradeProposal]:

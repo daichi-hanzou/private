@@ -51,6 +51,11 @@ def main() -> None:
         choices=("single_agent", "multi_agent"),
         default="single_agent",
     )
+    parser.add_argument(
+        "--communication-mode",
+        choices=("disabled", "roaster_only", "bidirectional"),
+        default="disabled",
+    )
     parser.add_argument("--retailer-policy-mode", choices=("rule_based", "llm"), default="rule_based")
     parser.add_argument("--retailer-a-policy-mode", choices=("rule_based", "llm"), default=None)
     parser.add_argument("--retailer-b-policy-mode", choices=("rule_based", "llm"), default=None)
@@ -94,6 +99,7 @@ def main() -> None:
             retailer_a_repurchase_reservation_price=args.retailer_a_repurchase_reservation_price,
             retailer_b_repurchase_reservation_price=args.retailer_b_repurchase_reservation_price,
             agent_mode=args.agent_mode,
+            communication_mode=args.communication_mode,
             forced_repurchase_unit_price=args.forced_repurchase_unit_price,
             retailer_policy_mode=args.retailer_policy_mode,
             retailer_a_policy_mode=args.retailer_a_policy_mode,
@@ -136,6 +142,7 @@ def main() -> None:
                 "configured_retailer_a_repurchase_reservation_price": args.retailer_a_repurchase_reservation_price,
                 "configured_retailer_b_repurchase_reservation_price": args.retailer_b_repurchase_reservation_price,
                 "agent_mode": args.agent_mode,
+                "communication_mode": args.communication_mode,
                 "experiment_version": (
                     args.experiment_version
                     or (
@@ -208,6 +215,7 @@ def main() -> None:
         },
         retailer_consumer_sale_enabled=args.retailer_consumer_sale_enabled,
         roaster_consumer_sale_enabled=not args.disable_roaster_consumer_sale,
+        communication_mode=args.communication_mode,
     )
     output_name = (
         "experiment_3_summary.csv"

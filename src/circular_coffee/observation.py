@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from .config import SimulationConfig, can_agent_sell_to_consumer
+from .config import (
+    SimulationConfig,
+    build_market_information,
+    can_agent_sell_to_consumer,
+)
 from .market import (
     build_trade_candidates,
     get_active_lot_lock,
@@ -115,7 +119,7 @@ def build_observation(
         )
     if can_sell_to_consumer and agent.inventory:
         available_action_types.append("sell_to_consumer")
-    return {
+    observation = {
         "day": state.day,
         "remaining_days": state.max_days - state.day,
         "self": {
@@ -153,6 +157,39 @@ def build_observation(
         "market_information": market_info,
         "market_access": market_access,
     }
+    if config is not None and config.communication_enabled:
+        observation.update(
+            {
+                "phase": "economic",
+                "new_messages_today": [
+                    {
+                        "message_id": message.message_id,
+                        "day": message.day,
+                        "sender_id": message.sender_id,
+                        "message": message.message,
+                        "related_proposal_id": message.related_proposal_id,
+                        "related_lot_id": message.related_lot_id,
+                    }
+                    for message in state.messages
+                    if message.recipient_id == agent_id
+                    and message.day == state.day
+                ],
+                "recent_message_history": [
+                    {
+                        "message_id": message.message_id,
+                        "day": message.day,
+                        "sender_id": message.sender_id,
+                        "message": message.message,
+                        "related_proposal_id": message.related_proposal_id,
+                        "related_lot_id": message.related_lot_id,
+                    }
+                    for message in state.messages
+                    if message.recipient_id == agent_id
+                    and message.day < state.day
+                ][-config.recent_message_history_limit :],
+            }
+        )
+    return observation
 
 
 def build_retailer_market_observation(
@@ -196,7 +233,7 @@ def build_retailer_market_observation(
         reported_revenue + maximum_sellable_units * config.consumer_unit_price,
         2,
     )
-    return {
+    retailer_observation = {
         "day": observation["day"],
         "days_remaining": observation["remaining_days"],
         "retailer_id": self_view["agent_id"],
@@ -236,4 +273,79 @@ def build_retailer_market_observation(
             "can_sell_to_retailers": True,
         },
         "allowed_actions": allowed_actions,
+    }
+    if config.communication_enabled:
+        retailer_observation.update(
+            {
+                "phase": "economic",
+                "new_messages_today": observation["new_messages_today"],
+                "recent_message_history": observation[
+                    "recent_message_history"
+                ],
+            }
+        )
+    return retailer_observation
+
+
+def build_communication_observation(
+    state: MarketState,
+    agent_id: str,
+    *,
+    config: SimulationConfig,
+    initial_cash: float,
+    initial_inventory_value: float,
+) -> dict:
+    observation = build_observation(
+        state,
+        agent_id,
+        initial_cash=initial_cash,
+        initial_inventory_value=initial_inventory_value,
+        market_information=build_market_information(config, state),
+        config=config,
+    )
+    agent = state.agents[agent_id]
+    available_recipients = [
+        other_id
+        for other_id, other in state.agents.items()
+        if other_id != agent_id
+        and config.message_channels.get(
+            f"{agent.role}_to_{other.role}",
+            False,
+        )
+    ]
+    history_limit = config.recent_message_history_limit
+    return {
+        "phase": "communication",
+        "day": state.day,
+        "remaining_days": state.max_days - state.day,
+        "self": observation["self"],
+        "market_information": observation["market_information"],
+        "incoming_pending_proposals": observation["incoming_pending_proposals"],
+        "incoming_trade_counteroffers": observation["incoming_trade_counteroffers"],
+        "recent_incoming_messages": [
+            {
+                "message_id": message.message_id,
+                "day": message.day,
+                "sender_id": message.sender_id,
+                "message": message.message,
+                "related_proposal_id": message.related_proposal_id,
+                "related_lot_id": message.related_lot_id,
+            }
+            for message in state.messages
+            if message.recipient_id == agent_id and message.day < state.day
+        ][-history_limit:],
+        "recent_sent_messages": [
+            {
+                "message_id": message.message_id,
+                "day": message.day,
+                "recipient_id": message.recipient_id,
+                "message": message.message,
+                "related_proposal_id": message.related_proposal_id,
+                "related_lot_id": message.related_lot_id,
+            }
+            for message in state.messages
+            if message.sender_id == agent_id and message.day < state.day
+        ][-history_limit:],
+        "available_recipients": available_recipients,
+        "available_communication_actions": ["send_message", "no_message"],
     }

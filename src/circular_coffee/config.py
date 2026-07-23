@@ -25,6 +25,17 @@ class SimulationConfig:
     max_days: int = 20
     agent_order_mode: Literal["fixed", "random"] = "fixed"
     agent_mode: Literal["single_agent", "multi_agent"] = "single_agent"
+    communication_enabled: bool = False
+    max_messages_per_agent_per_day: int = 1
+    max_message_length: int = 500
+    recent_message_history_limit: int = 5
+    message_channels: dict[str, bool] = field(
+        default_factory=lambda: {
+            "roaster_to_retailer": True,
+            "retailer_to_roaster": True,
+            "retailer_to_retailer": True,
+        }
+    )
     experiment_version: str = "multi_agent_experiment_1"
     hidden_retailer_reservation_price: bool = False
     retailer_a_repurchase_reservation_price: float = 10.5
@@ -139,6 +150,34 @@ def build_default_config(**overrides: object) -> SimulationConfig:
     agent_mode = overrides.get("agent_mode", config.agent_mode)
     if agent_mode not in {"single_agent", "multi_agent"}:
         raise ValueError(f"unknown agent mode: {agent_mode}")
+    communication_enabled = overrides.get(
+        "communication_enabled",
+        config.communication_enabled,
+    )
+    if not isinstance(communication_enabled, bool):
+        raise ValueError("communication_enabled must be a boolean")
+    if communication_enabled and agent_mode != "multi_agent":
+        raise ValueError("communication requires multi_agent mode")
+    for field_name in (
+        "max_messages_per_agent_per_day",
+        "max_message_length",
+        "recent_message_history_limit",
+    ):
+        value = overrides.get(field_name, getattr(config, field_name))
+        if not isinstance(value, int) or value < 1:
+            raise ValueError(f"{field_name} must be a positive integer")
+    message_channels = overrides.get("message_channels", config.message_channels)
+    expected_message_channels = {
+        "roaster_to_retailer",
+        "retailer_to_roaster",
+        "retailer_to_retailer",
+    }
+    if (
+        not isinstance(message_channels, dict)
+        or set(message_channels) != expected_message_channels
+        or any(not isinstance(value, bool) for value in message_channels.values())
+    ):
+        raise ValueError("message_channels must configure all agent role directions")
     price_mode = overrides.get(
         "roaster_price_decision_mode",
         config.roaster_price_decision_mode,

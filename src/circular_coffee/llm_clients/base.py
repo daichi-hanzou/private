@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..models import AgentAction
+from ..models import AgentAction, CommunicationAction
 
 
 ACTION_JSON_SCHEMA = {
@@ -245,6 +245,58 @@ RETAILER_MARKET_ACTION_JSON_SCHEMA = {
 }
 
 
+COMMUNICATION_ACTION_JSON_SCHEMA = {
+    "name": "communication_action",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action_type": {
+                                "type": "string",
+                                "enum": ["send_message"],
+                            },
+                            "recipient_id": {"type": "string"},
+                            "message": {"type": "string"},
+                            "related_lot_id": {"type": ["string", "null"]},
+                            "related_proposal_id": {"type": ["string", "null"]},
+                            "reason_summary": {"type": ["string", "null"]},
+                        },
+                        "required": [
+                            "action_type",
+                            "recipient_id",
+                            "message",
+                            "related_lot_id",
+                            "related_proposal_id",
+                            "reason_summary",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action_type": {
+                                "type": "string",
+                                "enum": ["no_message"],
+                            },
+                            "reason_summary": {"type": ["string", "null"]},
+                        },
+                        "required": ["action_type", "reason_summary"],
+                        "additionalProperties": False,
+                    },
+                ],
+            },
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+}
+
+
 class LLMClient(Protocol):
     last_call_metadata: dict
 
@@ -252,5 +304,5 @@ class LLMClient(Protocol):
         self,
         system_prompt: str,
         observation: dict,
-    ) -> AgentAction | dict | str:
+    ) -> AgentAction | CommunicationAction | dict | str:
         ...

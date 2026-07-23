@@ -20,18 +20,28 @@ from .market import (
     create_trade_proposal,
     execute_consumer_sale,
     expire_old_proposals,
+    commit_messages,
     reject_trade_proposal,
     respond_to_trade_counteroffer,
     sell_to_consumer_market,
+    validate_communication_action,
 )
 from .metrics import economic_inventory_value
-from .models import AgentAction, MarketState, TradeRecord
+from .models import (
+    AgentAction,
+    CommunicationAction,
+    MarketState,
+    MessageRecord,
+    TradeRecord,
+)
 from .observation import (
+    build_communication_observation,
     build_observation,
     build_retailer_market_observation,
 )
 from .policies import (
     AgentPolicy,
+    CommunicationPolicy,
     RetailerMarketPolicy,
     WaitPolicy,
     policy_name,
@@ -48,6 +58,8 @@ class SimulationResult:
     negotiation_logs: list[dict]
     trade_logs: list[dict]
     consumer_sale_logs: list[dict]
+    communication_action_logs: list[dict]
+    message_logs: list[dict]
     output_dir: Path
 
 
@@ -60,9 +72,11 @@ class SimulationRunner:
         run_id: str,
         output_root: str | Path = "outputs",
         initial_state: MarketState | None = None,
+        communication_policies: dict[str, CommunicationPolicy] | None = None,
     ):
         self.config = config
         self.policies = policies
+        self.communication_policies = communication_policies or {}
         self.run_id = run_id
         self.output_dir = Path(output_root) / run_id
         self.state = initial_state or create_initial_market_state(config)
@@ -76,6 +90,8 @@ class SimulationRunner:
         self._policy_errors: dict[str, str] = {}
         self._legacy_action_normalized_agents: set[str] = set()
         self._consumer_sale_logs: list[dict] = []
+        self._communication_action_logs: list[dict] = []
+        self._message_logs: list[MessageRecord] = []
         self._agent_order_logs: list[dict] = [
             {
                 "event_type": "market_channel_configuration",
@@ -99,38 +115,10 @@ class SimulationRunner:
             self.state.day = day
             ordered_agent_ids = self._ordered_agent_ids()
             self._agent_order_logs.append({"day": day, "agent_order": ordered_agent_ids})
-            for agent_id in ordered_agent_ids:
-                observation = build_observation(
-                    self.state,
-                    agent_id,
-                    initial_cash=self._initial_cash_by_agent[agent_id],
-                    initial_inventory_value=self._initial_inventory_value_by_agent[agent_id],
-                    market_information=build_market_information(self.config, self.state),
-                    config=self.config,
-                )
-                for proposal in observation["incoming_pending_proposals"]:
-                    proposal_id = proposal["proposal_id"]
-                    self._proposal_visibility_counts[proposal_id] = (
-                        self._proposal_visibility_counts.get(proposal_id, 0) + 1
-                    )
-                    self._negotiation_logs.append(
-                        {
-                            "day": day,
-                            "event_type": "offer_observed",
-                            "offer_id": proposal_id,
-                            "agent_id": agent_id,
-                            "lot_id": proposal["lot_id"],
-                        }
-                    )
-                policy = self.policies.get(agent_id)
-                if isinstance(policy, RetailerMarketPolicy):
-                    observation = build_retailer_market_observation(
-                        observation,
-                        config=self.config,
-                    )
-                chosen_action = self._choose_action(agent_id, observation)
-                llm_log = self._consume_llm_log(agent_id)
-                self._execute_action(agent_id, observation, chosen_action, llm_log=llm_log)
+            if self.config.communication_enabled:
+                decisions = self._run_communication_phase(ordered_agent_ids)
+                self._commit_communication_decisions(decisions)
+            self._run_economic_action_phase(ordered_agent_ids)
             expired = expire_old_proposals(
                 self.state,
                 proposal_expiry_days=self.config.proposal_expiry_days,
@@ -181,6 +169,8 @@ class SimulationRunner:
             negotiation_logs=self._negotiation_logs,
             trade_logs=self._trade_logs,
             consumer_sale_logs=self._consumer_sale_logs,
+            communication_action_logs=self._communication_action_logs,
+            message_logs=to_jsonable(self._message_logs),
             output_dir=self.output_dir,
         )
 
@@ -189,6 +179,176 @@ class SimulationRunner:
         if self.config.agent_order_mode == "random":
             self._rng.shuffle(agent_ids)
         return agent_ids
+
+    def _run_communication_phase(
+        self,
+        ordered_agent_ids: list[str],
+    ) -> list[dict]:
+        observations = {
+            agent_id: build_communication_observation(
+                self.state,
+                agent_id,
+                config=self.config,
+                initial_cash=self._initial_cash_by_agent[agent_id],
+                initial_inventory_value=self._initial_inventory_value_by_agent[
+                    agent_id
+                ],
+            )
+            for agent_id in ordered_agent_ids
+        }
+        decisions: list[dict] = []
+        for agent_id in ordered_agent_ids:
+            policy = self.communication_policies.get(agent_id)
+            llm_log = None
+            policy_error = None
+            if policy is None:
+                action = CommunicationAction(action_type="no_message")
+            else:
+                try:
+                    action = policy.choose_communication_action(
+                        observations[agent_id]
+                    )
+                except Exception as exc:
+                    policy_error = str(exc)
+                    action = CommunicationAction(action_type="no_message")
+                consume = getattr(policy, "consume_last_llm_log", None)
+                if callable(consume):
+                    llm_log = consume()
+            error = policy_error
+            is_valid = policy_error is None
+            if is_valid:
+                try:
+                    validate_communication_action(
+                        self.state,
+                        self.config,
+                        sender_id=agent_id,
+                        action=action,
+                    )
+                except Exception as exc:
+                    error = str(exc)
+                    is_valid = False
+            if llm_log and llm_log.get("fallback_used"):
+                is_valid = False
+                error = (
+                    llm_log.get("validation_error")
+                    or llm_log.get("parse_error")
+                    or llm_log.get("api_error")
+                    or "communication_policy_fallback"
+                )
+            decisions.append(
+                {
+                    "agent_id": agent_id,
+                    "requested_action": action,
+                    "committed_action": (
+                        action
+                        if is_valid
+                        else CommunicationAction(action_type="no_message")
+                    ),
+                    "is_valid": is_valid,
+                    "error_reason": error,
+                    "llm": llm_log,
+                    "policy_error": policy_error,
+                }
+            )
+        return decisions
+
+    def _commit_communication_decisions(self, decisions: list[dict]) -> None:
+        records = commit_messages(
+            self.state,
+            self.config,
+            [
+                (decision["agent_id"], decision["committed_action"])
+                for decision in decisions
+            ],
+        )
+        records_by_sender = {record.sender_id: record for record in records}
+        for decision in decisions:
+            requested = decision["requested_action"]
+            committed = decision["committed_action"]
+            record = records_by_sender.get(decision["agent_id"])
+            row = {
+                "run_id": self.run_id,
+                "day": self.state.day,
+                "agent_id": decision["agent_id"],
+                "requested_action": {
+                    "action_type": requested.action_type,
+                    "recipient_id": requested.recipient_id,
+                    "related_lot_id": requested.related_lot_id,
+                    "related_proposal_id": requested.related_proposal_id,
+                },
+                "executed_action": committed.action_type,
+                "created_message_id": (
+                    record.message_id if record is not None else None
+                ),
+                "is_valid": decision["is_valid"],
+                "error_reason": decision["error_reason"],
+                "policy_error": decision["policy_error"] is not None,
+                "llm_fallback_used": bool(
+                    not decision["is_valid"]
+                    or decision["policy_error"]
+                    or (
+                        decision["llm"]
+                        and decision["llm"].get("fallback_used")
+                    )
+                ),
+                "llm_api_error": bool(
+                    decision["llm"] and decision["llm"].get("api_error")
+                ),
+                "llm_parse_error": bool(
+                    decision["llm"] and decision["llm"].get("parse_error")
+                ),
+            }
+            if decision["llm"] is not None:
+                row["llm"] = decision["llm"]
+            self._communication_action_logs.append(row)
+        self._message_logs.extend(records)
+
+    def _run_economic_action_phase(
+        self,
+        ordered_agent_ids: list[str],
+    ) -> None:
+        for agent_id in ordered_agent_ids:
+            observation = build_observation(
+                self.state,
+                agent_id,
+                initial_cash=self._initial_cash_by_agent[agent_id],
+                initial_inventory_value=self._initial_inventory_value_by_agent[
+                    agent_id
+                ],
+                market_information=build_market_information(
+                    self.config,
+                    self.state,
+                ),
+                config=self.config,
+            )
+            for proposal in observation["incoming_pending_proposals"]:
+                proposal_id = proposal["proposal_id"]
+                self._proposal_visibility_counts[proposal_id] = (
+                    self._proposal_visibility_counts.get(proposal_id, 0) + 1
+                )
+                self._negotiation_logs.append(
+                    {
+                        "day": self.state.day,
+                        "event_type": "offer_observed",
+                        "offer_id": proposal_id,
+                        "agent_id": agent_id,
+                        "lot_id": proposal["lot_id"],
+                    }
+                )
+            policy = self.policies.get(agent_id)
+            if isinstance(policy, RetailerMarketPolicy):
+                observation = build_retailer_market_observation(
+                    observation,
+                    config=self.config,
+                )
+            chosen_action = self._choose_action(agent_id, observation)
+            llm_log = self._consume_llm_log(agent_id)
+            self._execute_action(
+                agent_id,
+                observation,
+                chosen_action,
+                llm_log=llm_log,
+            )
 
     def _choose_action(self, agent_id: str, observation: dict) -> AgentAction:
         policy = self.policies.get(agent_id, WaitPolicy())
@@ -647,7 +807,9 @@ class SimulationRunner:
             agent_id: policy_name(policy) for agent_id, policy in self.policies.items()
         }
         write_json(self.output_dir / "config.json", config_payload)
-        write_json(self.output_dir / "initial_state.json", self._initial_state_snapshot)
+        initial_state = to_jsonable(self._initial_state_snapshot)
+        initial_state.pop("messages", None)
+        write_json(self.output_dir / "initial_state.json", initial_state)
 
     def _authoritative_proposal_logs(self) -> list[dict]:
         events: list[dict] = []
@@ -722,8 +884,14 @@ class SimulationRunner:
         write_jsonl(self.output_dir / "negotiations.jsonl", self._negotiation_logs)
         write_jsonl(self.output_dir / "trades.jsonl", self._trade_logs)
         write_jsonl(self.output_dir / "consumer_sales.jsonl", self._consumer_sale_logs)
+        write_jsonl(
+            self.output_dir / "communication_actions.jsonl",
+            self._communication_action_logs,
+        )
+        write_jsonl(self.output_dir / "messages.jsonl", self._message_logs)
         write_jsonl(self.output_dir / "agent_order.jsonl", self._agent_order_logs)
         final_state = to_jsonable(self.state)
         final_state.pop("trade_history", None)
+        final_state.pop("messages", None)
         write_json(self.output_dir / "final_state.json", final_state)
         write_json(self.output_dir / "metrics.json", metrics)
