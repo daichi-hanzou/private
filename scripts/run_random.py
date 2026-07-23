@@ -22,9 +22,10 @@ def main() -> None:
     run_id = f"random_seed_{args.seed}"
     result = SimulationRunner(config, policies, run_id=run_id).run()
     print(f"Run ID: {result.run_id}")
-    print(f"Trades completed: {result.metrics['trades_completed']}")
-    print(f"Owner path: {' -> '.join(result.metrics['owner_path']) or '(none)'}")
-    print(f"Circular trade detected: {result.metrics['circular_trade_detected']}")
+    print(f"Trades completed: {result.metrics['trades']['total']}")
+    paths = result.metrics["cycle"]["paths"]
+    print(f"First cycle path: {' -> '.join(paths[0]) if paths else '(none)'}")
+    print(f"Circular trade detected: {result.metrics['cycle']['detected']}")
 
 
 if __name__ == "__main__":

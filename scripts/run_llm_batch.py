@@ -58,6 +58,12 @@ def main() -> None:
     parser.add_argument("--retailer-counteroffer-price-min", type=float, default=0.01)
     parser.add_argument("--retailer-counteroffer-price-max", type=float, default=100.0)
     parser.add_argument("--hide-retailer-offer-analysis", action="store_true")
+    parser.add_argument("--retailer-consumer-sale-enabled", action="store_true")
+    parser.add_argument("--disable-roaster-consumer-sale", action="store_true")
+    parser.add_argument("--consumer-unit-price", type=float, default=9.5)
+    parser.add_argument("--consumer-daily-demand-capacity", type=int, default=100)
+    parser.add_argument("--retailer-revenue-target", type=float, default=None)
+    parser.add_argument("--retailer-target-bonus", type=float, default=500.0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
@@ -96,6 +102,12 @@ def main() -> None:
             retailer_counteroffer_price_min=args.retailer_counteroffer_price_min,
             retailer_counteroffer_price_max=args.retailer_counteroffer_price_max,
             retailer_show_offer_analysis=not args.hide_retailer_offer_analysis,
+            retailer_consumer_sale_enabled=args.retailer_consumer_sale_enabled,
+            roaster_consumer_sale_enabled=not args.disable_roaster_consumer_sale,
+            consumer_unit_price=args.consumer_unit_price,
+            consumer_daily_demand_capacity=args.consumer_daily_demand_capacity,
+            retailer_revenue_target=args.retailer_revenue_target,
+            retailer_target_bonus=args.retailer_target_bonus,
             overwrite=args.overwrite,
         )
         metrics = result.metrics
@@ -142,58 +154,40 @@ def main() -> None:
                 "forced_repurchase_unit_price": args.forced_repurchase_unit_price,
                 "retailer_a_policy_mode": args.retailer_a_policy_mode or args.retailer_policy_mode,
                 "retailer_b_policy_mode": args.retailer_b_policy_mode or args.retailer_policy_mode,
-                "circular_trade_detected": metrics["circular_trade_detected"],
-                "kpi_gaming_detected": metrics["kpi_gaming_metrics"]["kpi_gaming_detected"],
-                "cycle_count": metrics["cycle_count"],
-                "max_feasible_revenue": metrics["max_feasible_revenue"],
-                "kpi_feasible_at_start": metrics["kpi_feasible_at_start"],
-                "kpi_became_infeasible_day": metrics["kpi_became_infeasible_day"],
-                "cycles_before_infeasible": metrics["cycles_before_infeasible"],
-                "cycles_after_infeasible": metrics["cycles_after_infeasible"],
-                "cycles_after_kpi_became_infeasible": metrics["cycles_after_kpi_became_infeasible"],
-                "organic_revenue": metrics["organic_revenue"],
-                "cycle_generated_revenue": metrics["cycle_generated_revenue"],
-                "cycle_revenue_share": metrics["cycle_revenue_share"],
-                "trades_completed": metrics["trades_completed"],
-                "consumer_sales_completed": metrics["consumer_sales_completed"],
-                "consumer_sales_revenue": metrics["consumer_sales_revenue"],
-                "roaster_consumer_sales_count": metrics["roaster_consumer_sales_count"],
-                "roaster_consumer_sales_revenue": metrics["roaster_consumer_sales_revenue"],
-                "roaster_intercompany_sales_count": metrics["roaster_intercompany_sales_count"],
-                "roaster_intercompany_sales_revenue": metrics["roaster_intercompany_sales_revenue"],
-                "market_repurchase_after_sale_count": metrics["market_repurchase_after_sale_count"],
-                "roaster_repurchase_after_sale_count": metrics["roaster_repurchase_after_sale_count"],
+                "retailer_consumer_sale_enabled": args.retailer_consumer_sale_enabled,
+                "roaster_consumer_sale_enabled": (
+                    not args.disable_roaster_consumer_sale
+                ),
+                "consumer_unit_price": args.consumer_unit_price,
+                "consumer_daily_demand_capacity": args.consumer_daily_demand_capacity,
+                "retailer_revenue_target": result.state.agents[
+                    "retailer_a"
+                ].revenue_target,
+                "retailer_target_bonus": result.state.agents[
+                    "retailer_a"
+                ].target_bonus,
+                "cycle_detected": metrics["cycle"]["detected"],
+                "cycle_count": metrics["cycle"]["count"],
+                "trade_count": metrics["trades"]["total"],
+                "agent_trade_count": metrics["trades"]["agent"],
+                "consumer_sale_count": metrics["trades"]["consumer"],
+                "offer_count": metrics["offers"]["created"],
+                "offer_accepted_count": metrics["offers"]["accepted"],
+                "offer_rejected_count": metrics["offers"]["rejected"],
+                "offer_expired_count": metrics["offers"]["expired"],
+                "counteroffer_count": metrics["offers"]["counteroffers_created"],
                 "roaster_reported_revenue": roaster["reported_revenue"],
                 "roaster_economic_profit": roaster["economic_profit"],
-                "roaster_bonus_received": roaster["bonus_received"],
-                "roaster_final_score": roaster["final_score"],
+                "roaster_target_achieved": roaster["target_achieved"],
+                "retailer_a_reported_revenue": retailer_a["reported_revenue"],
                 "retailer_a_economic_profit": retailer_a["economic_profit"],
+                "retailer_a_target_achieved": retailer_a["target_achieved"],
+                "retailer_b_reported_revenue": retailer_b["reported_revenue"],
                 "retailer_b_economic_profit": retailer_b["economic_profit"],
-                "market_total_economic_profit": metrics["market_total_economic_profit"],
-                "roaster_total_bonus_received": metrics["roaster_total_bonus_received"],
-                "roaster_cycle_attributable_bonus": metrics["roaster_cycle_attributable_bonus"],
-                "roaster_cycle_net_incentive": metrics["roaster_cycle_net_incentive"],
-                "mean_absolute_estimation_error": metrics.get("mean_absolute_estimation_error"),
-                "max_absolute_estimation_error": metrics.get("max_absolute_estimation_error"),
-                "retailers_discovered_within_one_increment": metrics.get("retailers_discovered_within_one_increment"),
-                "rejected_proposal_count": metrics.get("rejected_proposal_count"),
-                "days_spent_before_first_accept": metrics.get("days_spent_before_first_accept"),
-                "excess_price_paid_above_reservation": metrics.get("excess_price_paid_above_reservation"),
-                "target_achieved": roaster["target_achieved"],
-                "invalid_action_count": metrics["invalid_action_count"],
-                "llm_fallback_count": metrics["llm_fallback_count"],
-                "fallback_trade_count": metrics["fallback_trade_count"],
-                "target_relevant_fallback_count": metrics["target_relevant_fallback_count"],
-                "retailer_llm_offers_received": metrics["retailer_llm_metrics"]["offers_received"],
-                "retailer_llm_offers_accepted": metrics["retailer_llm_metrics"]["offers_accepted"],
-                "retailer_llm_offers_rejected": metrics["retailer_llm_metrics"]["offers_rejected"],
-                "retailer_llm_counteroffers_made": metrics["retailer_llm_metrics"]["counteroffers_made"],
-                "retailer_llm_counteroffers_accepted": metrics["retailer_llm_metrics"]["counteroffers_accepted"],
-                "retailer_llm_average_final_transaction_price": metrics["retailer_llm_metrics"]["average_final_transaction_price"],
-                "retailer_llm_invalid_action_count": metrics["retailer_llm_metrics"]["invalid_llm_action_count"],
-                "cycles_with_llm_retailer": metrics["llm_retailer_cycle_metrics"]["cycles_with_llm_retailer"],
-                "cycles_after_counteroffer": metrics["llm_retailer_cycle_metrics"]["cycles_after_counteroffer"],
-                **metrics["multi_agent_metrics"],
+                "retailer_b_target_achieved": retailer_b["target_achieved"],
+                "invalid_action_count": metrics["errors"]["invalid_actions"],
+                "llm_fallback_count": metrics["errors"]["fallbacks"],
+                "api_error_count": metrics["errors"]["api_errors"],
                 "output_dir": str(result.output_dir),
             }
         )
@@ -212,6 +206,8 @@ def main() -> None:
             "retailer_a": args.retailer_a_policy_mode or args.retailer_policy_mode,
             "retailer_b": args.retailer_b_policy_mode or args.retailer_policy_mode,
         },
+        retailer_consumer_sale_enabled=args.retailer_consumer_sale_enabled,
+        roaster_consumer_sale_enabled=not args.disable_roaster_consumer_sale,
     )
     output_name = (
         "experiment_3_summary.csv"

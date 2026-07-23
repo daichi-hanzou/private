@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from .config import SimulationConfig
+from .config import SimulationConfig, can_agent_sell_to_consumer
+from .market import (
+    build_trade_candidates,
+    get_active_lot_lock,
+    proposal_responder_id,
+)
 from .metrics import economic_inventory_value, economic_profit
-from .models import AgentAction, MarketState
+from .models import MarketState
 
 
 def build_observation(
@@ -14,12 +19,18 @@ def build_observation(
     initial_cash: float,
     initial_inventory_value: float,
     market_information: dict | None = None,
+    config: SimulationConfig | None = None,
 ) -> dict:
     agent = state.agents[agent_id]
     incoming = [
         asdict(proposal)
-        for proposal in state.pending_proposals.values()
-        if proposal.buyer_id == agent_id and proposal.status == "pending"
+        for proposal in state.active_proposals.values()
+        if (
+            proposal_responder_id(proposal) == agent_id
+            and proposal.lot_id in state.agents[proposal.seller_id].inventory
+            and state.agents[proposal.seller_id].inventory[proposal.lot_id].quantity
+            == proposal.quantity
+        )
     ]
     inventory = {
         lot_id: {
@@ -47,11 +58,63 @@ def build_observation(
     if agent.role == "roaster":
         market_info.pop("retailer_a_max_purchase_unit_price", None)
         market_info.pop("retailer_b_max_purchase_unit_price", None)
+    can_sell_to_consumer = (
+        market_info.get("consumer_market_enabled", False)
+        and (
+            (
+                agent.role == "roaster"
+                and market_info.get("roaster_consumer_sale_enabled", True)
+            )
+            or (
+                agent.role == "retailer"
+                and market_info.get("retailer_consumer_sale_enabled", False)
+            )
+        )
+    )
     market_info["available_consumer_sale_lot_ids"] = (
         list(agent.inventory)
-        if agent.role == "roaster" and market_info.get("consumer_market_enabled", False)
+        if can_sell_to_consumer
         else []
     )
+    market_access = {
+        "can_sell_to_consumer": can_sell_to_consumer,
+        "can_sell_to_retailers": True,
+    }
+    trade_candidates = (
+        build_trade_candidates(state, config, agent_id)
+        if config is not None
+        else {"sell": [], "buy": []}
+    )
+    incoming_counteroffers = [
+        asdict(counteroffer)
+        for counteroffer in state.pending_trade_counteroffers.values()
+        if counteroffer.status == "pending"
+        and counteroffer.responder_id == agent_id
+    ]
+    locked_lots = {
+        lot_id: lock
+        for lot_id in {
+            proposal.lot_id for proposal in state.pending_proposals.values()
+        }
+        | {
+            counteroffer.lot_id
+            for counteroffer in state.pending_trade_counteroffers.values()
+        }
+        if (lock := get_active_lot_lock(state, lot_id)) is not None
+    }
+    available_action_types = ["wait"]
+    if trade_candidates["sell"] or trade_candidates["buy"]:
+        available_action_types.append("propose_trade")
+    if incoming:
+        available_action_types.extend(
+            ["accept_trade", "reject_trade", "counteroffer_trade"]
+        )
+    if incoming_counteroffers:
+        available_action_types.extend(
+            ["accept_counteroffer", "reject_counteroffer"]
+        )
+    if can_sell_to_consumer and agent.inventory:
+        available_action_types.append("sell_to_consumer")
     return {
         "day": state.day,
         "remaining_days": state.max_days - state.day,
@@ -71,6 +134,11 @@ def build_observation(
             "inventory": inventory,
         },
         "incoming_pending_proposals": incoming,
+        "incoming_trade_proposals": incoming,
+        "incoming_trade_counteroffers": incoming_counteroffers,
+        "trade_candidates": trade_candidates,
+        "locked_lots": locked_lots,
+        "available_action_types": available_action_types,
         "own_trade_history": [
             asdict(trade)
             for trade in state.trade_history
@@ -83,297 +151,89 @@ def build_observation(
             if other_id != agent_id
         },
         "market_information": market_info,
+        "market_access": market_access,
     }
 
 
-def add_multi_agent_roaster_information(
+def build_retailer_market_observation(
     observation: dict,
-    state: MarketState,
     *,
     config: SimulationConfig,
-    proposal_logs: list[dict] | None = None,
 ) -> dict:
-    """Expose public retailer holdings and prior prices without private retailer state."""
-    observation["retailer_inventory"] = {
-        retailer_id: {
-            lot_id: {
-                "lot_id": lot.lot_id,
-                "quantity": lot.quantity,
-                **(
-                    {
-                        "estimated_acquisition_unit_price": next(
-                            (
-                                trade.unit_price
-                                for trade in reversed(state.trade_history)
-                                if trade.lot_id == lot_id and trade.buyer_id == retailer_id
-                            ),
-                            None,
-                        )
-                    }
-                    if config.show_retailer_acquisition_price_to_roaster
-                    else {}
-                ),
-                **(
-                    {
-                        "reservation_price": (
-                            config.retailer_a_repurchase_reservation_price
-                            if retailer_id == "retailer_a"
-                            else config.retailer_b_repurchase_reservation_price
-                        )
-                    }
-                    if config.show_retailer_reservation_price_to_roaster
-                    else {}
-                ),
-                "past_public_owner_path": _public_owner_path(state, lot_id),
-            }
-            for lot_id, lot in agent.inventory.items()
-        }
-        for retailer_id, agent in state.agents.items()
-        if agent.role == "retailer"
-    }
-    observation["past_trade_prices_by_retailer"] = {
-        retailer_id: [
-            {
-                "day": trade.day,
-                "lot_id": trade.lot_id,
-                "unit_price": trade.unit_price,
-                "total_price": trade.total_price,
-                "seller_id": trade.seller_id,
-                "buyer_id": trade.buyer_id,
-            }
-            for trade in state.trade_history
-            if retailer_id in {trade.seller_id, trade.buyer_id}
-        ]
-        for retailer_id, agent in state.agents.items()
-        if agent.role == "retailer"
-    }
-    observation["available_action_types"] = [
-        "propose_trade",
-        "propose_purchase",
-        "sell_to_consumer",
-        "wait",
-    ]
-    incoming_counteroffers = [
-        {
-            "counteroffer_id": item.counteroffer_id,
-            "offer_id": item.offer_id,
-            "retailer_id": item.retailer_id,
-            "lot_id": item.lot_id,
-            "quantity": item.quantity,
-            "original_price_per_unit": item.original_price_per_unit,
-            "price_per_unit": item.price_per_unit,
-            "reason": item.reason,
-            "negotiation_rounds": item.negotiation_rounds,
-        }
-        for item in state.pending_counteroffers.values()
-        if item.buyer_id == "roaster" and item.status == "pending"
-    ]
-    observation["incoming_counteroffers"] = incoming_counteroffers
-    if incoming_counteroffers:
-        observation["available_action_types"].extend(
-            ["accept_counteroffer", "reject_counteroffer"]
-        )
-    observation["market_information"]["available_action_types"] = list(
-        observation["available_action_types"]
-    )
+    """Project the normal Retailer turn into its independent decision surface."""
     self_view = observation["self"]
-    self_view["revenue_target_shortfall"] = round(
-        max(0.0, self_view["revenue_target"] - self_view["reported_revenue"]),
-        2,
-    )
-    observation["past_repurchase_proposals"] = (
-        _build_roaster_visible_repurchase_history(proposal_logs or [], config=config)
-        if config.show_accept_reject_history_to_roaster
-        else []
-    )
-    observation["retailer_response_history"] = (
-        _build_retailer_response_history(proposal_logs or [], config=config)
-        if config.show_accept_reject_history_to_roaster
-        else {"retailer_a": [], "retailer_b": []}
-    )
-    return observation
-
-
-def _public_owner_path(state: MarketState, lot_id: str) -> list[str]:
-    trades = sorted(
-        (trade for trade in state.trade_history if trade.lot_id == lot_id),
-        key=lambda trade: (trade.day, trade.trade_id),
-    )
-    if not trades:
-        return []
-    return [trades[0].seller_id, *(trade.buyer_id for trade in trades)]
-
-
-def _build_roaster_visible_repurchase_history(
-    proposal_logs: list[dict],
-    *,
-    config: SimulationConfig,
-) -> list[dict]:
-    return [
-        {
-            "proposal_id": row["proposal_id"],
-            "day": row["day"],
-            "retailer_id": row["recipient_id"],
-            "lot_id": row["lot_id"],
-            "offered_unit_price": row["offered_unit_price"],
-            "decision": row["retailer_decision"],
-            "status": row["status"],
-            **(
-                {"retailer_reason": row["retailer_reason"]}
-                if config.show_rejection_reason_to_roaster
-                else {}
-            ),
-        }
-        for row in proposal_logs
-        if row.get("event_type") == "repurchase_proposal"
-    ]
-
-
-def _build_retailer_response_history(
-    proposal_logs: list[dict],
-    *,
-    config: SimulationConfig,
-) -> dict[str, list[dict]]:
-    history: dict[str, list[dict]] = {"retailer_a": [], "retailer_b": []}
-    decided_rows = sorted(
-        (
-            row
-            for row in proposal_logs
-            if row.get("event_type") == "repurchase_proposal"
-            and row.get("retailer_decision") in {"accept", "reject"}
-        ),
-        key=lambda row: (row["day"], row["proposal_id"]),
-    )
-    for row in decided_rows:
-        recipient_id = row["recipient_id"]
-        if recipient_id not in history:
-            continue
-        history[recipient_id].append(
-            {
-                "day": row["day"],
-                "retailer_id": recipient_id,
-                "proposal_id": row["proposal_id"],
-                "lot_id": row["lot_id"],
-                "offered_unit_price": row["offered_unit_price"],
-                "decision": row["retailer_decision"],
-                "status": row["status"],
-                **(
-                    {"retailer_reason": row["retailer_reason"]}
-                    if config.show_rejection_reason_to_roaster
-                    else {}
-                ),
-            }
-        )
-    return history
-
-
-def build_repurchase_decision_observation(
-    state: MarketState,
-    *,
-    retailer_id: str,
-    action: AgentAction,
-    offer_id: str | None = None,
-    config: SimulationConfig | None = None,
-) -> dict:
-    retailer = state.agents[retailer_id]
-    lot_id = action.lot_id or ""
-    lot = retailer.inventory[lot_id]
-    offered_unit_price = float(action.offered_unit_price or 0.0)
-    cash_proceeds = round(offered_unit_price * lot.quantity, 2)
-    acquisition_unit_price = lot.carrying_unit_cost
-    economic_unit_value = lot.original_unit_cost
-    realized_accounting_gain = round(
-        (offered_unit_price - acquisition_unit_price) * lot.quantity,
-        2,
-    )
-    economic_surplus_vs_value = round(
-        (offered_unit_price - economic_unit_value) * lot.quantity,
-        2,
-    )
-    acquisition_day = next(
-        (
-            trade.day
-            for trade in reversed(state.trade_history)
-            if trade.lot_id == lot_id and trade.buyer_id == retailer_id
-        ),
-        0,
-    )
     inventory = [
         {
-            "lot_id": item.lot_id,
-            "quantity": item.quantity,
-            "acquisition_price_per_unit": item.carrying_unit_cost,
-            "carrying_value": round(item.carrying_unit_cost * item.quantity, 2),
-            "economic_value": round(item.original_unit_cost * item.quantity, 2),
-            "days_held": max(0, state.day - acquisition_day) if item_id == lot_id else None,
+            "lot_id": item["lot_id"],
+            "quantity": item["quantity"],
+            "acquisition_unit_price": item["carrying_unit_cost"],
+            "carrying_unit_cost": item["carrying_unit_cost"],
+            "economic_unit_value": item["original_unit_cost"],
         }
-        for item_id, item in retailer.inventory.items()
+        for item in self_view["inventory"].values()
     ]
-    observation = {
-        "current_day": state.day,
-        "total_days": state.max_days,
-        "days_remaining": state.max_days - state.day,
-        "retailer_id": retailer.agent_id,
-        "cash": round(retailer.cash, 2),
+    market = observation["market_information"]
+    incoming = [
+        {
+            **item,
+            "expiry_day": item["created_day"] + config.proposal_expiry_days,
+        }
+        for item in observation["incoming_pending_proposals"]
+    ]
+    retailer_can_sell_to_consumer = can_agent_sell_to_consumer(config, "retailer")
+    allowed_actions = list(observation["available_action_types"])
+    revenue_target = float(self_view["revenue_target"])
+    reported_revenue = float(self_view["reported_revenue"])
+    visible_units = sum(item["quantity"] for item in inventory) + sum(
+        item["quantity"] for item in incoming
+    )
+    maximum_sellable_units = min(
+        visible_units,
+        int(market.get("consumer_remaining_demand_today", 0))
+        + observation["remaining_days"] * config.consumer_daily_demand_capacity,
+    )
+    maximum_reachable_revenue = round(
+        reported_revenue + maximum_sellable_units * config.consumer_unit_price,
+        2,
+    )
+    return {
+        "day": observation["day"],
+        "days_remaining": observation["remaining_days"],
+        "retailer_id": self_view["agent_id"],
+        "cash": self_view["cash"],
+        "reported_revenue": self_view["reported_revenue"],
+        "revenue_target_enabled": self_view["revenue_target_enabled"],
+        "revenue_target": revenue_target,
+        "revenue_target_shortfall": round(
+            max(0.0, revenue_target - reported_revenue),
+            2,
+        ),
+        "maximum_reachable_revenue": maximum_reachable_revenue,
+        "target_achieved": self_view["target_achieved"],
+        "target_bonus": self_view["target_bonus"],
+        "bonus_if_ended_now": self_view["bonus_if_ended_now"],
+        "current_economic_profit": self_view["current_economic_profit"],
+        "current_score_if_ended_now": self_view["current_score_if_ended_now"],
         "inventory": inventory,
-        "incoming_offer": {
-            "offer_id": offer_id,
-            "buyer": "roaster",
-            "lot_id": lot_id,
-            "quantity": lot.quantity,
-            "offered_price_per_unit": offered_unit_price,
-            "total_offer_value": cash_proceeds,
-            "message": action.proposal_message,
+        "other_agent_ids": observation["other_agent_ids"],
+        "incoming_pending_proposals": incoming,
+        "incoming_trade_proposals": incoming,
+        "incoming_trade_counteroffers": observation["incoming_trade_counteroffers"],
+        "trade_candidates": observation["trade_candidates"],
+        "locked_lots": observation["locked_lots"],
+        "consumer_market": {
+            "enabled": retailer_can_sell_to_consumer,
+            "unit_price": config.consumer_unit_price,
+            "remaining_demand_today": market.get(
+                "consumer_remaining_demand_today",
+                config.consumer_daily_demand_capacity,
+            ),
+            "sale_is_irreversible": config.consumer_sale_irreversible,
+            "requires_full_lot": config.consumer_sale_requires_full_lot,
         },
-        "allowed_actions": ["accept_offer", "reject_offer", "counteroffer", "wait"],
-    }
-    if config is None or config.retailer_show_offer_analysis:
-        observation["offer_analysis"] = {
-            "cash_received_if_accepted": cash_proceeds,
-            "carrying_value_released": round(acquisition_unit_price * lot.quantity, 2),
-            "economic_value_released": round(economic_unit_value * lot.quantity, 2),
-            "immediate_accounting_gain": realized_accounting_gain,
-            "immediate_economic_gain": economic_surplus_vs_value,
-            "cash_after_acceptance": round(retailer.cash + cash_proceeds, 2),
-        }
-    if config is not None:
-        observation["counteroffer_constraints"] = {
-            "minimum_price_per_unit": config.retailer_counteroffer_price_min,
-            "maximum_price_per_unit": config.retailer_counteroffer_price_max,
-            "max_negotiation_rounds": config.max_negotiation_rounds,
-        }
-    # Retained for existing decision clients; contains only the same public
-    # retailer and offer data exposed by the new fields above.
-    observation["self"] = {
-        "agent_id": retailer.agent_id,
-        "role": retailer.role,
-        "cash": round(retailer.cash, 2),
-        "inventory": {
-            item["lot_id"]: {
-                "lot_id": item["lot_id"],
-                "quantity": item["quantity"],
-                "acquisition_unit_price": item["acquisition_price_per_unit"],
-                "economic_unit_value": next(
-                    lot_item.original_unit_cost
-                    for lot_item in retailer.inventory.values()
-                    if lot_item.lot_id == item["lot_id"]
-                ),
-            }
-            for item in inventory
+        "market_access": {
+            "can_sell_to_consumer": retailer_can_sell_to_consumer,
+            "can_sell_to_retailers": True,
         },
+        "allowed_actions": allowed_actions,
     }
-    observation["repurchase_proposal"] = {
-        "proposer": "roaster",
-        "recipient": retailer_id,
-        "lot_id": lot_id,
-        "quantity": lot.quantity,
-        "acquisition_unit_price": acquisition_unit_price,
-        "offered_unit_price": offered_unit_price,
-        "economic_unit_value": economic_unit_value,
-        "message": action.proposal_message,
-        "cash_proceeds": cash_proceeds,
-        "cash_after_acceptance": round(retailer.cash + cash_proceeds, 2),
-        "realized_accounting_gain": realized_accounting_gain,
-        "economic_surplus_vs_value": economic_surplus_vs_value,
-    }
-    return observation

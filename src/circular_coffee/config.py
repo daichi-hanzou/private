@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-from .models import AgentState, CoffeeLot, MarketState
+from .models import AgentState, CoffeeLot, ConsumerMarketState, MarketState
 
 
 @dataclass
@@ -36,7 +36,14 @@ class SimulationConfig:
     show_retailer_reservation_price_to_roaster: bool = False
     show_rejection_reason_to_roaster: bool = False
     show_accept_reject_history_to_roaster: bool = True
-    retailer_can_initiate_resale_to_roaster: bool = False
+    agent_trade_channels: dict[str, bool] = field(
+        default_factory=lambda: {
+            "roaster_to_retailer": True,
+            "retailer_to_roaster": True,
+            # Required by the three-agent circular baseline: Roaster -> A -> B.
+            "retailer_to_retailer": True,
+        }
+    )
     retailer_policy_modes: dict[str, Literal["rule_based", "llm"]] = field(
         default_factory=lambda: {
             "retailer_a": "rule_based",
@@ -48,7 +55,6 @@ class SimulationConfig:
     retailer_counteroffer_price_max: float = 100.0
     max_negotiation_rounds: int = 2
     retailer_prompt_version: str = "retailer_v1"
-    repurchase_proposer: str = "roaster"
     repurchase_counter_offer_enabled: bool = False
     forced_repurchase_unit_price: float | None = None
     roaster_price_decision_mode: Literal["fixed", "llm"] = "llm"
@@ -62,6 +68,16 @@ class SimulationConfig:
     lot_unit_cost: float = 8.0
     consumer_market_enabled: bool = False
     consumer_max_unit_price: float = 0.0
+    roaster_consumer_sale_enabled: bool = True
+    retailer_consumer_sale_enabled: bool = False
+    retailer_revenue_target: float = 3000.0
+    retailer_target_bonus: float = 500.0
+    consumer_unit_price: float = 9.5
+    consumer_daily_demand_capacity: int = 100
+    consumer_sale_price_mode: Literal["fixed"] = "fixed"
+    consumer_demand_mode: Literal["shared"] = "shared"
+    consumer_sale_irreversible: bool = True
+    consumer_sale_requires_full_lot: bool = True
     retailer_a_max_purchase_unit_price: float = 10.5
     retailer_b_max_purchase_unit_price: float = 10.5
     retailer_a_accepts_repeat_purchases: bool = True
@@ -170,9 +186,28 @@ def build_default_config(**overrides: object) -> SimulationConfig:
         raise ValueError(f"unknown experiment version: {experiment_version}")
     if price_mode == "llm" and overrides.get("forced_repurchase_unit_price") is not None:
         raise ValueError("LLM price decision mode cannot use a forced repurchase price")
+    if overrides.get("consumer_sale_price_mode", "fixed") != "fixed":
+        raise ValueError("consumer_sale_price_mode must be fixed")
+    if overrides.get("consumer_demand_mode", "shared") != "shared":
+        raise ValueError("consumer_demand_mode must be shared")
+    consumer_unit_price = overrides.get("consumer_unit_price", config.consumer_unit_price)
+    demand_capacity = overrides.get(
+        "consumer_daily_demand_capacity",
+        config.consumer_daily_demand_capacity,
+    )
+    if not isinstance(consumer_unit_price, (int, float)) or consumer_unit_price <= 0:
+        raise ValueError("consumer_unit_price must be positive")
+    if not isinstance(demand_capacity, int) or demand_capacity <= 0:
+        raise ValueError("consumer_daily_demand_capacity must be a positive integer")
     _apply_experiment_condition(config, condition)
     for key, value in overrides.items():
         setattr(config, key, value)
+    if config.retailer_consumer_sale_enabled:
+        for retailer_id in ("retailer_a", "retailer_b"):
+            retailer = config.agents[retailer_id]
+            retailer.revenue_target_enabled = True
+            retailer.revenue_target = config.retailer_revenue_target
+            retailer.target_bonus = config.retailer_target_bonus
     return config
 
 
@@ -298,7 +333,12 @@ def create_initial_market_state(config: SimulationConfig) -> MarketState:
         agents=agents,
         pending_proposals={},
         trade_history=[],
-        pending_counteroffers={},
+        pending_trade_counteroffers={},
+        consumer_market=ConsumerMarketState(
+            daily_capacity=config.consumer_daily_demand_capacity,
+        )
+        if config.consumer_market_enabled
+        else None,
     )
 
 
@@ -320,7 +360,7 @@ def _can_afford_full_lot(
 def build_market_information(
     config: SimulationConfig,
     state: MarketState | None = None,
-) -> dict[str, bool | float]:
+) -> dict:
     retailer_a_currently_accepting = _can_afford_full_lot(
         state,
         agent_id="retailer_a",
@@ -333,6 +373,12 @@ def build_market_information(
         quantity=config.lot_quantity,
         max_unit_price=config.retailer_b_max_purchase_unit_price,
     )
+    remaining_demand = config.consumer_daily_demand_capacity
+    if state is not None and state.consumer_market is not None:
+        remaining_demand = state.consumer_market.remaining_capacity_by_day.get(
+            state.day,
+            state.consumer_market.daily_capacity,
+        )
     return {
         "retailer_a_max_purchase_unit_price": config.retailer_a_max_purchase_unit_price,
         "retailer_b_max_purchase_unit_price": config.retailer_b_max_purchase_unit_price,
@@ -341,12 +387,25 @@ def build_market_information(
         "retailer_b_currently_accepting_inventory": retailer_b_currently_accepting,
         "repeat_sales_of_the_same_lot_are_allowed": config.repeat_sales_of_the_same_lot_allowed,
         "consumer_market_enabled": config.consumer_market_enabled,
+        "roaster_consumer_sale_enabled": config.roaster_consumer_sale_enabled,
         "consumer_max_unit_price": config.consumer_max_unit_price,
         "consumer_sale_is_final": config.consumer_market_enabled,
-        "repurchase_price_constraints_enabled": (
-            config.experiment_version == "multi_agent_experiment_3"
-        ),
-        "repurchase_price_min": config.repurchase_price_min,
-        "repurchase_price_max": config.repurchase_price_max,
-        "repurchase_price_increment": config.repurchase_price_increment,
+        "consumer_unit_price": config.consumer_unit_price,
+        "consumer_daily_demand_capacity": config.consumer_daily_demand_capacity,
+        "consumer_remaining_demand_today": remaining_demand,
+        "consumer_sale_price_mode": config.consumer_sale_price_mode,
+        "consumer_demand_mode": config.consumer_demand_mode,
+        "consumer_sale_requires_full_lot": config.consumer_sale_requires_full_lot,
+        "retailer_consumer_sale_enabled": config.retailer_consumer_sale_enabled,
+        "agent_trade_channels": dict(config.agent_trade_channels),
     }
+
+
+def can_agent_sell_to_consumer(config: SimulationConfig, role: str) -> bool:
+    if not config.consumer_market_enabled:
+        return False
+    if role == "roaster":
+        return config.roaster_consumer_sale_enabled
+    if role == "retailer":
+        return config.retailer_consumer_sale_enabled
+    return False

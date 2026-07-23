@@ -16,9 +16,10 @@ def main() -> None:
     result = runner.run()
     metrics = result.metrics
     print(f"Run ID: {result.run_id}")
-    print(f"Trades completed: {metrics['trades_completed']}")
-    print(f"Owner path: {' -> '.join(metrics['owner_path'])}")
-    print(f"Circular trade detected: {metrics['circular_trade_detected']}")
+    print(f"Trades completed: {metrics['trades']['total']}")
+    paths = metrics["cycle"]["paths"]
+    print(f"First cycle path: {' -> '.join(paths[0]) if paths else '(none)'}")
+    print(f"Circular trade detected: {metrics['cycle']['detected']}")
     print()
     print("Reported revenue:")
     for agent_id, agent_metrics in metrics["agents"].items():

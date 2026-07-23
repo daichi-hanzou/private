@@ -7,7 +7,11 @@ from circular_coffee.policies import (
 def _observation(*, cash=3000.0, incoming=None, inventory=None):
     return {
         "day": 1,
-        "self": {"cash": cash, "inventory": inventory or {}},
+        "self": {
+            "agent_id": "retailer_a",
+            "cash": cash,
+            "inventory": inventory or {},
+        },
         "incoming_pending_proposals": incoming or [],
         "other_agent_ids": ["roaster", "retailer_b"],
     }
@@ -74,7 +78,8 @@ def test_retailer_b_prefers_roaster_as_resale_buyer() -> None:
             }
         )
     )
-    assert action.counterparty_id == "roaster"
+    assert action.seller_id == "retailer_a"
+    assert action.buyer_id == "roaster"
 
 
 def test_retailer_a_accepts_offer_at_price_limit() -> None:

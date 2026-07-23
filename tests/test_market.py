@@ -11,6 +11,7 @@ def test_create_valid_trade_proposal() -> None:
     state = create_initial_market_state(build_default_config())
     proposal = create_trade_proposal(
         state,
+        initiator_id="roaster",
         seller_id="roaster",
         buyer_id="retailer_a",
         lot_id="LOT-001",
@@ -28,6 +29,7 @@ def test_cannot_propose_unowned_lot() -> None:
     try:
         create_trade_proposal(
             state,
+            initiator_id="retailer_a",
             seller_id="retailer_a",
             buyer_id="retailer_b",
             lot_id="LOT-001",
@@ -35,7 +37,7 @@ def test_cannot_propose_unowned_lot() -> None:
             unit_price=10.0,
         )
     except InvalidActionError as exc:
-        assert "does not own" in str(exc)
+        assert str(exc) == "seller_does_not_own_lot"
     else:
         raise AssertionError("expected InvalidActionError")
 
@@ -45,6 +47,7 @@ def test_cannot_sell_to_self() -> None:
     try:
         create_trade_proposal(
             state,
+            initiator_id="roaster",
             seller_id="roaster",
             buyer_id="roaster",
             lot_id="LOT-001",
@@ -52,7 +55,7 @@ def test_cannot_sell_to_self() -> None:
             unit_price=10.0,
         )
     except InvalidActionError as exc:
-        assert "self" in str(exc)
+        assert str(exc) == "seller_and_buyer_must_differ"
     else:
         raise AssertionError("expected InvalidActionError")
 
@@ -63,6 +66,7 @@ def test_accept_fails_with_insufficient_cash() -> None:
     state.agents["retailer_a"].cash = 100.0
     proposal = create_trade_proposal(
         state,
+        initiator_id="roaster",
         seller_id="roaster",
         buyer_id="retailer_a",
         lot_id="LOT-001",
@@ -70,9 +74,13 @@ def test_accept_fails_with_insufficient_cash() -> None:
         unit_price=10.0,
     )
     try:
-        accept_trade_proposal(state, proposal_id=proposal.proposal_id, buyer_id="retailer_a")
+        accept_trade_proposal(
+            state,
+            proposal_id=proposal.proposal_id,
+            responder_id="retailer_a",
+        )
     except InvalidActionError as exc:
-        assert "insufficient cash" in str(exc)
+        assert str(exc) == "buyer_insufficient_cash"
     else:
         raise AssertionError("expected InvalidActionError")
 
@@ -81,13 +89,18 @@ def test_accept_moves_cash_and_revenue_and_inventory() -> None:
     state = create_initial_market_state(build_default_config())
     proposal = create_trade_proposal(
         state,
+        initiator_id="roaster",
         seller_id="roaster",
         buyer_id="retailer_a",
         lot_id="LOT-001",
         quantity=100,
         unit_price=10.0,
     )
-    trade = accept_trade_proposal(state, proposal_id=proposal.proposal_id, buyer_id="retailer_a")
+    trade = accept_trade_proposal(
+        state,
+        proposal_id=proposal.proposal_id,
+        responder_id="retailer_a",
+    )
     assert trade.total_price == 1000.0
     assert state.agents["roaster"].cash == 4000.0
     assert state.agents["retailer_a"].cash == 2000.0
@@ -101,17 +114,26 @@ def test_cannot_double_accept_same_proposal() -> None:
     state = create_initial_market_state(build_default_config())
     proposal = create_trade_proposal(
         state,
+        initiator_id="roaster",
         seller_id="roaster",
         buyer_id="retailer_a",
         lot_id="LOT-001",
         quantity=100,
         unit_price=10.0,
     )
-    accept_trade_proposal(state, proposal_id=proposal.proposal_id, buyer_id="retailer_a")
+    accept_trade_proposal(
+        state,
+        proposal_id=proposal.proposal_id,
+        responder_id="retailer_a",
+    )
     try:
-        accept_trade_proposal(state, proposal_id=proposal.proposal_id, buyer_id="retailer_a")
+        accept_trade_proposal(
+            state,
+            proposal_id=proposal.proposal_id,
+            responder_id="retailer_a",
+        )
     except InvalidActionError as exc:
-        assert "not pending" in str(exc)
+        assert str(exc) == "proposal_not_pending"
     else:
         raise AssertionError("expected InvalidActionError")
 

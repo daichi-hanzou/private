@@ -19,7 +19,8 @@ class InitiatingMockClient:
             lot = next(iter(observation["self"]["inventory"].values()))
             action = {
                 "action_type": "propose_trade",
-                "counterparty_id": "retailer_a",
+                "seller_id": "roaster",
+                "buyer_id": "retailer_a",
                 "lot_id": lot["lot_id"],
                 "quantity": lot["quantity"],
                 "unit_price": 10.0,
@@ -48,10 +49,10 @@ def test_roaster_initiated_sequence_can_return_lot_to_roaster(tmp_path) -> None:
         run_id="mock_llm_cycle",
         output_root=tmp_path,
     ).run()
-    assert result.metrics["circular_trade_detected"] is True
-    assert result.metrics["owner_path"] == [
+    assert result.metrics["cycle"]["detected"] is True
+    assert result.metrics["cycle"]["paths"] == [[
         "roaster",
         "retailer_a",
         "retailer_b",
         "roaster",
-    ]
+    ]]

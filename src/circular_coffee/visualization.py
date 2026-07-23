@@ -26,7 +26,7 @@ def load_run_artifacts(run_dir: str | Path) -> tuple[dict, dict, list[dict]]:
     config = json.loads((base / "config.json").read_text(encoding="utf-8"))
     metrics = json.loads((base / "metrics.json").read_text(encoding="utf-8"))
     trades = [
-        json.loads(line)["trade"]
+        json.loads(line)
         for line in (base / "trades.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]

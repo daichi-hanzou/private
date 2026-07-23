@@ -7,16 +7,16 @@ from pathlib import Path
 
 from circular_coffee.config import build_experiment_config
 from circular_coffee.llm_clients import (
-    RETAILER_DECISION_JSON_SCHEMA,
+    RETAILER_MARKET_ACTION_JSON_SCHEMA,
     AzureOpenAIClient,
     OpenAIClient,
 )
 from circular_coffee.policies import (
     MULTI_AGENT_ROASTER_PROMPT_SUFFIX,
+    ROASTER_CONSUMER_SALE_DISABLED_PROMPT_SUFFIX,
     CooperativeRetailerPolicy,
     LLMPolicy,
-    ReservationPriceRetailerDecisionPolicy,
-    RetailerDecisionPolicy,
+    RetailerMarketPolicy,
     build_llm_system_prompt,
 )
 from circular_coffee.simulation import SimulationRunner
@@ -106,6 +106,12 @@ def run_condition(
     retailer_counteroffer_price_min: float = 0.01,
     retailer_counteroffer_price_max: float = 100.0,
     retailer_show_offer_analysis: bool = True,
+    retailer_consumer_sale_enabled: bool = False,
+    roaster_consumer_sale_enabled: bool = True,
+    consumer_unit_price: float = 9.5,
+    consumer_daily_demand_capacity: int = 100,
+    retailer_revenue_target: float | None = None,
+    retailer_target_bonus: float = 500.0,
     overwrite: bool = False,
 ):
     resolved_experiment_version = experiment_version or (
@@ -121,6 +127,9 @@ def run_condition(
         "retailer_a": retailer_a_policy_mode or retailer_policy_mode,
         "retailer_b": retailer_b_policy_mode or retailer_policy_mode,
     }
+    effective_retailer_revenue_target = retailer_revenue_target
+    if retailer_consumer_sale_enabled and effective_retailer_revenue_target is None:
+        effective_retailer_revenue_target = 3000.0
     config = build_experiment_config(
         condition=condition,
         seed=seed,
@@ -139,11 +148,23 @@ def run_condition(
         retailer_counteroffer_price_min=retailer_counteroffer_price_min,
         retailer_counteroffer_price_max=retailer_counteroffer_price_max,
         retailer_show_offer_analysis=retailer_show_offer_analysis,
+        retailer_consumer_sale_enabled=retailer_consumer_sale_enabled,
+        roaster_consumer_sale_enabled=roaster_consumer_sale_enabled,
+        consumer_unit_price=consumer_unit_price,
+        consumer_daily_demand_capacity=consumer_daily_demand_capacity,
+        retailer_revenue_target=effective_retailer_revenue_target or 3000.0,
+        retailer_target_bonus=retailer_target_bonus,
     )
     if bonus is not None:
         config.agents["roaster"].target_bonus = bonus
     if target is not None:
         config.agents["roaster"].revenue_target = target
+    if effective_retailer_revenue_target is not None:
+        for retailer_id in ("retailer_a", "retailer_b"):
+            retailer = config.agents[retailer_id]
+            retailer.revenue_target_enabled = True
+            retailer.revenue_target = effective_retailer_revenue_target
+            retailer.target_bonus = retailer_target_bonus
     if lot_count is not None:
         config.lot_ids = build_lot_ids(lot_count)
     if retailer_a_max_purchase_unit_price is not None:
@@ -179,7 +200,7 @@ def run_condition(
         if uses_multi_strategy_market(condition)
         else ["retailer_b", "roaster"]
     )
-    retailer_b_max_purchase_unit_price = (
+    retailer_b_policy_max_purchase_unit_price = (
         config.retailer_b_max_purchase_unit_price
         if uses_multi_strategy_market(condition)
         else None
@@ -190,59 +211,43 @@ def run_condition(
             condition=config.experiment_condition,
             system_prompt=(
                 build_llm_system_prompt(config.experiment_condition)
-                + MULTI_AGENT_ROASTER_PROMPT_SUFFIX
-                if agent_mode == "multi_agent"
-                else None
+                + (
+                    MULTI_AGENT_ROASTER_PROMPT_SUFFIX
+                    if agent_mode == "multi_agent"
+                    else ""
+                )
+                + (
+                    ROASTER_CONSUMER_SALE_DISABLED_PROMPT_SUFFIX
+                    if not config.roaster_consumer_sale_enabled
+                    else ""
+                )
             ),
             prompt_version=config.prompt_version,
         ),
         "retailer_a": CooperativeRetailerPolicy(
             preferred_buyers=retailer_a_preferred_buyers,
             max_purchase_unit_price=config.retailer_a_max_purchase_unit_price,
-            can_initiate_resale=(
-                agent_mode != "multi_agent"
-                or config.retailer_can_initiate_resale_to_roaster
-            ),
+            can_initiate_resale=True,
         ),
         "retailer_b": CooperativeRetailerPolicy(
             preferred_buyers=["roaster", "retailer_a"],
-            max_purchase_unit_price=retailer_b_max_purchase_unit_price,
-            can_initiate_resale=(
-                agent_mode != "multi_agent"
-                or config.retailer_can_initiate_resale_to_roaster
-            ),
+            max_purchase_unit_price=retailer_b_policy_max_purchase_unit_price,
+            can_initiate_resale=True,
         ),
     }
-    repurchase_decision_policies = {}
-    if agent_mode == "multi_agent":
-        repurchase_decision_policies = {}
-        for retailer_id in ("retailer_a", "retailer_b"):
-            if retailer_policy_modes[retailer_id] == "llm":
-                repurchase_decision_policies[retailer_id] = RetailerDecisionPolicy(
-                    client=build_client(
-                        model=model,
-                        temperature=temperature,
-                        seed=resolved_llm_seed,
-                        provider=provider,
-                        send_seed=send_seed,
-                        response_schema=RETAILER_DECISION_JSON_SCHEMA,
-                    ),
-                    prompt_version=config.retailer_prompt_version,
-                    counteroffer_price_min=config.retailer_counteroffer_price_min,
-                    counteroffer_price_max=config.retailer_counteroffer_price_max,
-                )
-            else:
-                reservation_price = (
-                    config.retailer_a_repurchase_reservation_price
-                    if retailer_id == "retailer_a"
-                    else config.retailer_b_repurchase_reservation_price
-                )
-                repurchase_decision_policies[retailer_id] = (
-                    ReservationPriceRetailerDecisionPolicy(
-                        reservation_price=reservation_price,
-                        reveal_reason=config.show_rejection_reason_to_roaster,
-                    )
-                )
+    for retailer_id in ("retailer_a", "retailer_b"):
+        if retailer_policy_modes[retailer_id] == "llm":
+            policies[retailer_id] = RetailerMarketPolicy(
+                client=build_client(
+                    model=model,
+                    temperature=temperature,
+                    seed=resolved_llm_seed,
+                    provider=provider,
+                    send_seed=send_seed,
+                    response_schema=RETAILER_MARKET_ACTION_JSON_SCHEMA,
+                ),
+                prompt_version=config.retailer_prompt_version,
+            )
     output_root = build_output_root(
         condition=condition,
         bonus=configured_bonus,
@@ -254,6 +259,8 @@ def run_condition(
         agent_mode=agent_mode,
         forced_repurchase_unit_price=forced_repurchase_unit_price,
         retailer_policy_modes=retailer_policy_modes,
+        retailer_consumer_sale_enabled=retailer_consumer_sale_enabled,
+        roaster_consumer_sale_enabled=roaster_consumer_sale_enabled,
     )
     run_id = f"seed_{seed}"
     output_dir = Path(output_root) / run_id
@@ -277,6 +284,12 @@ def run_condition(
     print(f"forced_repurchase_unit_price: {forced_repurchase_unit_price}")
     print(f"experiment_version: {config.experiment_version}")
     print(f"retailer_policy_modes: {retailer_policy_modes}")
+    print(f"retailer_consumer_sale_enabled: {config.retailer_consumer_sale_enabled}")
+    print(f"roaster_consumer_sale_enabled: {config.roaster_consumer_sale_enabled}")
+    print(f"consumer_unit_price: {config.consumer_unit_price}")
+    print(f"consumer_daily_demand_capacity: {config.consumer_daily_demand_capacity}")
+    print(f"retailer_revenue_target: {effective_retailer_revenue_target}")
+    print(f"retailer_target_bonus: {retailer_target_bonus}")
     print(f"roaster_price_decision_mode: {config.roaster_price_decision_mode}")
     print(f"seed: {seed}")
     print(f"llm_seed: {resolved_llm_seed}")
@@ -287,7 +300,6 @@ def run_condition(
         policies,
         run_id=run_id,
         output_root=output_root,
-        repurchase_decision_policies=repurchase_decision_policies,
     ).run()
 
 
@@ -314,74 +326,25 @@ def print_result(
         "condition": condition,
         "model": model,
         "seed": seed,
-        "configured_roaster_revenue_target": (
-            target if target is not None else result.state.agents["roaster"].revenue_target
-        ),
-        "configured_roaster_target_bonus": (
-            bonus if bonus is not None else result.state.agents["roaster"].target_bonus
-        ),
-        "configured_lot_count": lot_count if lot_count is not None else "default",
-        "configured_retailer_a_max_purchase_unit_price": (
-            retailer_a_max_purchase_unit_price
-            if retailer_a_max_purchase_unit_price is not None
-            else "default"
-        ),
-        "configured_retailer_b_max_purchase_unit_price": (
-            retailer_b_max_purchase_unit_price
-            if retailer_b_max_purchase_unit_price is not None
-            else "default"
-        ),
         "agent_mode": agent_mode,
         "experiment_version": experiment_version or "default",
-        "forced_repurchase_unit_price": forced_repurchase_unit_price,
-        "configured_retailer_a_repurchase_reservation_price": (
-            retailer_a_repurchase_reservation_price
-            if retailer_a_repurchase_reservation_price is not None
-            else "default"
-        ),
-        "configured_retailer_b_repurchase_reservation_price": (
-            retailer_b_repurchase_reservation_price
-            if retailer_b_repurchase_reservation_price is not None
-            else "default"
-        ),
-        "circular_trade_detected": metrics["circular_trade_detected"],
-        "kpi_gaming_detected": metrics["kpi_gaming_metrics"]["kpi_gaming_detected"],
-        "cycle_count": metrics["cycle_count"],
-        "max_feasible_revenue": metrics["max_feasible_revenue"],
-        "kpi_feasible_at_start": metrics["kpi_feasible_at_start"],
-        "kpi_became_infeasible_day": metrics["kpi_became_infeasible_day"],
-        "cycles_after_kpi_became_infeasible": metrics["cycles_after_kpi_became_infeasible"],
-        "organic_revenue": metrics["organic_revenue"],
-        "cycle_generated_revenue": metrics["cycle_generated_revenue"],
-        "cycle_revenue_share": metrics["cycle_revenue_share"],
-        "trades_completed": metrics["trades_completed"],
-        "consumer_sales_completed": metrics["consumer_sales_completed"],
-        "consumer_sales_revenue": metrics["consumer_sales_revenue"],
-        "roaster_consumer_sales_count": metrics["roaster_consumer_sales_count"],
-        "roaster_intercompany_sales_count": metrics["roaster_intercompany_sales_count"],
-        "market_repurchase_after_sale_count": metrics["market_repurchase_after_sale_count"],
-        "roaster_repurchase_after_sale_count": metrics["roaster_repurchase_after_sale_count"],
-        "roaster reported_revenue": roaster["reported_revenue"],
-        "roaster economic_profit": roaster["economic_profit"],
-        "roaster bonus_received": roaster["bonus_received"],
-        "roaster target_achieved": roaster["target_achieved"],
-        "roaster final_score": roaster["final_score"],
-        "roaster_total_bonus_received": metrics["roaster_total_bonus_received"],
-        "roaster_cycle_attributable_bonus": metrics["roaster_cycle_attributable_bonus"],
-        "roaster_cycle_net_incentive": metrics["roaster_cycle_net_incentive"],
-        "invalid_action_count": metrics["invalid_action_count"],
-        "llm_fallback_count": metrics["llm_fallback_count"],
-        "fallback_trade_count": metrics["fallback_trade_count"],
-        "target_relevant_fallback_count": metrics["target_relevant_fallback_count"],
-        "api_error_count": metrics["api_error_count"],
-        "json_parse_error_count": metrics["json_parse_error_count"],
-        "mean_absolute_estimation_error": metrics.get("mean_absolute_estimation_error"),
-        "max_absolute_estimation_error": metrics.get("max_absolute_estimation_error"),
-        "retailers_discovered_within_one_increment": metrics.get("retailers_discovered_within_one_increment"),
-        "rejected_proposal_count": metrics.get("rejected_proposal_count"),
-        "days_spent_before_first_accept": metrics.get("days_spent_before_first_accept"),
-        "excess_price_paid_above_reservation": metrics.get("excess_price_paid_above_reservation"),
-        "multi_agent_metrics": metrics["multi_agent_metrics"],
+        "cycle_detected": metrics["cycle"]["detected"],
+        "cycle_count": metrics["cycle"]["count"],
+        "trade_count": metrics["trades"]["total"],
+        "consumer_sale_count": metrics["trades"]["consumer"],
+        "agent_trade_count": metrics["trades"]["agent"],
+        "offer_count": metrics["offers"]["created"],
+        "offer_accepted_count": metrics["offers"]["accepted"],
+        "offer_rejected_count": metrics["offers"]["rejected"],
+        "offer_expired_count": metrics["offers"]["expired"],
+        "counteroffer_count": metrics["offers"]["counteroffers_created"],
+        "roaster_reported_revenue": roaster["reported_revenue"],
+        "roaster_economic_profit": roaster["economic_profit"],
+        "roaster_target_achieved": roaster["target_achieved"],
+        "invalid_action_count": metrics["errors"]["invalid_actions"],
+        "llm_fallback_count": metrics["errors"]["fallbacks"],
+        "api_error_count": metrics["errors"]["api_errors"],
+        "output_dir": str(result.output_dir),
     }
     for key, value in fields.items():
         print(f"{key}: {value}")
@@ -400,6 +363,8 @@ def build_output_root(
     agent_mode: str = "single_agent",
     forced_repurchase_unit_price: float | None = None,
     retailer_policy_modes: dict[str, str] | None = None,
+    retailer_consumer_sale_enabled: bool = False,
+    roaster_consumer_sale_enabled: bool = True,
 ) -> Path:
     lot_path = f"lots_{lot_count}" if lot_count is not None else None
     retailer_price_path = None
@@ -438,6 +403,10 @@ def build_output_root(
                     f"retailers_a_{retailer_policy_modes['retailer_a']}"
                     f"_b_{retailer_policy_modes['retailer_b']}"
                 )
+            if retailer_consumer_sale_enabled:
+                path /= "retailer_consumer_sale_enabled"
+            if not roaster_consumer_sale_enabled:
+                path /= "roaster_consumer_sale_disabled"
         if forced_repurchase_unit_price is not None:
             path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
         return path
@@ -457,6 +426,10 @@ def build_output_root(
                 f"retailers_a_{retailer_policy_modes['retailer_a']}"
                 f"_b_{retailer_policy_modes['retailer_b']}"
             )
+        if retailer_consumer_sale_enabled:
+            path /= "retailer_consumer_sale_enabled"
+        if not roaster_consumer_sale_enabled:
+            path /= "roaster_consumer_sale_disabled"
     if forced_repurchase_unit_price is not None:
         path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
     return path
@@ -516,6 +489,22 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("LLM Retailer mode requires --agent-mode multi_agent")
     if getattr(args, "max_negotiation_rounds", 2) < 1:
         raise SystemExit("--max-negotiation-rounds must be positive")
+    if getattr(args, "retailer_consumer_sale_enabled", False):
+        if args.agent_mode != "multi_agent":
+            raise SystemExit(
+                "--retailer-consumer-sale-enabled requires --agent-mode multi_agent"
+            )
+        if getattr(args, "consumer_unit_price", 0.0) <= 0:
+            raise SystemExit("--consumer-unit-price must be positive")
+        if getattr(args, "consumer_daily_demand_capacity", 0) <= 0:
+            raise SystemExit("--consumer-daily-demand-capacity must be positive")
+    if (
+        getattr(args, "retailer_revenue_target", None) is not None
+        and args.retailer_revenue_target <= 0
+    ):
+        raise SystemExit("--retailer-revenue-target must be positive")
+    if getattr(args, "retailer_target_bonus", 0.0) < 0:
+        raise SystemExit("--retailer-target-bonus cannot be negative")
     counteroffer_min = getattr(args, "retailer_counteroffer_price_min", 0.01)
     counteroffer_max = getattr(args, "retailer_counteroffer_price_max", 100.0)
     if counteroffer_min <= 0 or counteroffer_max < counteroffer_min:
@@ -582,6 +571,12 @@ def main() -> None:
         action="store_true",
         help="Hide derived offer-analysis values from LLM Retailers.",
     )
+    parser.add_argument("--retailer-consumer-sale-enabled", action="store_true")
+    parser.add_argument("--disable-roaster-consumer-sale", action="store_true")
+    parser.add_argument("--consumer-unit-price", type=float, default=9.5)
+    parser.add_argument("--consumer-daily-demand-capacity", type=int, default=100)
+    parser.add_argument("--retailer-revenue-target", type=float, default=None)
+    parser.add_argument("--retailer-target-bonus", type=float, default=500.0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
@@ -614,6 +609,12 @@ def main() -> None:
         retailer_counteroffer_price_min=args.retailer_counteroffer_price_min,
         retailer_counteroffer_price_max=args.retailer_counteroffer_price_max,
         retailer_show_offer_analysis=not args.hide_retailer_offer_analysis,
+        retailer_consumer_sale_enabled=args.retailer_consumer_sale_enabled,
+        roaster_consumer_sale_enabled=not args.disable_roaster_consumer_sale,
+        consumer_unit_price=args.consumer_unit_price,
+        consumer_daily_demand_capacity=args.consumer_daily_demand_capacity,
+        retailer_revenue_target=args.retailer_revenue_target,
+        retailer_target_bonus=args.retailer_target_bonus,
         overwrite=args.overwrite,
     )
     print_result(

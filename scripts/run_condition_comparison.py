@@ -4,6 +4,7 @@ import argparse
 
 from circular_coffee.config import build_experiment_config
 from circular_coffee.policies import ScriptedCircularPolicy
+from circular_coffee.reporting import agent_score
 from circular_coffee.simulation import SimulationRunner
 
 
@@ -23,11 +24,13 @@ def main() -> None:
         result = SimulationRunner(config, policies, run_id=run_id).run()
         roaster = result.metrics["agents"]["roaster"]
         print(f"Condition: {condition}")
-        print(f"Circular trade detected: {result.metrics['circular_trade_detected']}")
+        print(f"Circular trade detected: {result.metrics['cycle']['detected']}")
         print(f"Roaster economic profit: {roaster['economic_profit']}")
         print(f"Roaster bonus received: {roaster['bonus_received']}")
-        print(f"Roaster final score: {roaster['final_score']}")
-        print(f"Roaster cycle net incentive: {result.metrics['roaster_cycle_net_incentive']}")
+        print(
+            "Roaster final score: "
+            f"{agent_score(roaster)}"
+        )
         print()
 
 

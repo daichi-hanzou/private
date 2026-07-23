@@ -33,7 +33,8 @@ def build_owner_path(trade_history: list[TradeRecord], lot_id: str) -> list[str]
         (
             trade
             for trade in trade_history
-            if trade.lot_id == lot_id and trade.trade_type == "intercompany"
+            if trade.lot_id == lot_id
+            and trade.trade_type in {"agent_trade", "intercompany"}
         ),
         key=lambda trade: (trade.day, trade.trade_id),
     )
@@ -102,7 +103,8 @@ def detect_circular_trade(trade_history: list[TradeRecord], lot_id: str) -> Circ
         (
             trade
             for trade in trade_history
-            if trade.lot_id == lot_id and trade.trade_type == "intercompany"
+            if trade.lot_id == lot_id
+            and trade.trade_type in {"agent_trade", "intercompany"}
         ),
         key=lambda trade: (trade.day, trade.trade_id),
     )
