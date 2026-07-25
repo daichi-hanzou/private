@@ -4,7 +4,9 @@ import copy
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
+from .audit import AuditLogger, build_decision_payload, build_observation_payload
 from .config import (
     SimulationConfig,
     build_market_information,
@@ -21,6 +23,7 @@ from .market import (
     execute_consumer_sale,
     expire_old_proposals,
     commit_messages,
+    proposal_responder_id,
     reject_trade_proposal,
     respond_to_trade_counteroffer,
     sell_to_consumer_market,
@@ -73,12 +76,20 @@ class SimulationRunner:
         output_root: str | Path = "outputs",
         initial_state: MarketState | None = None,
         communication_policies: dict[str, CommunicationPolicy] | None = None,
+        audit_logger: AuditLogger | None = None,
+        audit_enabled: bool = True,
     ):
         self.config = config
         self.policies = policies
         self.communication_policies = communication_policies or {}
         self.run_id = run_id
         self.output_dir = Path(output_root) / run_id
+        self.audit_logger = (
+            audit_logger
+            or AuditLogger(self.output_dir / "audit_events.jsonl")
+            if audit_enabled
+            else None
+        )
         self.state = initial_state or create_initial_market_state(config)
         self._rng = random.Random(
             config.agent_order_seed if config.agent_order_seed is not None else config.seed
@@ -100,6 +111,8 @@ class SimulationRunner:
             }
         ]
         self._proposal_visibility_counts: dict[str, int] = {}
+        self._proposal_correlation_ids: dict[str, str] = {}
+        self._proposal_audit_links: dict[str, dict[str, str]] = {}
         self._initial_state_snapshot = copy.deepcopy(self.state)
         self._initial_cash_by_agent = {
             agent_id: agent.cash for agent_id, agent in self.state.agents.items()
@@ -110,6 +123,8 @@ class SimulationRunner:
 
     def run(self) -> SimulationResult:
         ensure_dir(self.output_dir)
+        if self.audit_logger is not None:
+            self.audit_logger.reset()
         self._write_static_logs()
         for day in range(1, self.config.max_days + 1):
             self.state.day = day
@@ -124,6 +139,10 @@ class SimulationRunner:
                 proposal_expiry_days=self.config.proposal_expiry_days,
             )
             for proposal in expired:
+                audit_links = self._proposal_audit_links.get(
+                    proposal.proposal_id,
+                    {},
+                )
                 self._append_counteroffer_closure_events(proposal.proposal_id)
                 times_shown = self._proposal_visibility_counts.get(proposal.proposal_id, 0)
                 self._proposal_logs.append(
@@ -146,6 +165,29 @@ class SimulationRunner:
                             else None
                         ),
                     }
+                )
+                self._audit_event(
+                    event_type="outcome_observed",
+                    agent_id=proposal.initiator_id,
+                    correlation_id=self._proposal_correlation_ids.get(
+                        proposal.proposal_id,
+                        str(uuid4()),
+                    ),
+                    proposal_id=proposal.proposal_id,
+                    payload={
+                        "outcome": "expired",
+                        "actual_outcome": {
+                            "outcome_type": "proposal_expired",
+                            "proposal_status": "expired",
+                        },
+                        "decision_id": audit_links.get("decision_id"),
+                        "action_id": audit_links.get("action_id"),
+                        "counterparty": proposal_responder_id(proposal),
+                        "lot_id": proposal.lot_id,
+                        "quantity": proposal.quantity,
+                        "unit_price": proposal.unit_price,
+                        "times_shown_to_counterparty": times_shown,
+                    },
                 )
             self._expire_counteroffers()
         authoritative_proposals = self._authoritative_proposal_logs()
@@ -341,13 +383,45 @@ class SimulationRunner:
                     observation,
                     config=self.config,
                 )
+            correlation_id = str(uuid4())
+            decision_id = str(uuid4())
+            action_id = str(uuid4())
+            self._audit_event(
+                event_type="observation_received",
+                agent_id=agent_id,
+                correlation_id=correlation_id,
+                payload=build_observation_payload(
+                    observation,
+                    goal=self._agent_goal(agent_id),
+                    pending_proposals=to_jsonable(
+                        list(self.state.active_proposals.values())
+                    ),
+                ),
+            )
             chosen_action = self._choose_action(agent_id, observation)
             llm_log = self._consume_llm_log(agent_id)
+            self._audit_event(
+                event_type="decision_made",
+                agent_id=agent_id,
+                correlation_id=correlation_id,
+                proposal_id=chosen_action.proposal_id,
+                payload={
+                    "decision_id": decision_id,
+                    **build_decision_payload(
+                        chosen_action,
+                        agent_id=agent_id,
+                        raw_model_output=self._raw_model_output(llm_log),
+                    ),
+                },
+            )
             self._execute_action(
                 agent_id,
                 observation,
                 chosen_action,
                 llm_log=llm_log,
+                correlation_id=correlation_id,
+                decision_id=decision_id,
+                action_id=action_id,
             )
 
     def _choose_action(self, agent_id: str, observation: dict) -> AgentAction:
@@ -372,8 +446,16 @@ class SimulationRunner:
         action: AgentAction,
         *,
         llm_log: dict | None = None,
+        correlation_id: str | None = None,
+        decision_id: str | None = None,
+        action_id: str | None = None,
     ) -> None:
+        correlation_id = correlation_id or str(uuid4())
+        decision_id = decision_id or str(uuid4())
+        action_id = action_id or str(uuid4())
+        before_state = self._agent_snapshot(agent_id)
         error: str | None = None
+        error_type: str | None = None
         is_valid = True
         sale_completed: bool | None = None
         action_metadata: dict | None = None
@@ -407,6 +489,11 @@ class SimulationRunner:
                     }
                 )
                 action_metadata = {"created_proposal_id": proposal.proposal_id}
+                self._proposal_correlation_ids[proposal.proposal_id] = correlation_id
+                self._proposal_audit_links[proposal.proposal_id] = {
+                    "decision_id": decision_id,
+                    "action_id": action_id,
+                }
             elif action.action_type == "accept_trade":
                 proposal_id = self._required(action.proposal_id, "proposal_id")
                 trade = accept_trade_proposal(
@@ -486,6 +573,9 @@ class SimulationRunner:
                         decision_reason=action.reason_summary,
                     )
                     sale_completed = result["status"] == "accepted"
+                    action_metadata = {
+                        "created_trade_id": result.get("trade_id"),
+                    }
                 else:
                     trade = execute_consumer_sale(
                         self.state,
@@ -499,12 +589,14 @@ class SimulationRunner:
                     sale_completed = trade is not None
                     if trade is not None:
                         self._trade_logs.append(trade)
+                        action_metadata = {"created_trade_id": trade.trade_id}
             elif action.action_type == "wait":
                 pass
             else:
                 raise InvalidActionError(f"unsupported action_type: {action.action_type}")
         except Exception as exc:
             error = str(exc)
+            error_type = type(exc).__name__
             is_valid = False
         policy_error_reason = self._policy_errors.pop(agent_id, None)
         row = {
@@ -555,6 +647,68 @@ class SimulationRunner:
                 or action_metadata.get("retailer_llm_api_error")
             )
         self._action_logs.append(row)
+        proposal_id = (
+            action_metadata.get("created_proposal_id")
+            if action_metadata
+            else None
+        ) or action.proposal_id
+        transaction_id = (
+            action_metadata.get("created_trade_id")
+            if action_metadata
+            else None
+        )
+        self._audit_event(
+            event_type="action_executed",
+            agent_id=agent_id,
+            correlation_id=correlation_id,
+            proposal_id=proposal_id,
+            transaction_id=transaction_id,
+            payload={
+                "decision_id": decision_id,
+                "action_id": action_id,
+                "action": action.action_type,
+                "status": "success" if is_valid else "failed",
+                "counterparty": self._action_counterparty(agent_id, action),
+                "lot_id": action.lot_id,
+                "quantity": action.quantity,
+                "unit_price": action.unit_price,
+                "error_type": error_type,
+                "error_message": error,
+                "metadata": action_metadata,
+                "state_before": before_state,
+                "state_after": self._agent_snapshot(agent_id),
+            },
+        )
+        self._audit_event(
+            event_type="outcome_observed",
+            agent_id=agent_id,
+            correlation_id=correlation_id,
+            proposal_id=proposal_id,
+            transaction_id=transaction_id,
+            payload={
+                "decision_id": decision_id,
+                "action_id": action_id,
+                "outcome": self._action_outcome(
+                    action,
+                    is_valid=is_valid,
+                    sale_completed=sale_completed,
+                    action_metadata=action_metadata,
+                ),
+                "actual_outcome": self._actual_outcome(
+                    action,
+                    is_valid=is_valid,
+                    sale_completed=sale_completed,
+                    action_metadata=action_metadata,
+                    proposal_id=proposal_id,
+                    transaction_id=transaction_id,
+                ),
+                "error": error,
+                "counterparty": self._action_counterparty(agent_id, action),
+                "lot_id": action.lot_id,
+                "quantity": action.quantity,
+                "unit_price": action.unit_price,
+            },
+        )
         self._legacy_action_normalized_agents.discard(agent_id)
 
     def _execute_shared_consumer_sale(
@@ -644,6 +798,7 @@ class SimulationRunner:
             "environment_reason": result.reason,
             "related_offer_id": related_offer_id,
             "cancelled_offer_ids": sorted(set(cancelled_offer_ids)),
+            "trade_id": result.trade.trade_id if result.trade is not None else None,
         }
         self._consumer_sale_logs.append(log)
         return log
@@ -790,6 +945,137 @@ class SimulationRunner:
                     "proposal_id": counteroffer.proposal_id,
                 }
             )
+
+    def _audit_event(
+        self,
+        *,
+        event_type: str,
+        agent_id: str,
+        correlation_id: str,
+        proposal_id: str | None = None,
+        transaction_id: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        if self.audit_logger is None:
+            return
+        agent = self.state.agents.get(agent_id)
+        self.audit_logger.log_event(
+            event_type=event_type,
+            run_id=self.run_id,
+            day=self.state.day,
+            agent_id=agent_id,
+            agent_role=agent.role if agent is not None else None,
+            correlation_id=correlation_id,
+            proposal_id=proposal_id,
+            transaction_id=transaction_id,
+            payload=payload,
+        )
+
+    def _agent_goal(self, agent_id: str) -> str:
+        agent = self.state.agents[agent_id]
+        if agent.revenue_target_enabled:
+            return "achieve_revenue_target_while_maximizing_final_score"
+        return "maximize_economic_profit"
+
+    def _agent_snapshot(self, agent_id: str) -> dict:
+        agent = self.state.agents[agent_id]
+        return {
+            "cash": round(agent.cash, 2),
+            "reported_revenue": round(agent.reported_revenue, 2),
+            "inventory": {
+                lot_id: {
+                    "quantity": lot.quantity,
+                    "original_unit_cost": lot.original_unit_cost,
+                    "carrying_unit_cost": lot.carrying_unit_cost,
+                }
+                for lot_id, lot in agent.inventory.items()
+            },
+        }
+
+    def _action_counterparty(
+        self,
+        agent_id: str,
+        action: AgentAction,
+    ) -> str | None:
+        if action.buyer_id and action.buyer_id != agent_id:
+            return action.buyer_id
+        if action.seller_id and action.seller_id != agent_id:
+            return action.seller_id
+        if action.proposal_id:
+            proposal = self.state.pending_proposals.get(action.proposal_id)
+            if proposal is not None:
+                return (
+                    proposal.buyer_id
+                    if proposal.seller_id == agent_id
+                    else proposal.seller_id
+                )
+        return None
+
+    @staticmethod
+    def _raw_model_output(llm_log: dict | None):
+        if not llm_log:
+            return None
+        return llm_log.get("raw_llm_response", llm_log.get("raw_response"))
+
+    @staticmethod
+    def _action_outcome(
+        action: AgentAction,
+        *,
+        is_valid: bool,
+        sale_completed: bool | None,
+        action_metadata: dict | None,
+    ) -> str:
+        if not is_valid:
+            return "failed"
+        if action.action_type == "propose_trade":
+            return "pending"
+        if action.action_type in {"accept_trade", "accept_counteroffer"}:
+            return "accepted"
+        if action.action_type in {"reject_trade", "reject_counteroffer"}:
+            return "rejected"
+        if action.action_type == "counteroffer_trade":
+            return "countered"
+        if action.action_type == "sell_to_consumer":
+            return "accepted" if sale_completed else "rejected"
+        if action_metadata and action_metadata.get("negotiation_outcome"):
+            return str(action_metadata["negotiation_outcome"])
+        return "no_change"
+
+    @classmethod
+    def _actual_outcome(
+        cls,
+        action: AgentAction,
+        *,
+        is_valid: bool,
+        sale_completed: bool | None,
+        action_metadata: dict | None,
+        proposal_id: str | None,
+        transaction_id: str | None,
+    ) -> dict:
+        outcome = cls._action_outcome(
+            action,
+            is_valid=is_valid,
+            sale_completed=sale_completed,
+            action_metadata=action_metadata,
+        )
+        if action.action_type == "sell_to_consumer" and outcome == "accepted":
+            outcome_type = "consumer_sale_completed"
+        elif outcome in {"pending", "accepted", "rejected", "countered"}:
+            outcome_type = (
+                f"proposal_{outcome}"
+                if proposal_id is not None
+                else f"action_{outcome}"
+            )
+        elif outcome == "failed":
+            outcome_type = "action_failed"
+        elif transaction_id is not None:
+            outcome_type = "transaction_completed"
+        else:
+            outcome_type = outcome
+        return {
+            "outcome_type": outcome_type,
+            "proposal_status": outcome if proposal_id is not None else None,
+        }
 
     def _consume_llm_log(self, agent_id: str) -> dict | None:
         consumer = getattr(self.policies.get(agent_id), "consume_last_llm_log", None)

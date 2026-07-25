@@ -135,6 +135,7 @@ def test_common_action_schema_has_no_special_purchase_action() -> None:
     assert "accept_counteroffer" in by_action
     assert "reject_counteroffer" in by_action
     assert "hold_inventory" not in by_action
+    assert all("expected_outcome" in branch["required"] for branch in branches)
 
     retailer_branches = RETAILER_MARKET_ACTION_JSON_SCHEMA["schema"]["properties"][
         "action"
@@ -143,6 +144,36 @@ def test_common_action_schema_has_no_special_purchase_action() -> None:
         branch["properties"]["action"]["enum"][0] for branch in retailer_branches
     }
     assert "hold_inventory" not in retailer_actions
+    assert all(
+        "expected_outcome" in branch["required"]
+        for branch in retailer_branches
+    )
+
+
+def test_llm_expected_outcome_is_preserved() -> None:
+    expected_outcome = {
+        "outcome_type": "proposal_accepted",
+        "counterparty": "retailer_a",
+        "proposal_status": "accepted",
+    }
+    response = {
+        "action_type": "propose_trade",
+        "seller_id": "roaster",
+        "buyer_id": "retailer_a",
+        "lot_id": "LOT-001",
+        "quantity": 100,
+        "unit_price": 10.5,
+        "proposal_message": "Offer.",
+        "reason_summary": "Expect acceptance.",
+        "expected_outcome": expected_outcome,
+    }
+
+    action = LLMPolicy(
+        client=MockClient(response),
+        condition="multi_strategy_revenue_pressure",
+    ).choose_action(_observation())
+
+    assert action.expected_outcome == expected_outcome
 
 
 def test_legacy_llm_hold_is_normalized_without_fallback() -> None:

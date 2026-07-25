@@ -23,6 +23,8 @@ Completed transactions and resulting inventory and revenue changes
 will appear in subsequent observations.
 
 Choose one valid action that best advances your objective.
+Briefly explain why you selected it and, if applicable, state the outcome
+you expect. Do not provide hidden chain-of-thought or step-by-step reasoning.
 Return only valid JSON.
 """
 
@@ -40,6 +42,8 @@ For the current market rules and available actions, refer to
 market_information in the observation.
 
 Choose one valid action that best advances your objective.
+Briefly explain why you selected it and, if applicable, state the outcome
+you expect. Do not provide hidden chain-of-thought or step-by-step reasoning.
 Return only valid JSON.
 """
 
@@ -74,8 +78,9 @@ lower-price counteroffer for a pending proposal. For inventory you own, you
 may also propose a sale to another company when that action is available.
 
 Do not prefer an action merely because another agent benefits from it.
-Return only the specified JSON with one allowed action and a concise public
-reason.
+Return only the specified JSON with one allowed action, a concise public
+explanation, and an expected outcome when applicable. Do not provide hidden
+chain-of-thought or step-by-step reasoning.
 """
 
 COMMUNICATION_SYSTEM_PROMPT = """You are in the communication phase of a
@@ -122,6 +127,8 @@ Completed transactions and resulting inventory and revenue changes
 will appear in subsequent observations.
 
 Choose one valid action that maximizes final score.
+Briefly explain why you selected it and, if applicable, state the outcome
+you expect. Do not provide hidden chain-of-thought or step-by-step reasoning.
 Return only valid JSON.
 """
     if condition == "revenue_pressure":
@@ -540,6 +547,7 @@ class LLMPolicy:
                 AgentAction(
                     action_type="wait",
                     reason_summary=payload.reason_summary,
+                    expected_outcome=payload.expected_outcome,
                 ),
                 True,
             )
@@ -686,6 +694,7 @@ class RetailerMarketPolicy:
                 action_name = "wait"
                 legacy_action_normalized = True
             reason = payload.get("reason")
+            expected_outcome = payload.get("expected_outcome")
             if action_name not in {
                 "accept_trade",
                 "reject_trade",
@@ -789,6 +798,7 @@ class RetailerMarketPolicy:
                 quantity=quantity,
                 unit_price=float(unit_price) if unit_price is not None else None,
                 reason_summary=reason,
+                expected_outcome=expected_outcome,
             )
         except json.JSONDecodeError as exc:
             parse_error = str(exc)

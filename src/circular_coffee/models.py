@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass
@@ -82,6 +82,7 @@ class AgentAction:
     unit_price: float | None = None
     proposal_message: str | None = None
     reason_summary: str | None = None
+    expected_outcome: dict[str, Any] | None = None
 
 
 @dataclass

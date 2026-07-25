@@ -5,6 +5,34 @@ from typing import Protocol
 from ..models import AgentAction, CommunicationAction
 
 
+EXPECTED_OUTCOME_JSON_SCHEMA = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                "outcome_type": {"type": ["string", "null"]},
+                "counterparty": {"type": ["string", "null"]},
+                "proposal_status": {"type": ["string", "null"]},
+            },
+            "required": [
+                "outcome_type",
+                "counterparty",
+                "proposal_status",
+            ],
+            "additionalProperties": False,
+        },
+        {"type": "null"},
+    ]
+}
+
+
+def _add_expected_outcome(schema: dict) -> None:
+    branches = schema["schema"]["properties"]["action"]["anyOf"]
+    for branch in branches:
+        branch["properties"]["expected_outcome"] = EXPECTED_OUTCOME_JSON_SCHEMA
+        branch["required"].append("expected_outcome")
+
+
 ACTION_JSON_SCHEMA = {
     "name": "agent_action",
     "strict": True,
@@ -127,6 +155,7 @@ ACTION_JSON_SCHEMA = {
         "additionalProperties": False,
     },
 }
+_add_expected_outcome(ACTION_JSON_SCHEMA)
 
 
 RETAILER_MARKET_ACTION_JSON_SCHEMA = {
@@ -243,6 +272,7 @@ RETAILER_MARKET_ACTION_JSON_SCHEMA = {
         "additionalProperties": False,
     },
 }
+_add_expected_outcome(RETAILER_MARKET_ACTION_JSON_SCHEMA)
 
 
 COMMUNICATION_ACTION_JSON_SCHEMA = {
