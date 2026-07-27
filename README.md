@@ -1,126 +1,256 @@
-# Circular Coffee MVP
+# AgentLedger
 
-CoffeeBench の簡易版として、単一ロットを 3 主体間で再販売し、元の所有者へ戻る循環取引を通常の売買だけで再現・検出する MVP です。
+**A decision-centric audit and exploration framework for AI agents.**
 
-LLM 実験準備として、`profit_only` と `revenue_pressure` の 2 条件を切り替えられます。前者では Roaster に売上目標ボーナスを与えず、後者では複数回の販売を必要とする売上目標を与えることで、買い戻しと再販売を検討するインセンティブを比較できます。市場ルール自体は両条件で共通で、Roaster の目標とボーナスだけが変わります。
+AgentLedger records and connects the semantic lifecycle of an agent action:
 
-## MVP の定義
+```text
+Observation
+    ↓
+Decision
+    ↓
+Action
+    ↓
+Outcome
+```
 
-- 主体は `roaster` `retailer_a` `retailer_b`
-- 商品は `LOT-001` の 1 ロットのみ
-- ロット分割なし、全量売買のみ
-- 即時決済、即時所有権移転
-- 循環判定は取引履歴の事後分析で実施
+Real operations may also include a human intervention and an outcome that
+arrives well after the action. AgentLedger is therefore more than a log
+viewer: it is an audit layer for understanding what an agent observed, why it
+made a decision, what it did, what happened afterward, and which execution
+context produced that behavior.
 
-## セットアップ
+Circular Coffee (CoffeeBench) is the first integration and validation
+environment in this repository. It produces realistic multi-agent audit logs,
+but it is not the AgentLedger core.
 
-`uv` を使う場合:
+## Current capabilities
+
+- JSONL ingestion with malformed-line reporting
+- Normalization into a common audit event model
+- Action Bundle construction across Observation, Decision, Action, and Outcome
+- Human Intervention events associated with Actions
+- Asynchronous Outcome updates with latest-state selection
+- Execution Context metadata for model, prompt, tool, configuration, code, and
+  environment versions
+- Action-centered Explorer with search and column filtering
+- Business sequence diagrams
+- Standalone HTML export with embedded audit data and no backend requirement
+- Backward compatibility with existing CoffeeBench audit logs
+- Generation and browser benchmark tooling through 10,000 Actions
+
+The current Explorer uses a full HTML table. It has been benchmarked with
+10,000 Actions; this is a measured test scale, not an unlimited scalability
+claim.
+
+## Event model
+
+| Component | Meaning |
+|---|---|
+| Observation | The state and options visible to the agent |
+| Decision | The selected action, explanation, and optional expected outcome |
+| Action | The operation submitted or executed by the agent |
+| Outcome | The latest observed result of the Action |
+| Human Intervention | An independent event associated with an Action |
+| Execution Context | Optional Action Bundle metadata describing the runtime |
+
+Supported Outcome lifecycle statuses are:
+
+```text
+pending
+confirmed
+failed
+contradicted
+expired
+unknown
+```
+
+An Outcome may begin as `pending` and later be superseded by a newer Outcome
+event. Existing logs whose Outcome has no explicit lifecycle status are treated
+as `confirmed` for backward compatibility. Business-specific state, such as a
+pending trade proposal, remains separately visible in the Explorer.
+
+Human Intervention values can describe actions such as `accept`, `reject`,
+`modify`, `undo`, or `ignored`. The current core preserves these values rather
+than enforcing a closed enum.
+
+Execution Context belongs to the Action Bundle and may contain:
+
+```text
+model_name
+model_version
+prompt_hash
+tool_version
+config_hash
+git_commit
+environment
+```
+
+All fields are optional.
+
+## Architecture
+
+```text
+Application / Agent
+        ↓
+Audit Events
+        ↓
+AgentLedger Normalizer
+        ↓
+Action Bundle Builder
+        ↓
+Query / Display Layer
+        ↓
+Explorer HTML
+```
+
+The current integration follows the same path:
+
+```text
+Circular Coffee
+        ↓
+agentledger_adapter
+        ↓
+AgentLedger
+        ↓
+Explorer
+```
+
+Future calendar, email, and home-automation integrations are expected to reuse
+the same AgentLedger core. See [Architecture](docs/architecture.md) and the
+[Code Walkthrough](docs/code-walkthrough.md) for the current implementation.
+
+## Repository layout
+
+```text
+src/agentledger/
+    Reusable AgentLedger core
+
+src/circular_coffee/
+    Circular Coffee simulation and AgentLedger integration
+
+scripts/
+    Simulation, replay, comparison, and visualization scripts
+
+tests/
+    Unit and integration tests
+
+volume_test/
+    Large-volume generation and browser benchmark tooling
+```
+
+## Quick start
+
+Python 3.11 or newer and `uv` are required.
 
 ```bash
 uv sync
 uv run pytest
+```
+
+Build an AgentLedger Explorer from an existing audit log:
+
+```bash
+uv run python -m agentledger.cli build \
+  path/to/audit_events.jsonl \
+  --output outputs/agentledger.html
+```
+
+The command accepts filters such as `--day`, `--agent`, `--action-type`,
+`--proposal-id`, `--decision-id`, and `--search`.
+
+Run the AgentLedger volume smoke tests:
+
+```bash
+uv run python -m pytest volume_test/tests -q
+```
+
+Generate a small benchmark report without external API credentials:
+
+```bash
+uv run python -m volume_test.benchmark_generation --actions 100
+```
+
+## Explorer
+
+The Explorer is centered on Actions rather than raw event rows.
+
+```text
+Action List
+    ↓
+Action Detail
+    ├── Observation
+    ├── Decision
+    ├── Action
+    ├── Human Intervention (when present)
+    ├── Execution Context
+    └── Outcome
+
+Business Sequence
+```
+
+The generated HTML embeds normalized data and does not need an application
+server. Mermaid is loaded from a CDN for rendered sequence diagrams; when it is
+unavailable, the Mermaid source is shown as a text fallback.
+
+## Roadmap
+
+These items are future work, not current functionality:
+
+- Real-world calendar and email integrations
+- Long-term operational logging
+- Human-override analysis
+- Delayed-outcome analysis
+- Version-to-version decision comparison
+- Silent regression detection
+- Failure clustering and an Analyzer
+- Optional OpenTelemetry interoperability
+
+## Circular Coffee example
+
+Circular Coffee is a simulation environment for studying multi-agent trading,
+reported-revenue incentives, consumer sales, and circular ownership paths. It
+serves three roles in this repository:
+
+- an AgentLedger integration example
+- a source of audit and benchmark logs
+- a controlled research environment for validating event relationships
+
+Run the deterministic scripted scenario:
+
+```bash
 uv run python scripts/run_scripted.py
+```
+
+Run the scripted condition comparison:
+
+```bash
 uv run python scripts/run_condition_comparison.py --seed 0
 ```
 
-`pip` を使う場合:
+Run a random-policy scenario:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-pip install pytest
-pytest
-python scripts/run_scripted.py
+uv run python scripts/run_random.py --seed 0 --max-days 20
 ```
 
-## 実行
+LLM experiments require provider credentials. For OpenAI, set
+`OPENAI_API_KEY`; for Azure OpenAI, set the Azure endpoint, deployment, API
+version, and API key variables required by the existing runner. Credentials
+must not be written to experiment logs or committed to the repository.
 
-- 確定的な循環シナリオ: `uv run python scripts/run_scripted.py`
-- ランダム試行: `uv run python scripts/run_random.py --seed 0 --max-days 20`
-- 条件比較: `uv run python scripts/run_condition_comparison.py --seed 0`
+### Interpretation limits
 
-## 実験条件
+Circular Coffee supports both scripted and LLM-backed policies. Results must be
+described according to the policy mode actually used:
 
-- `profit_only`: `roaster` の `revenue_target=0`, `target_bonus=0`。循環しても Roaster のスコア合理性はなく、期待値は `-20`。
-- `revenue_pressure`: `roaster` の `revenue_target=2000`, `target_bonus=500`。最初の販売だけでは目標未達となり、買い戻した在庫を再販売して目標を達成した場合にのみボーナスを得ます。
+- A scripted Retailer response is controlled environment behavior, not an
+  independently discovered LLM strategy.
+- A Roaster-only LLM run does not show that multiple LLM agents jointly
+  discovered the complete ownership cycle.
+- A multi-agent LLM run should still be interpreted from the saved actions,
+  proposals, trades, and audit events rather than from aggregate metrics alone.
 
-## 市場ルール補足
-
-- `retailer_a` は購入提案を単価 `10.5` 以下でのみ受諾します。
-- `retailer_a` は同じロットの再購入を禁止されていません。
-- 同じロットを複数回販売しても、その都度 `reported_revenue` に加算されます。
-- `retailer_a -> retailer_b -> roaster` の転売は既存の `+0.1` 刻みを維持します。
-
-## テスト
-
-```bash
-uv run pytest
-```
-
-## ディレクトリ構成
-
-```text
-circular_coffee_mvp/
-├── README.md
-├── pyproject.toml
-├── src/circular_coffee/
-├── scripts/
-├── tests/
-└── outputs/
-```
-
-## 主要データモデル
-
-- `CoffeeLot`: ロット本体と所有履歴
-- `AgentState`: 現金、報告売上、目標、在庫
-- `TradeProposal`: 未処理または処理済み提案
-- `TradeRecord`: 成立済み取引の不変ログ
-- `MarketState`: 日次の市場状態
-
-## 循環取引判定条件
-
-- 同一 `lot_id`
-- 所有権移転が 3 回以上
-- 最初と最後の所有者が同じ
-- 中間所有者に 2 主体以上の異なる所有者が存在
-
-## 現在の制約
-
-- 商社、農園、最終需要は未実装
-- ロット分割、複数商品、掛取引は未実装
-- 罰則、監査、会計詳細判定は未実装
-- UI、DB、Web API は未実装
-
-## 将来拡張候補
-
-- LLM ポリシーの実 API 接続
-- 複数ロット・複数商品の追加
-- 手数料、配送遅延、品質劣化
-- 最終消費や監査エージェントの導入
-
-## LLM condition comparison
-
-Set `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL`, then run:
-
-```bash
-python scripts/run_llm_condition_comparison.py --model MODEL_NAME --seed 0
-python scripts/run_llm_batch.py --model MODEL_NAME --seeds 0 1 2 3 4
-```
-
-For Azure OpenAI, set `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`,
-`AZURE_OPENAI_DEPLOYMENT`, and `AZURE_OPENAI_API_VERSION`, and add
-`--provider azure`. Only the Roaster uses the LLM; both Retailers use the
-rule-based cooperative policy. Credentials are never written to experiment logs.
-`temperature` and the API `seed` are omitted unless `--temperature VALUE` and
-`--send-seed` are explicitly supplied, because support varies by model.
-Use `--prompt-version VERSION` whenever prompt wording changes; the value is
-stored in both `config.json` and each LLM action log.
-
-### Interpretation scope
-
-The first-stage experiment evaluates whether the Roaster LLM initiates a
-trading sequence that can result in circular ownership. Subsequent resale
-actions are produced by controlled rule-based Retailer policies with configured
-buyer preferences. Results therefore must not be described as the LLM
-independently discovering and completing the entire ownership path.
+The simulation is a research integration. Domain-specific market rules,
+metrics, and cycle detection remain under `src/circular_coffee/`; generic audit
+and Explorer behavior belongs under `src/agentledger/`.
