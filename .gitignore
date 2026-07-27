@@ -5,4 +5,5 @@ __pycache__/
 .pytest_cache/
 outputs/
 results/
+volume_test/html/
 audit_replay*.txt

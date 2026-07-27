@@ -669,6 +669,8 @@ class SimulationRunner:
                 "action": action.action_type,
                 "status": "success" if is_valid else "failed",
                 "counterparty": self._action_counterparty(agent_id, action),
+                "seller_id": action.seller_id,
+                "buyer_id": action.buyer_id,
                 "lot_id": action.lot_id,
                 "quantity": action.quantity,
                 "unit_price": action.unit_price,

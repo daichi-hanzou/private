@@ -11,6 +11,8 @@ class NormalizedAuditEvent:
     event_type: str
     run_id: str | None = None
     timestamp: datetime | None = None
+    action_time: datetime | None = None
+    observed_at: datetime | None = None
     day: int | None = None
     actor_id: str | None = None
     actor_name: str | None = None
@@ -30,6 +32,60 @@ class NormalizedAuditEvent:
     summary: str = ""
     raw_event: dict[str, Any] = field(default_factory=dict)
     source_line: int | None = None
+
+
+@dataclass(frozen=True)
+class HumanInterventionEvent:
+    event_id: str
+    related_action_id: str
+    intervention_type: str
+    performed_at: datetime | None = None
+    actor: str = "human"
+    before: Any = None
+    after: Any = None
+    reason: str | None = None
+    input_method: str | None = None
+    raw_event: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    model_name: str | None = None
+    model_version: str | None = None
+    prompt_hash: str | None = None
+    tool_version: str | None = None
+    config_hash: str | None = None
+    git_commit: str | None = None
+    environment: Any = None
+
+    @classmethod
+    def from_value(cls, value: Any) -> ExecutionContext:
+        if not isinstance(value, dict):
+            return cls()
+        return cls(
+            model_name=value.get("model_name"),
+            model_version=value.get("model_version"),
+            prompt_hash=value.get("prompt_hash"),
+            tool_version=value.get("tool_version"),
+            config_hash=value.get("config_hash"),
+            git_commit=value.get("git_commit"),
+            environment=value.get("environment"),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "model_version": self.model_version,
+            "prompt_hash": self.prompt_hash,
+            "tool_version": self.tool_version,
+            "config_hash": self.config_hash,
+            "git_commit": self.git_commit,
+            "environment": self.environment,
+        }
+
+    @property
+    def is_empty(self) -> bool:
+        return not any(value is not None for value in self.as_dict().values())
 
 
 @dataclass(frozen=True)

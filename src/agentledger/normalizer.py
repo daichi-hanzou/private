@@ -132,6 +132,10 @@ class AuditEventNormalizer:
             event_type=event_type,
             run_id=raw.get("run_id"),
             timestamp=_timestamp(raw.get("timestamp")),
+            action_time=_timestamp(
+                raw.get("action_time") or raw.get("executed_at")
+            ),
+            observed_at=_timestamp(raw.get("observed_at")),
             day=raw.get("day") if isinstance(raw.get("day"), int) else None,
             actor_id=actor_id,
             actor_name=self.agent_name(actor_id) if actor_id else None,
@@ -201,6 +205,13 @@ class AuditEventNormalizer:
         if event_type == "outcome_observed":
             subject = f"Case {case_id}" if case_id else "Action"
             return f"{subject} outcome: {humanize(status)}"
+        if event_type == "human_intervention":
+            intervention = raw.get("intervention_type")
+            related = raw.get("related_action_id") or "unknown action"
+            return (
+                f"Human intervention {humanize(intervention).lower()} "
+                f"for {related}"
+            )
         return f"{humanize(event_type)} event by {actor}"
 
 

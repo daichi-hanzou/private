@@ -4,6 +4,7 @@ import html
 import re
 from typing import Literal
 
+from .bundles import ActionBundle, business_state, trade_direction
 from .display import DisplayIds, assign_display_ids
 from .models import NormalizedAuditEvent
 from .normalizer import humanize, normalize_outcome
@@ -280,3 +281,79 @@ def build_sequence(
     if view == "technical":
         return _technical(events, ids)
     raise ValueError(f"unknown view: {view}")
+
+
+def build_action_sequence(
+    bundle: ActionBundle,
+    *,
+    action_display_id: str,
+) -> str:
+    action = bundle.action
+    actor_id = _safe_id(action.actor_id or "agent")
+    actor_name = action.actor_name or humanize(action.actor_id)
+    target_is_agent = bool(
+        action.target_id
+        and action.target_id != "consumer_market"
+        and action.target_id != action.actor_id
+    )
+    target_id = _safe_id(action.target_id or "")
+    target_name = action.target_name or humanize(action.target_id)
+    lines = [
+        "sequenceDiagram",
+        f"    participant {actor_id} as {_text(actor_name)}",
+    ]
+    if target_is_agent:
+        lines.append(
+            f"    participant {target_id} as {_text(target_name)}"
+        )
+    if bundle.observation:
+        lines.append(f"    Note right of {actor_id}: Observation")
+    if bundle.decision:
+        lines.append(
+            f"    Note right of {actor_id}: "
+            f"{_text(f'Decision: {humanize(action.action_type)}')}"
+        )
+
+    parameters = action.action_parameters
+    action_label = (
+        trade_direction(bundle)
+        if action.action_type == "propose_trade"
+        else humanize(action.action_type)
+    )
+    details = [f"[{action_display_id}] {action_label}"]
+    if parameters.get("lot_id"):
+        details.append(str(parameters["lot_id"]))
+    if parameters.get("quantity") is not None:
+        details.append(f"{parameters['quantity']} units")
+    if parameters.get("unit_price") is not None:
+        details.append(f"at {_price(parameters['unit_price'])}")
+    if target_is_agent:
+        lines.append(
+            f"    {actor_id}->>{target_id}: {_text(', '.join(details))}"
+        )
+    else:
+        lines.append(
+            f"    Note over {actor_id}: {_text(', '.join(details))}"
+        )
+    outcome_target = (
+        f"{actor_id},{target_id}" if target_is_agent else actor_id
+    )
+    for intervention in bundle.human_interventions:
+        details = [
+            f"Human intervention: {humanize(intervention.intervention_type)}"
+        ]
+        if intervention.reason:
+            details.append(f"Reason: {intervention.reason}")
+        lines.append(
+            f"    Note over {outcome_target}: {_label(*details)}"
+        )
+    if bundle.outcome:
+        lines.append(
+            f"    Note over {outcome_target}: "
+            f"{_text(f'Outcome: {business_state(bundle)}')}"
+        )
+    else:
+        lines.append(
+            f"    Note over {outcome_target}: Outcome: Not recorded"
+        )
+    return "\n".join(lines)

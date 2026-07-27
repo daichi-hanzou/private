@@ -229,6 +229,8 @@ def test_replay_warns_when_offer_is_never_visible_then_expires(tmp_path) -> None
     ]
     assert created["status"] == "success"
     assert created["proposal_id"] == "proposal-1"
+    assert created["seller_id"] == "roaster"
+    assert created["buyer_id"] == "retailer_a"
     decision = next(
         event
         for event in events

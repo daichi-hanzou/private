@@ -3,13 +3,18 @@ from __future__ import annotations
 import json
 
 from agentledger.cases import decision_case, related_case
+from agentledger.bundles import (
+    build_action_bundles,
+    observed_at,
+    outcome_status,
+)
 from agentledger.display import assign_display_ids
 from agentledger.html import render_explorer
 from agentledger.ingestion import read_jsonl
 from agentledger.models import IngestionResult
 from agentledger.normalizer import normalize_events
 from agentledger.query import AuditQuery, filter_events
-from agentledger.sequence import build_sequence
+from agentledger.sequence import build_action_sequence, build_sequence
 
 
 def _raw_events() -> list[dict]:
@@ -238,7 +243,42 @@ def test_business_and_technical_sequences_use_selected_participants() -> None:
     assert "env->>retailer_a" in technical
 
 
-def test_explorer_contains_event_list_detail_case_sequence_and_raw_json() -> None:
+def test_action_bundles_join_the_four_event_types() -> None:
+    events = normalize_events(_raw_events())
+    bundles = build_action_bundles(events)
+
+    assert len(bundles) == 2
+    first = bundles[0]
+    assert first.observation is not None
+    assert first.observation.event_id == "event-1"
+    assert first.decision is not None
+    assert first.decision.event_id == "event-2"
+    assert first.action.event_id == "event-3"
+    assert first.outcome is None
+    second = bundles[1]
+    assert second.observation is not None
+    assert second.observation.event_id == "event-4"
+    assert second.decision is not None
+    assert second.decision.event_id == "event-5"
+    assert second.outcome is not None
+    assert second.outcome.event_id == "event-7"
+
+
+def test_action_sequence_contains_only_the_selected_bundle() -> None:
+    bundle = build_action_bundles(normalize_events(_raw_events()))[0]
+    content = build_action_sequence(bundle, action_display_id="A1")
+
+    assert "Observation" in content
+    assert "Decision - Propose Trade" in content
+    assert "[A1] Propose Trade" in content
+    assert "participant env" not in content
+    assert "Environment" not in content
+    assert "roaster->>retailer_a" in content
+    assert "Accept Trade" not in content
+    assert "Counteroffer Trade" not in content
+
+
+def test_explorer_contains_action_list_detail_and_sequence() -> None:
     raw = _raw_events()
     events = normalize_events(raw)
     content = render_explorer(
@@ -247,18 +287,23 @@ def test_explorer_contains_event_list_detail_case_sequence_and_raw_json() -> Non
         source_path="audit.jsonl",
     )
 
-    assert "Event List" in content
-    assert "Event Detail" in content
-    assert "Related Case / Decision" in content
-    assert "Partial Sequence View" in content
-    assert "View raw event JSON" in content
-    assert "Audit ID mapping" in content
+    assert "Action List" in content
+    assert "Action Detail" in content
+    assert "<h3>Observation</h3>" not in content
+    assert 'section("Observation"' in content
+    assert 'section("Decision"' in content
+    assert 'section("Action"' in content
+    assert 'section("Outcome"' in content
+    assert "Sequence" in content
+    assert "View raw action JSON" in content
     assert "Preserve margin while advancing revenue." in content
     assert "sequenceDiagram" in content
     assert "proposal-1" in content
+    assert '"relation_ids"' in content
+    assert '"correlation_id"' in content
 
 
-def test_html_uses_column_filters_and_keeps_view_switch() -> None:
+def test_action_list_has_requested_columns_and_filters() -> None:
     raw = _raw_events()
     content = render_explorer(
         normalize_events(raw),
@@ -266,23 +311,25 @@ def test_html_uses_column_filters_and_keeps_view_switch() -> None:
     )
 
     assert 'class="filters"' not in content
-    assert 'class="event-toolbar"' in content
+    assert 'class="action-toolbar"' in content
     assert 'class="column-labels"' in content
     assert 'class="column-filters"' in content
     assert 'data-column-filter="day"' in content
-    assert 'data-column-filter="event"' in content
+    assert 'data-column-filter="action_id"' in content
     assert 'data-column-filter="agent"' in content
-    assert 'data-column-filter="event_type"' in content
+    assert 'data-column-filter="action_type"' in content
+    assert 'data-column-filter="target"' in content
     assert 'data-column-filter="summary"' in content
-    assert 'data-column-filter="related"' in content
-    assert 'data-column-filter="status"' in content
     assert 'id="clear-filters"' in content
-    assert 'data-view="business"' in content
-    assert 'data-view="technical"' in content
     assert 'id="search"' in content
+    assert "<th>Action ID</th>" in content
+    assert "<th>Agent</th>" in content
+    assert "<th>Action</th>" in content
+    assert "Target</th>" in content
+    assert "Summary</th>" in content
 
 
-def test_html_column_filter_logic_handles_and_clear_and_empty_results() -> None:
+def test_html_uses_action_filters_and_removes_event_ui() -> None:
     raw = _raw_events()
     content = render_explorer(
         normalize_events(raw),
@@ -290,10 +337,147 @@ def test_html_column_filter_logic_handles_and_clear_and_empty_results() -> None:
     )
 
     assert "Object.entries(state.columnFilters).every" in content
-    assert "event.action_type?event.action_label:null" in content
+    assert "action.search_text.includes(query)" in content
     assert "active-filter" in content
-    assert "visible.length} / ${data.events.length}" in content
-    assert "No event matches the current filters." in content
-    assert "No related events to display." in content
+    assert "visible.length} / ${data.actions.length}" in content
+    assert "No action matches the current filters." in content
     assert "No sequence to display." in content
     assert 'control.value=""' in content
+    assert "Event List" not in content
+    assert "Event Detail" not in content
+    assert "Related Case / Decision" not in content
+    assert "Audit ID mapping" not in content
+    assert "Ingestion details" not in content
+    assert 'data-view="business"' not in content
+    assert 'data-view="technical"' not in content
+    assert "Technical" not in content
+    assert 'data-column-filter="related"' not in content
+    assert 'data-column-filter="status"' not in content
+
+
+def test_human_intervention_is_attached_and_rendered_separately() -> None:
+    raw = _raw_events()
+    raw.append(
+        {
+            "event_id": "human-1",
+            "event_type": "human_intervention",
+            "timestamp": "2026-01-01T00:00:03+00:00",
+            "intervention_type": "modify",
+            "related_action_id": "action-1",
+            "performed_at": "2026-01-01T00:00:02.500000+00:00",
+            "actor": "human",
+            "before": {"unit_price": 9.4},
+            "after": {"unit_price": 9.2},
+            "reason": "Operator reduced the price.",
+            "input_method": "ui",
+        }
+    )
+    events = normalize_events(raw)
+    bundle = build_action_bundles(events)[0]
+
+    assert len(bundle.human_interventions) == 1
+    assert bundle.human_interventions[0].intervention_type == "modify"
+    sequence = build_action_sequence(bundle, action_display_id="A1")
+    assert "Human intervention - Modify" in sequence
+    content = render_explorer(
+        events,
+        ingestion=IngestionResult(raw, []),
+    )
+    assert 'section("Human Intervention"' in content
+    assert "Operator reduced the price." in content
+    assert '"related_action_id": "action-1"' in content
+
+
+def test_explorer_hides_empty_human_intervention_section() -> None:
+    content = render_explorer(
+        normalize_events(_raw_events()),
+        ingestion=IngestionResult(_raw_events(), []),
+    )
+
+    assert 'if(!values?.length)return ""' in content
+    assert '"human_interventions": []' in content
+
+
+def test_latest_asynchronous_outcome_is_used() -> None:
+    raw = _raw_events()
+    raw.extend(
+        [
+            {
+                "event_id": "outcome-pending",
+                "event_type": "outcome_observed",
+                "timestamp": "2026-01-01T00:00:10+00:00",
+                "observed_at": "2026-01-02T10:00:00+00:00",
+                "action_id": "action-1",
+                "status": "pending",
+            },
+            {
+                "event_id": "outcome-confirmed",
+                "event_type": "outcome_observed",
+                "timestamp": "2026-01-01T00:00:09+00:00",
+                "observed_at": "2026-01-03T14:00:00+00:00",
+                "action_id": "action-1",
+                "status": "confirmed",
+            },
+        ]
+    )
+    bundle = build_action_bundles(normalize_events(raw))[0]
+
+    assert bundle.outcome is not None
+    assert bundle.outcome.event_id == "outcome-confirmed"
+    assert outcome_status(bundle) == "confirmed"
+    assert observed_at(bundle) == "2026-01-03T14:00:00+00:00"
+
+
+def test_pending_and_unknown_outcome_statuses() -> None:
+    no_outcome = build_action_bundles(normalize_events(_raw_events()))[0]
+    assert outcome_status(no_outcome) == "pending"
+
+    raw = _raw_events()
+    raw.append(
+        {
+            "event_id": "outcome-unknown",
+            "event_type": "outcome_observed",
+            "timestamp": "2026-01-02T00:00:00+00:00",
+            "action_id": "action-1",
+            "status": "vendor_specific_status",
+        }
+    )
+    unknown = build_action_bundles(normalize_events(raw))[0]
+    assert outcome_status(unknown) == "unknown"
+
+
+def test_legacy_outcome_without_status_defaults_to_confirmed() -> None:
+    bundle = build_action_bundles(normalize_events(_raw_events()))[1]
+
+    assert bundle.outcome is not None
+    assert "status" not in bundle.outcome.raw_event
+    assert outcome_status(bundle) == "confirmed"
+
+
+def test_execution_context_is_rendered_and_empty_context_is_collapsed() -> None:
+    raw = _raw_events()
+    raw[2]["execution_context"] = {
+        "model_name": "gpt-test",
+        "model_version": "2026-07",
+        "prompt_hash": "prompt-abc",
+        "tool_version": "tool-2",
+        "config_hash": "config-def",
+        "git_commit": "deadbeef",
+        "environment": {"region": "local"},
+    }
+    events = normalize_events(raw)
+    bundle = build_action_bundles(events)[0]
+
+    assert bundle.execution_context.model_name == "gpt-test"
+    assert not bundle.execution_context.is_empty
+    content = render_explorer(
+        events,
+        ingestion=IngestionResult(raw, []),
+    )
+    assert "Execution Context" in content
+    assert "gpt-test" in content
+    assert 'class="bundle-section execution-context"' in content
+    assert '"has_execution_context": true' in content
+
+    legacy = build_action_bundles(normalize_events(_raw_events()))[0]
+    assert legacy.execution_context.is_empty

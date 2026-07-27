@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .bundles import build_action_bundles
 from .cases import decision_case, related_case
 from .html import write_explorer
 from .ingestion import read_jsonl
@@ -28,11 +29,6 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--status")
     build.add_argument("--counterparty")
     build.add_argument("--search")
-    build.add_argument(
-        "--view",
-        choices=("business", "technical"),
-        default="business",
-    )
     return parser
 
 
@@ -68,13 +64,12 @@ def main() -> None:
         args.output,
         events,
         ingestion=ingestion,
-        view=args.view,
         source_path=args.audit_log,
     )
     print(
         f"Loaded: {ingestion.loaded} events\n"
         f"Skipped: {ingestion.skipped} malformed lines\n"
-        f"Selected: {len(events)} events\n"
+        f"Selected: {len(build_action_bundles(events))} actions\n"
         f"Output: {output}"
     )
 
