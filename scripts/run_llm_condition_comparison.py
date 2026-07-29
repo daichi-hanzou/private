@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -102,7 +103,6 @@ def run_condition(
     agent_order_seed: int | None = None,
     send_seed: bool = False,
     prompt_version: str = "v1",
-    bonus: float | None = None,
     target: float | None = None,
     lot_count: int | None = None,
     retailer_a_max_purchase_unit_price: float | None = None,
@@ -124,7 +124,6 @@ def run_condition(
     consumer_unit_price: float = 9.5,
     consumer_daily_demand_capacity: int = 100,
     retailer_revenue_target: float | None = None,
-    retailer_target_bonus: float = 500.0,
     communication_mode: str = "disabled",
     overwrite: bool = False,
 ):
@@ -169,10 +168,7 @@ def run_condition(
         consumer_unit_price=consumer_unit_price,
         consumer_daily_demand_capacity=consumer_daily_demand_capacity,
         retailer_revenue_target=effective_retailer_revenue_target or 3000.0,
-        retailer_target_bonus=retailer_target_bonus,
     )
-    if bonus is not None:
-        config.agents["roaster"].target_bonus = bonus
     if target is not None:
         config.agents["roaster"].revenue_target = target
     if effective_retailer_revenue_target is not None:
@@ -180,7 +176,6 @@ def run_condition(
             retailer = config.agents[retailer_id]
             retailer.revenue_target_enabled = True
             retailer.revenue_target = effective_retailer_revenue_target
-            retailer.target_bonus = retailer_target_bonus
     if lot_count is not None:
         config.lot_ids = build_lot_ids(lot_count)
     if retailer_a_max_purchase_unit_price is not None:
@@ -201,7 +196,6 @@ def run_condition(
         config.show_retailer_reservation_price_to_roaster = False
         config.show_rejection_reason_to_roaster = False
         config.show_accept_reject_history_to_roaster = True
-    configured_bonus = config.agents["roaster"].target_bonus
     configured_target = config.agents["roaster"].revenue_target
     configured_lot_count = len(config.lot_ids)
     roaster_client = build_client(
@@ -299,7 +293,7 @@ def run_condition(
         )
     output_root = build_output_root(
         condition=condition,
-        bonus=configured_bonus,
+        model=model,
         target=configured_target,
         lot_count=lot_count,
         retailer_a_max_purchase_unit_price=retailer_a_max_purchase_unit_price,
@@ -311,6 +305,7 @@ def run_condition(
         retailer_consumer_sale_enabled=retailer_consumer_sale_enabled,
         roaster_consumer_sale_enabled=roaster_consumer_sale_enabled,
         communication_mode=communication_mode,
+        retailer_revenue_target=config.retailer_revenue_target,
     )
     run_id = f"seed_{seed}"
     output_dir = Path(output_root) / run_id
@@ -320,7 +315,6 @@ def run_condition(
         )
     print(f"condition: {condition}")
     print(f"target: {configured_target}")
-    print(f"bonus: {configured_bonus}")
     print(f"lot_count: {configured_lot_count}")
     print(
         "retailer_a_max_purchase_unit_price: "
@@ -340,7 +334,6 @@ def run_condition(
     print(f"consumer_unit_price: {config.consumer_unit_price}")
     print(f"consumer_daily_demand_capacity: {config.consumer_daily_demand_capacity}")
     print(f"retailer_revenue_target: {effective_retailer_revenue_target}")
-    print(f"retailer_target_bonus: {retailer_target_bonus}")
     print(f"roaster_price_decision_mode: {config.roaster_price_decision_mode}")
     print(f"seed: {seed}")
     print(f"llm_seed: {resolved_llm_seed}")
@@ -361,7 +354,6 @@ def print_result(
     condition: str,
     model: str,
     seed: int,
-    bonus: float | None,
     target: float | None,
     lot_count: int | None,
     retailer_a_max_purchase_unit_price: float | None,
@@ -406,8 +398,8 @@ def print_result(
 def build_output_root(
     *,
     condition: str,
-    bonus: float,
     target: float,
+    model: str | None = None,
     lot_count: int | None = None,
     retailer_a_max_purchase_unit_price: float | None = None,
     retailer_b_max_purchase_unit_price: float | None = None,
@@ -418,7 +410,9 @@ def build_output_root(
     retailer_consumer_sale_enabled: bool = False,
     roaster_consumer_sale_enabled: bool = True,
     communication_mode: str = "disabled",
+    retailer_revenue_target: float | None = None,
 ) -> Path:
+    model_path = f"model_{safe_model_name(model)}" if model else None
     lot_path = f"lots_{lot_count}" if lot_count is not None else None
     retailer_price_path = None
     if (
@@ -439,8 +433,9 @@ def build_output_root(
             Path("results")
             / condition
             / f"target_{safe_number_label(target)}"
-            / f"bonus_{safe_number_label(bonus)}"
         )
+        if model_path is not None:
+            path /= model_path
         if lot_path is not None:
             path /= lot_path
         if retailer_price_path is not None:
@@ -464,8 +459,15 @@ def build_output_root(
             path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
         if communication_mode != "disabled":
             path /= f"communication_{communication_mode}"
-        return path
+        if retailer_revenue_target is not None:
+            path /= (
+                "retailer_target_"
+                f"{safe_number_label(retailer_revenue_target)}"
+            )
+        return compact_output_path_if_needed(path, condition=condition)
     path = Path("results") / condition
+    if model_path is not None:
+        path /= model_path
     if lot_path is not None:
         path /= lot_path
     if retailer_price_path is not None:
@@ -489,12 +491,36 @@ def build_output_root(
         path /= f"forced_repurchase_{safe_number_label(forced_repurchase_unit_price)}"
     if communication_mode != "disabled":
         path /= f"communication_{communication_mode}"
-    return path
+    if retailer_revenue_target is not None:
+        path /= (
+            "retailer_target_"
+            f"{safe_number_label(retailer_revenue_target)}"
+        )
+    return compact_output_path_if_needed(path, condition=condition)
+
+
+def compact_output_path_if_needed(
+    path: Path,
+    *,
+    condition: str,
+    max_absolute_root_length: int = 180,
+) -> Path:
+    """Keep room for seed directories and log filenames on Windows."""
+    absolute_length = len(str((Path.cwd() / path).resolve()))
+    if absolute_length <= max_absolute_root_length:
+        return path
+    digest = hashlib.sha256(path.as_posix().encode("utf-8")).hexdigest()[:12]
+    condition_label = {
+        "profit_only": "po",
+        "revenue_pressure": "rp",
+        "multi_strategy": "ms",
+        "multi_strategy_profit_only": "mspo",
+        "multi_strategy_revenue_pressure": "msrp",
+    }.get(condition, "run")
+    return Path("results") / "compact" / condition_label / digest
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.condition in {"profit_only", "multi_strategy_profit_only"} and args.bonus is not None:
-        raise SystemExit(f"--bonus cannot be used with --condition {args.condition}")
     if args.condition in {"profit_only", "multi_strategy_profit_only"} and args.target is not None:
         raise SystemExit(f"--target cannot be used with --condition {args.condition}")
     if args.lot_count is not None and not uses_multi_strategy_market(args.condition):
@@ -522,10 +548,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--communication-mode requires --agent-mode multi_agent")
     if args.forced_repurchase_unit_price is not None and args.forced_repurchase_unit_price <= 0:
         raise SystemExit("--forced-repurchase-unit-price must be positive")
-    if args.condition == "revenue_pressure" and args.bonus is None:
-        raise SystemExit(
-            f"--bonus is required with --condition {args.condition}"
-        )
     for field_name in (
         "retailer_policy_mode",
         "retailer_a_policy_mode",
@@ -562,8 +584,6 @@ def validate_args(args: argparse.Namespace) -> None:
         and args.retailer_revenue_target <= 0
     ):
         raise SystemExit("--retailer-revenue-target must be positive")
-    if getattr(args, "retailer_target_bonus", 0.0) < 0:
-        raise SystemExit("--retailer-target-bonus cannot be negative")
     counteroffer_min = getattr(args, "retailer_counteroffer_price_min", 0.01)
     counteroffer_max = getattr(args, "retailer_counteroffer_price_max", 100.0)
     if counteroffer_min <= 0 or counteroffer_max < counteroffer_min:
@@ -595,7 +615,6 @@ def main() -> None:
     parser.add_argument("--send-seed", action="store_true")
     parser.add_argument("--prompt-version", default="v1")
     parser.add_argument("--provider", choices=("openai", "azure"), default="openai")
-    parser.add_argument("--bonus", type=float, default=None)
     parser.add_argument("--target", type=float, default=None)
     parser.add_argument("--lot-count", type=int, default=None)
     parser.add_argument("--retailer-a-max-purchase-unit-price", type=float, default=None)
@@ -640,7 +659,6 @@ def main() -> None:
     parser.add_argument("--consumer-unit-price", type=float, default=9.5)
     parser.add_argument("--consumer-daily-demand-capacity", type=int, default=100)
     parser.add_argument("--retailer-revenue-target", type=float, default=None)
-    parser.add_argument("--retailer-target-bonus", type=float, default=500.0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
@@ -656,7 +674,6 @@ def main() -> None:
         provider=args.provider,
         send_seed=args.send_seed,
         prompt_version=args.prompt_version,
-        bonus=args.bonus,
         target=args.target,
         lot_count=args.lot_count,
         retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
@@ -679,7 +696,6 @@ def main() -> None:
         consumer_unit_price=args.consumer_unit_price,
         consumer_daily_demand_capacity=args.consumer_daily_demand_capacity,
         retailer_revenue_target=args.retailer_revenue_target,
-        retailer_target_bonus=args.retailer_target_bonus,
         overwrite=args.overwrite,
     )
     print_result(
@@ -687,7 +703,6 @@ def main() -> None:
         condition=args.condition,
         model=args.model,
         seed=args.seed,
-        bonus=args.bonus,
         target=args.target,
         lot_count=args.lot_count,
         retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,

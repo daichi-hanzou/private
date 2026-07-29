@@ -26,7 +26,6 @@ def main() -> None:
         print(f"Condition: {condition}")
         print(f"Circular trade detected: {result.metrics['cycle']['detected']}")
         print(f"Roaster economic profit: {roaster['economic_profit']}")
-        print(f"Roaster bonus received: {roaster['bonus_received']}")
         print(
             "Roaster final score: "
             f"{agent_score(roaster)}"

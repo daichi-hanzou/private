@@ -39,7 +39,6 @@ def main() -> None:
     parser.add_argument("--send-seed", action="store_true")
     parser.add_argument("--prompt-version", default="v1")
     parser.add_argument("--provider", choices=("openai", "azure"), default="openai")
-    parser.add_argument("--bonus", type=float, default=None)
     parser.add_argument("--target", type=float, default=None)
     parser.add_argument("--lot-count", type=int, default=None)
     parser.add_argument("--retailer-a-max-purchase-unit-price", type=float, default=None)
@@ -68,7 +67,6 @@ def main() -> None:
     parser.add_argument("--consumer-unit-price", type=float, default=9.5)
     parser.add_argument("--consumer-daily-demand-capacity", type=int, default=100)
     parser.add_argument("--retailer-revenue-target", type=float, default=None)
-    parser.add_argument("--retailer-target-bonus", type=float, default=500.0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if not args.model:
@@ -90,7 +88,6 @@ def main() -> None:
             provider=args.provider,
             send_seed=args.send_seed,
             prompt_version=args.prompt_version,
-            bonus=args.bonus,
             target=args.target,
             lot_count=args.lot_count,
             retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
@@ -113,7 +110,6 @@ def main() -> None:
             consumer_unit_price=args.consumer_unit_price,
             consumer_daily_demand_capacity=args.consumer_daily_demand_capacity,
             retailer_revenue_target=args.retailer_revenue_target,
-            retailer_target_bonus=args.retailer_target_bonus,
             overwrite=args.overwrite,
         )
         metrics = result.metrics
@@ -121,7 +117,6 @@ def main() -> None:
         retailer_a = metrics["agents"]["retailer_a"]
         retailer_b = metrics["agents"]["retailer_b"]
         configured_target = result.state.agents["roaster"].revenue_target
-        configured_bonus = result.state.agents["roaster"].target_bonus
         rows.append(
             {
                 "run_id": result.run_id,
@@ -135,7 +130,6 @@ def main() -> None:
                 "temperature": args.temperature,
                 "prompt_version": args.prompt_version,
                 "configured_roaster_revenue_target": configured_target,
-                "configured_roaster_target_bonus": configured_bonus,
                 "configured_lot_count": args.lot_count,
                 "configured_retailer_a_max_purchase_unit_price": args.retailer_a_max_purchase_unit_price,
                 "configured_retailer_b_max_purchase_unit_price": args.retailer_b_max_purchase_unit_price,
@@ -170,9 +164,6 @@ def main() -> None:
                 "retailer_revenue_target": result.state.agents[
                     "retailer_a"
                 ].revenue_target,
-                "retailer_target_bonus": result.state.agents[
-                    "retailer_a"
-                ].target_bonus,
                 "cycle_detected": metrics["cycle"]["detected"],
                 "cycle_count": metrics["cycle"]["count"],
                 "trade_count": metrics["trades"]["total"],
@@ -201,8 +192,8 @@ def main() -> None:
 
     output_root = build_output_root(
         condition=args.condition,
+        model=args.model,
         target=result.state.agents["roaster"].revenue_target,
-        bonus=result.state.agents["roaster"].target_bonus,
         lot_count=args.lot_count,
         retailer_a_max_purchase_unit_price=args.retailer_a_max_purchase_unit_price,
         retailer_b_max_purchase_unit_price=args.retailer_b_max_purchase_unit_price,
@@ -216,6 +207,9 @@ def main() -> None:
         retailer_consumer_sale_enabled=args.retailer_consumer_sale_enabled,
         roaster_consumer_sale_enabled=not args.disable_roaster_consumer_sale,
         communication_mode=args.communication_mode,
+        retailer_revenue_target=result.state.agents[
+            "retailer_a"
+        ].revenue_target,
     )
     output_name = (
         "experiment_3_summary.csv"

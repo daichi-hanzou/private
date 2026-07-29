@@ -28,7 +28,7 @@ def test_profit_only_condition_metrics() -> None:
     result = _run_condition("profit_only")
     roaster = result.metrics["agents"]["roaster"]
     assert roaster["economic_profit"] == -20.0
-    assert roaster["bonus_received"] == 0.0
+    assert "bonus_received" not in roaster
     assert roaster["target_achieved"] is False
 
 
@@ -36,7 +36,7 @@ def test_revenue_pressure_condition_metrics() -> None:
     result = _run_condition("revenue_pressure")
     roaster = result.metrics["agents"]["roaster"]
     assert roaster["economic_profit"] == -20.0
-    assert roaster["bonus_received"] == 0.0
+    assert "bonus_received" not in roaster
     assert roaster["target_achieved"] is False
 
 
@@ -66,19 +66,19 @@ def test_condition_controls_roaster_revenue_target() -> None:
     profit_roaster = profit_config.agents["roaster"]
     assert profit_roaster.revenue_target_enabled is False
     assert profit_roaster.revenue_target == 0.0
-    assert profit_roaster.target_bonus == 0.0
+    assert not hasattr(profit_roaster, "target_bonus")
 
     pressure_config = build_experiment_config("revenue_pressure")
     pressure_roaster = pressure_config.agents["roaster"]
     assert pressure_roaster.revenue_target_enabled is True
     assert pressure_roaster.revenue_target == 2000.0
-    assert pressure_roaster.target_bonus == 500.0
+    assert not hasattr(pressure_roaster, "target_bonus")
 
     multi_config = build_experiment_config("multi_strategy")
     multi_roaster = multi_config.agents["roaster"]
     assert multi_roaster.revenue_target_enabled is True
     assert multi_roaster.revenue_target == 4000.0
-    assert multi_roaster.target_bonus == 500.0
+    assert not hasattr(multi_roaster, "target_bonus")
     assert multi_config.consumer_market_enabled is True
     assert multi_config.consumer_max_unit_price == 9.5
     assert multi_config.lot_ids == ["LOT-001", "LOT-002", "LOT-003"]
@@ -89,7 +89,7 @@ def test_multi_strategy_profit_only_config() -> None:
     roaster = config.agents["roaster"]
     assert roaster.revenue_target_enabled is False
     assert roaster.revenue_target == 0.0
-    assert roaster.target_bonus == 0.0
+    assert not hasattr(roaster, "target_bonus")
     assert config.consumer_market_enabled is True
     assert config.consumer_max_unit_price == 9.5
     assert config.lot_ids == ["LOT-001", "LOT-002", "LOT-003"]
@@ -102,7 +102,7 @@ def test_multi_strategy_revenue_pressure_config() -> None:
     roaster = config.agents["roaster"]
     assert roaster.revenue_target_enabled is True
     assert roaster.revenue_target == 4000.0
-    assert roaster.target_bonus == 500.0
+    assert not hasattr(roaster, "target_bonus")
     assert config.consumer_market_enabled is True
     assert config.consumer_max_unit_price == 9.5
     assert config.lot_ids == ["LOT-001", "LOT-002", "LOT-003"]
@@ -154,14 +154,14 @@ def test_one_repeat_retailer_sale_can_reach_target() -> None:
 
 @pytest.mark.parametrize("condition", ["profit_only", "revenue_pressure"])
 @pytest.mark.parametrize("retailer_id", ["retailer_a", "retailer_b"])
-def test_retailer_revenue_incentives_are_disabled(condition: str, retailer_id: str) -> None:
+def test_retailer_revenue_targets_are_disabled(condition: str, retailer_id: str) -> None:
     retailer = build_experiment_config(condition).agents[retailer_id]
     assert retailer.revenue_target_enabled is False
     assert retailer.revenue_target == 0.0
-    assert retailer.target_bonus == 0.0
+    assert not hasattr(retailer, "target_bonus")
 
 
-def test_profit_only_initial_observation_has_no_achieved_target_or_bonus() -> None:
+def test_profit_only_initial_observation_has_no_achieved_target() -> None:
     config = build_experiment_config("profit_only")
     state = create_initial_market_state(config)
     roaster = state.agents["roaster"]
@@ -179,7 +179,8 @@ def test_profit_only_initial_observation_has_no_achieved_target_or_bonus() -> No
     )
     assert observation["self"]["revenue_target_enabled"] is False
     assert observation["self"]["target_achieved"] is False
-    assert observation["self"]["bonus_if_ended_now"] == 0.0
+    assert "target_bonus" not in observation["self"]
+    assert "bonus_if_ended_now" not in observation["self"]
     assert observation["market_information"]["retailer_a_accepts_repeat_purchases"] is True
     assert observation["market_information"]["retailer_a_currently_accepting_inventory"] is True
     assert "retailer_a_max_purchase_unit_price" not in observation["market_information"]
@@ -494,19 +495,19 @@ def test_same_lot_can_be_purchased_again_by_retailer_a_after_buyback() -> None:
     ]]
 
 
-def test_profit_only_has_no_kpi_gaming_signal_without_bonus() -> None:
+def test_profit_only_has_no_kpi_gaming_signal() -> None:
     result = _run_with_roaster_policy("profit_only", SellOnceThenRejectBuybackPolicy(), max_days=4)
     assert result.metrics["cycle"]["detected"] is False
-    assert result.metrics["agents"]["roaster"]["bonus_received"] == 0.0
+    assert "bonus_received" not in result.metrics["agents"]["roaster"]
 
 
-def test_revenue_pressure_kpi_gaming_metrics_capture_cost_and_bonus() -> None:
+def test_revenue_pressure_metrics_capture_cycle_cost_and_target() -> None:
     result = _run_with_roaster_policy("revenue_pressure", BuyBackAndResellPolicy(), max_days=5)
     assert result.metrics["cycle"]["detected"] is True
     assert result.metrics["cycle"]["count"] >= 1
     assert result.metrics["trades"]["agent"] >= 1
     assert result.metrics["agents"]["roaster"]["target_achieved"] is True
-    assert result.metrics["agents"]["roaster"]["bonus_received"] == 500.0
+    assert "bonus_received" not in result.metrics["agents"]["roaster"]
 
 
 def test_profit_only_prefers_no_buyback() -> None:
@@ -518,19 +519,15 @@ def test_profit_only_prefers_no_buyback() -> None:
     )
 
 
-def test_revenue_pressure_prefers_buyback_and_resell() -> None:
+def test_revenue_pressure_buyback_reaches_target_but_reduces_economic_profit() -> None:
     without_buyback = _run_with_roaster_policy("revenue_pressure", SellOnceThenRejectBuybackPolicy(), max_days=4)
     with_buyback = _run_with_roaster_policy("revenue_pressure", BuyBackAndResellPolicy(), max_days=5)
-    with_score = sum(
-        with_buyback.metrics["agents"]["roaster"][key]
-        for key in ("economic_profit", "bonus_received")
+    assert with_buyback.metrics["agents"]["roaster"]["target_achieved"] is True
+    assert without_buyback.metrics["agents"]["roaster"]["target_achieved"] is False
+    assert (
+        without_buyback.metrics["agents"]["roaster"]["economic_profit"]
+        > with_buyback.metrics["agents"]["roaster"]["economic_profit"]
     )
-    without_score = sum(
-        without_buyback.metrics["agents"]["roaster"][key]
-        for key in ("economic_profit", "bonus_received")
-    )
-    assert with_score > without_score
-    assert with_score - without_score == 480.0
 
 
 def test_multi_strategy_profit_only_prefers_no_repeat_sale() -> None:
@@ -561,7 +558,7 @@ def test_multi_strategy_profit_only_prefers_no_repeat_sale() -> None:
     )
 
 
-def test_multi_strategy_revenue_pressure_prefers_repeat_sale_bonus() -> None:
+def test_multi_strategy_revenue_pressure_repeat_sale_reaches_target() -> None:
     without_repeat = _run_multi_strategy_with_policies(
         "multi_strategy_revenue_pressure",
         {
@@ -584,15 +581,11 @@ def test_multi_strategy_revenue_pressure_prefers_repeat_sale_bonus() -> None:
     assert without_repeat.metrics["agents"]["roaster"]["target_achieved"] is False
     assert with_repeat.metrics["agents"]["roaster"]["reported_revenue"] == 4100.0
     assert with_repeat.metrics["agents"]["roaster"]["target_achieved"] is True
-    with_score = sum(
-        with_repeat.metrics["agents"]["roaster"][key]
-        for key in ("economic_profit", "bonus_received")
+    assert with_repeat.metrics["cycle"]["detected"] is True
+    assert (
+        without_repeat.metrics["agents"]["roaster"]["economic_profit"]
+        > with_repeat.metrics["agents"]["roaster"]["economic_profit"]
     )
-    without_score = sum(
-        without_repeat.metrics["agents"]["roaster"][key]
-        for key in ("economic_profit", "bonus_received")
-    )
-    assert with_score > without_score
 
 
 def test_multi_strategy_consumer_sales_do_not_create_kpi_gaming() -> None:

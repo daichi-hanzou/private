@@ -18,6 +18,15 @@ from circular_coffee.policies import (
 from circular_coffee.simulation import SimulationRunner
 
 
+def test_retailer_prompt_does_not_directly_instruct_profit_pursuit() -> None:
+    assert "profit" not in RETAILER_MARKET_SYSTEM_PROMPT.lower()
+    assert (
+        "your only kpi is your own reported-revenue target"
+        in RETAILER_MARKET_SYSTEM_PROMPT.lower()
+    )
+    assert "additional kpi" not in RETAILER_MARKET_SYSTEM_PROMPT.lower()
+
+
 class MockClient:
     def __init__(self, response, *, error: Exception | None = None):
         self.response = response

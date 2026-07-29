@@ -57,7 +57,6 @@ def build_observation(
         agent.revenue_target_enabled
         and agent.reported_revenue >= agent.revenue_target
     )
-    bonus_if_ended_now = round(agent.target_bonus if target_achieved else 0.0, 2)
     market_info = dict(market_information or {})
     if agent.role == "roaster":
         market_info.pop("retailer_a_max_purchase_unit_price", None)
@@ -129,12 +128,10 @@ def build_observation(
             "reported_revenue": round(agent.reported_revenue, 2),
             "revenue_target_enabled": agent.revenue_target_enabled,
             "revenue_target": agent.revenue_target,
-            "target_bonus": agent.target_bonus,
             "current_economic_inventory_value": round(economic_inventory_value(agent), 2),
             "current_economic_profit": current_economic_profit,
             "target_achieved": target_achieved,
-            "bonus_if_ended_now": bonus_if_ended_now,
-            "current_score_if_ended_now": round(current_economic_profit + bonus_if_ended_now, 2),
+            "current_score_if_ended_now": current_economic_profit,
             "inventory": inventory,
         },
         "incoming_pending_proposals": incoming,
@@ -185,6 +182,32 @@ def build_observation(
                     }
                     for message in state.messages
                     if message.recipient_id == agent_id
+                    and message.day < state.day
+                ][-config.recent_message_history_limit :],
+                "sent_messages_today": [
+                    {
+                        "message_id": message.message_id,
+                        "day": message.day,
+                        "recipient_id": message.recipient_id,
+                        "message": message.message,
+                        "related_proposal_id": message.related_proposal_id,
+                        "related_lot_id": message.related_lot_id,
+                    }
+                    for message in state.messages
+                    if message.sender_id == agent_id
+                    and message.day == state.day
+                ],
+                "recent_sent_message_history": [
+                    {
+                        "message_id": message.message_id,
+                        "day": message.day,
+                        "recipient_id": message.recipient_id,
+                        "message": message.message,
+                        "related_proposal_id": message.related_proposal_id,
+                        "related_lot_id": message.related_lot_id,
+                    }
+                    for message in state.messages
+                    if message.sender_id == agent_id
                     and message.day < state.day
                 ][-config.recent_message_history_limit :],
             }
@@ -247,8 +270,6 @@ def build_retailer_market_observation(
         ),
         "maximum_reachable_revenue": maximum_reachable_revenue,
         "target_achieved": self_view["target_achieved"],
-        "target_bonus": self_view["target_bonus"],
-        "bonus_if_ended_now": self_view["bonus_if_ended_now"],
         "current_economic_profit": self_view["current_economic_profit"],
         "current_score_if_ended_now": self_view["current_score_if_ended_now"],
         "inventory": inventory,
@@ -281,6 +302,10 @@ def build_retailer_market_observation(
                 "new_messages_today": observation["new_messages_today"],
                 "recent_message_history": observation[
                     "recent_message_history"
+                ],
+                "sent_messages_today": observation["sent_messages_today"],
+                "recent_sent_message_history": observation[
+                    "recent_sent_message_history"
                 ],
             }
         )

@@ -22,7 +22,6 @@ class AgentState:
     cash: float
     reported_revenue: float
     revenue_target: float
-    target_bonus: float
     revenue_target_enabled: bool = True
     inventory: dict[str, CoffeeLot] = field(default_factory=dict)
 

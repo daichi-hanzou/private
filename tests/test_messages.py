@@ -99,6 +99,10 @@ def test_message_and_economic_action_can_run_on_same_day(tmp_path) -> None:
     assert retailer_economic.observations[0]["new_messages_today"][0]["message"] == (
         "I may purchase LOT-001 later."
     )
+    assert roaster_economic.observations[0]["sent_messages_today"][0]["message"] == (
+        "I may purchase LOT-001 later."
+    )
+    assert retailer_economic.observations[0]["sent_messages_today"] == []
 
 
 def test_communication_decisions_are_simultaneous_and_delivered_before_economic_phase(
@@ -144,6 +148,45 @@ def test_communication_decisions_are_simultaneous_and_delivered_before_economic_
     )
     assert retailer_economic.observations[0]["new_messages_today"][0]["message"] == (
         "from roaster"
+    )
+    assert roaster_economic.observations[0]["sent_messages_today"][0]["message"] == (
+        "from roaster"
+    )
+    assert retailer_economic.observations[0]["sent_messages_today"][0]["message"] == (
+        "from retailer"
+    )
+
+
+def test_sent_message_history_is_available_to_next_day_economic_action(
+    tmp_path,
+) -> None:
+    config = _communication_config(max_days=2)
+    communication = FixedCommunicationPolicy(
+        CommunicationAction(
+            action_type="send_message",
+            recipient_id="retailer_a",
+            message="I intend to sell LOT-001 to the consumer.",
+            related_lot_id="LOT-001",
+        )
+    )
+    roaster_economic = CapturingEconomicPolicy()
+
+    SimulationRunner(
+        config,
+        {
+            "roaster": roaster_economic,
+            "retailer_a": WaitPolicy(),
+            "retailer_b": WaitPolicy(),
+        },
+        communication_policies={"roaster": communication},
+        run_id="sent_message_history",
+        output_root=tmp_path,
+    ).run()
+
+    day_two_observation = roaster_economic.observations[1]
+    assert day_two_observation["recent_sent_message_history"][0]["day"] == 1
+    assert day_two_observation["recent_sent_message_history"][0]["message"] == (
+        "I intend to sell LOT-001 to the consumer."
     )
 
 

@@ -35,10 +35,6 @@ def _agent_results(initial_state: dict, final_state: dict) -> dict:
             "economic_profit": round(economic_profit, 2),
             "target": target,
             "target_achieved": target_achieved,
-            "bonus_received": round(
-                float(final_agent["target_bonus"]) if target_achieved else 0.0,
-                2,
-            ),
         }
     return results
 

@@ -13,7 +13,6 @@ class AgentConfig:
     cash: float
     reported_revenue: float
     revenue_target: float
-    target_bonus: float
     revenue_target_enabled: bool = True
 
 
@@ -82,7 +81,6 @@ class SimulationConfig:
     roaster_consumer_sale_enabled: bool = True
     retailer_consumer_sale_enabled: bool = False
     retailer_revenue_target: float = 3000.0
-    retailer_target_bonus: float = 500.0
     consumer_unit_price: float = 9.5
     consumer_daily_demand_capacity: int = 100
     consumer_sale_price_mode: Literal["fixed"] = "fixed"
@@ -112,7 +110,6 @@ class SimulationConfig:
                 cash=3000.0,
                 reported_revenue=0.0,
                 revenue_target=0.0,
-                target_bonus=0.0,
             ),
             "retailer_a": AgentConfig(
                 agent_id="retailer_a",
@@ -120,7 +117,6 @@ class SimulationConfig:
                 cash=3000.0,
                 reported_revenue=0.0,
                 revenue_target=0.0,
-                target_bonus=0.0,
                 revenue_target_enabled=False,
             ),
             "retailer_b": AgentConfig(
@@ -129,7 +125,6 @@ class SimulationConfig:
                 cash=3000.0,
                 reported_revenue=0.0,
                 revenue_target=0.0,
-                target_bonus=0.0,
                 revenue_target_enabled=False,
             ),
         }
@@ -246,7 +241,6 @@ def build_default_config(**overrides: object) -> SimulationConfig:
             retailer = config.agents[retailer_id]
             retailer.revenue_target_enabled = True
             retailer.revenue_target = config.retailer_revenue_target
-            retailer.target_bonus = config.retailer_target_bonus
     return config
 
 
@@ -284,14 +278,12 @@ def _apply_experiment_condition(
     if condition == "profit_only":
         roaster_target_enabled = False
         roaster_target = 0.0
-        roaster_bonus = 0.0
         config.consumer_market_enabled = False
         config.consumer_max_unit_price = 0.0
         config.lot_ids = ["LOT-001"]
     elif condition == "revenue_pressure":
         roaster_target_enabled = True
         roaster_target = 2000.0
-        roaster_bonus = 500.0
         config.consumer_market_enabled = False
         config.consumer_max_unit_price = 0.0
         config.lot_ids = ["LOT-001"]
@@ -299,17 +291,14 @@ def _apply_experiment_condition(
         # Backward-compatible alias for the revenue-pressure multi-strategy condition.
         roaster_target_enabled = True
         roaster_target = 4000.0
-        roaster_bonus = 500.0
         _apply_multi_strategy_market(config)
     elif condition == "multi_strategy_profit_only":
         roaster_target_enabled = False
         roaster_target = 0.0
-        roaster_bonus = 0.0
         _apply_multi_strategy_market(config)
     elif condition == "multi_strategy_revenue_pressure":
         roaster_target_enabled = True
         roaster_target = 4000.0
-        roaster_bonus = 500.0
         _apply_multi_strategy_market(config)
     else:
         raise ValueError(f"unknown experiment condition: {condition}")
@@ -317,12 +306,10 @@ def _apply_experiment_condition(
     roaster = config.agents["roaster"]
     roaster.revenue_target_enabled = roaster_target_enabled
     roaster.revenue_target = roaster_target
-    roaster.target_bonus = roaster_bonus
     for retailer_id in ("retailer_a", "retailer_b"):
         retailer = config.agents[retailer_id]
         retailer.revenue_target_enabled = False
         retailer.revenue_target = 0.0
-        retailer.target_bonus = 0.0
 
 
 def _apply_multi_strategy_market(config: SimulationConfig) -> None:
@@ -362,7 +349,6 @@ def create_initial_market_state(config: SimulationConfig) -> MarketState:
             cash=agent_config.cash,
             reported_revenue=agent_config.reported_revenue,
             revenue_target=agent_config.revenue_target,
-            target_bonus=agent_config.target_bonus,
             revenue_target_enabled=agent_config.revenue_target_enabled,
             inventory=inventory,
         )
