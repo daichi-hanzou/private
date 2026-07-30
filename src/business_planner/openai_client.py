@@ -10,8 +10,7 @@ AZURE_COGNITIVE_SERVICES_SCOPE = (
 )
 
 
-def create_openai_client() -> OpenAI:
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+def _create_client(endpoint: str | None) -> OpenAI:
     if not endpoint:
         return OpenAI()
 
@@ -43,3 +42,24 @@ def create_openai_client() -> OpenAI:
         base_url=base_url,
         api_key=token_provider,
     )
+
+
+def create_chat_client() -> OpenAI:
+    endpoint = (
+        os.getenv("AZURE_OPENAI_CHAT_ENDPOINT")
+        or os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    return _create_client(endpoint)
+
+
+def create_embedding_client() -> OpenAI:
+    endpoint = (
+        os.getenv("AZURE_OPENAI_EMBEDDING_ENDPOINT")
+        or os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    return _create_client(endpoint)
+
+
+def create_openai_client() -> OpenAI:
+    """Backward-compatible alias for the chat client."""
+    return create_chat_client()

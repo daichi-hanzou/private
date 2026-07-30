@@ -282,7 +282,7 @@ def test_one_round_orchestrator_writes_complete_log(tmp_path, monkeypatch):
         "recommended_controls": [],
     }
     monkeypatch.setattr(
-        orchestrator, "create_openai_client", lambda: object()
+        orchestrator, "create_chat_client", lambda: object()
     )
     monkeypatch.setattr(orchestrator, "make_retriever", lambda *args: FakeRetriever())
     monkeypatch.setattr(
@@ -782,4 +782,67 @@ def test_openai_client_does_not_duplicate_v1_path(monkeypatch):
 
     assert client.kwargs["base_url"] == (
         "https://example.openai.azure.com/openai/v1/"
+    )
+
+
+def test_azure_chat_and_embedding_endpoints_are_independent(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://shared.openai.azure.com/",
+    )
+    monkeypatch.setenv(
+        "AZURE_OPENAI_CHAT_ENDPOINT",
+        "https://chat.openai.azure.com/",
+    )
+    monkeypatch.setenv(
+        "AZURE_OPENAI_EMBEDDING_ENDPOINT",
+        "https://embedding.openai.azure.com/",
+    )
+
+    class FakeCredential:
+        def get_token(self, scope):
+            return types.SimpleNamespace(token="entra-token")
+
+    fake_identity = types.SimpleNamespace(
+        DefaultAzureCredential=FakeCredential,
+        get_bearer_token_provider=lambda *args: "token-provider",
+    )
+    monkeypatch.setitem(sys.modules, "azure", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "azure.identity", fake_identity)
+    monkeypatch.setattr(
+        openai_client,
+        "OpenAI",
+        lambda **kwargs: types.SimpleNamespace(kwargs=kwargs),
+    )
+
+    chat = openai_client.create_chat_client()
+    embedding = openai_client.create_embedding_client()
+
+    assert chat.kwargs["base_url"] == (
+        "https://chat.openai.azure.com/openai/v1/"
+    )
+    assert embedding.kwargs["base_url"] == (
+        "https://embedding.openai.azure.com/openai/v1/"
+    )
+
+
+def test_shared_azure_endpoint_is_fallback_for_both_clients(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://shared.openai.azure.com/",
+    )
+    monkeypatch.delenv("AZURE_OPENAI_CHAT_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_EMBEDDING_ENDPOINT", raising=False)
+
+    monkeypatch.setattr(
+        openai_client,
+        "_create_client",
+        lambda endpoint: endpoint,
+    )
+
+    assert openai_client.create_chat_client() == (
+        "https://shared.openai.azure.com/"
+    )
+    assert openai_client.create_embedding_client() == (
+        "https://shared.openai.azure.com/"
     )

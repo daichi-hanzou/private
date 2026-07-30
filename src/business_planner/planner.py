@@ -8,7 +8,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from .ingestion import chunk_documents, load_documents
-from .openai_client import create_openai_client
+from .openai_client import create_chat_client, create_embedding_client
 from .retrieval import BM25Retriever, HybridRetriever
 from .schema import BUSINESS_PLAN_SCHEMA
 
@@ -91,7 +91,7 @@ def make_retriever(chunks, mode: str = "hybrid", client: OpenAI | None = None):
     if mode != "hybrid":
         raise ValueError("retrieval mode must be 'hybrid' or 'bm25'")
     return HybridRetriever(
-        chunks, openai_embedder(client or create_openai_client())
+        chunks, openai_embedder(client or create_embedding_client())
     )
 
 
@@ -142,9 +142,15 @@ def generate_plan(
 ) -> dict:
     growth = parse_growth(target_growth)
     planning_period = validate_planning_period(base_fiscal_year, target_fiscal_year)
-    client = create_openai_client()
+    client = create_chat_client()
+    embedding_client = (
+        create_embedding_client() if retrieval_mode == "hybrid" else None
+    )
     chunks = retrieve_context(
-        data_root, company_name, mode=retrieval_mode, client=client
+        data_root,
+        company_name,
+        mode=retrieval_mode,
+        client=embedding_client,
     )
     if not chunks:
         raise ValueError("No relevant evidence was retrieved")

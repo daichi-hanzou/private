@@ -22,7 +22,19 @@ OPENAI_MODEL=your-chat-deployment-name
 OPENAI_EMBEDDING_MODEL=your-embedding-deployment-name
 ```
 
-`AZURE_OPENAI_ENDPOINT`が設定されている場合、CLIは`DefaultAzureCredential`で
+GPTとEmbeddingが別のAzureリソースにある場合は、個別のエンドポイントを設定します。
+
+```dotenv
+AZURE_OPENAI_CHAT_ENDPOINT=https://your-chat-resource.openai.azure.com/
+AZURE_OPENAI_EMBEDDING_ENDPOINT=https://your-embedding-resource.openai.azure.com/
+OPENAI_MODEL=your-chat-deployment-name
+OPENAI_EMBEDDING_MODEL=your-embedding-deployment-name
+```
+
+個別設定がある場合はそれぞれを優先し、ない場合は`AZURE_OPENAI_ENDPOINT`を共通の
+フォールバックとして使用します。`bm25`検索ではEmbeddingクライアントを作成しません。
+
+いずれかのAzureエンドポイントが設定されている場合、CLIは`DefaultAzureCredential`で
 `https://cognitiveservices.azure.com/.default`のトークンを取得します。取得したトークンは
 `AZURE_OPENAI_AD_TOKEN`へ設定され、長時間実行中の更新にはBearerトークンプロバイダーが
 使用されます。Azure OpenAIへのリクエストは

@@ -18,7 +18,7 @@ from ..planner import (
     parse_growth,
     validate_planning_period,
 )
-from ..openai_client import create_openai_client
+from ..openai_client import create_chat_client, create_embedding_client
 from .provenance import document_snapshot
 from .state import (
     advance_simulation_state,
@@ -97,7 +97,7 @@ def run_one_round_simulation(
             "--target-fiscal-year values."
         )
 
-    client = create_openai_client()
+    client = create_chat_client()
     chunks = chunk_documents(load_documents(data_root, company_name))
     citations = {chunk.source_id: chunk.citation() for chunk in chunks}
     plan_source_ids = collect_source_ids(plan)
@@ -107,7 +107,12 @@ def run_one_round_simulation(
             f"Business plan contains unknown source IDs: {sorted(unknown_plan_sources)}"
         )
     plan["sources"] = [citations[source] for source in sorted(plan_source_ids)]
-    retriever = make_retriever(chunks, retrieval_mode, client)
+    embedding_client = (
+        create_embedding_client() if retrieval_mode == "hybrid" else None
+    )
+    retriever = make_retriever(
+        chunks, retrieval_mode, embedding_client
+    )
     initial_state = create_initial_state(
         plan, extract_baseline_financials(plan, chunks)
     )
