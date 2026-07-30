@@ -2,13 +2,22 @@ BUSINESS_PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "company_name", "target_revenue_growth", "business_model_summary",
+        "company_name", "target_revenue_growth", "planning_period", "business_model_summary",
         "financial_summary", "key_growth_drivers", "growth_plan",
         "risk_assessment", "feasibility_assessment", "sources",
     ],
     "properties": {
         "company_name": {"type": "string"},
         "target_revenue_growth": {"type": "number"},
+        "planning_period": {
+            "type": "object", "additionalProperties": False,
+            "required": ["base_fiscal_year", "target_fiscal_year", "horizon_years"],
+            "properties": {
+                "base_fiscal_year": {"type": ["integer", "null"]},
+                "target_fiscal_year": {"type": ["integer", "null"]},
+                "horizon_years": {"type": ["integer", "null"]},
+            },
+        },
         "business_model_summary": {"type": "string"},
         "financial_summary": {"type": "string"},
         "key_growth_drivers": {"type": "array", "items": {"type": "string"}},
