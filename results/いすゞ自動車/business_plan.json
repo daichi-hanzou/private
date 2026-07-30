@@ -1,0 +1,202 @@
+{
+  "company_name": "いすゞ自動車",
+  "target_revenue_growth": 20.0,
+  "planning_period": {
+    "base_fiscal_year": 2026,
+    "target_fiscal_year": 2031,
+    "horizon_years": 5
+  },
+  "business_model_summary": "大型・中型CV、小型CV、LCV、産業用エンジン、部品・整備等を含む自動車事業と、販売を補完する金融・リース事業を展開している。150か国超の販売・アフターサポート網、顧客の運行データを用いるMIMAMORIおよびPREISMを基盤に、車両販売中心から商用モビリティ・ソリューションへ進化する方針である。[src_ec57cbad0c19][src_932359bc0ab7]",
+  "financial_summary": "2026年3月期の連結売上収益は3兆4,791億円、営業利益は2,037億円であり、営業利益率は約5.9%（営業利益÷売上収益の計算値）である。20.0%成長の到達売上収益は約4兆1,749億円（3兆4,791億円×1.20、増分約6,958億円）となる。これは会社が2031年3月期に掲げる売上高6兆円、営業利益率10%以上という長期目標を下回る水準だが、同目標は達成保証ではない。2026年3月期は販売台数増・価格対応があった一方、関税、資材費、為替、成長費用および中東情勢に伴う出荷停止の影響で営業利益は前年比11.2%減であり、売上拡大と収益性の両立には投資規律が必要である。[src_6a38ad7d52ce][src_dfa8a624e5ec]",
+  "key_growth_drivers": [
+    "CV・LCVの地域別商品・供給体制の強化。LCVは120超の国・地域で販売され、タイ・南アフリカ・インドを中心とする市場近接生産体制を有する。[src_b9f09ddcc061]",
+    "保有車両向けのコネクテッド運行管理・高度純正整備を通じた、アフターサービス収益の拡大。[src_ec57cbad0c19]",
+    "自動運転およびバッテリーを活用するエネルギーマネジメントの事業化。会社は自動運転の日本・米国での収益化と、複数地域でのエネマネ事業展開を目標としている。[src_3167e2117ff2]"
+  ],
+  "growth_plan": [
+    {
+      "name": "CV・LCVの地域別商品投入と供給力の強化",
+      "description": "新車販売の成長施策として、CVでは既存の海外販売網を活用し、LCVでは地域別ニーズに合わせた商品・価格帯・生産拠点の組合せを継続する。LCVはタイ、南アフリカ、インドの3拠点を活用した供給体制を持ち、D-MAX EVは2025年4月に量産開始済みである。供給制約を避けるため、100万台のサプライチェーン構築という会社方針に沿って、調達複線化、品質、販売・サービス能力を案件ごとに確認する。本施策の対象は車両・パワートレイン等の新車売上に限定し、アフターサービスおよび新規ソリューションの売上は他施策に計上する。[src_b9f09ddcc061][src_3167e2117ff2]",
+      "expected_revenue_impact": null,
+      "expected_profit_impact": null,
+      "required_investment": "個別施策への投資額・売上予測は資料上で開示されていないため特定しない。全社では2024年3月期から2031年3月期までに、既存事業投資1.6兆円、イノベーション投資1.0兆円、計2.6兆円を計画している。案件ごとの投資判断は、この総枠内で供給能力、採算、規制適合および投下資本回収を検証して行う。[src_bf790c27b446][src_b4e9b0155dab]",
+      "implementation_difficulty": "High",
+      "main_risks": [
+        "米国関税、市況悪化、中東情勢による出荷停止など、地域需要・通商・物流の変動。[src_6a38ad7d52ce]",
+        "原材料、半導体、エネルギー、輸送費の上昇を価格転嫁・生産性向上で吸収できないリスク。[src_5bc89603eee2]",
+        "排出ガス・CO2規制、輸出入・技術移転制限等の地政学・規制リスク。[src_0ec451a48175][src_5bc89603eee2]"
+      ],
+      "evidence_source_ids": [
+        "src_b9f09ddcc061",
+        "src_3167e2117ff2",
+        "src_bf790c27b446",
+        "src_b4e9b0155dab",
+        "src_6a38ad7d52ce",
+        "src_5bc89603eee2"
+      ]
+    },
+    {
+      "name": "保有車両向けコネクテッド・アフターサービスの収益化",
+      "description": "新車販売とは別に、導入済み車両を対象としてMIMAMORIによる運行管理、PREISMによる遠隔データ活用型の高度純正整備を、販売・サービス網で標準提案する。顧客の稼働、保守および運行課題の解決を起点に、部品、整備、運行支援の継続収益を拡大する。販売・サービスインフラへの投資方針はあるが、資料にはサービス別の単価、契約率、解約率、競合比較および市場規模がないため、売上効果を数値化しない。[src_ec57cbad0c19][src_0533e6bf63f0]",
+      "expected_revenue_impact": null,
+      "expected_profit_impact": null,
+      "required_investment": "販売・サービスインフラ基盤投資は全社投資テーマとして示されているが、本施策への配賦額は未開示である。顧客データの安全な利用、サービス品質、販売店・整備網の能力および人財育成に必要な投資を、投資案件ごとに承認する。[src_bf790c27b446][src_4de4295e6144]",
+      "implementation_difficulty": "Medium",
+      "main_risks": [
+        "顧客別のデータ利用条件、データ管理・移転規制、サイバーセキュリティに関する制約。[src_5bc89603eee2]",
+        "サービス提供を支えるDX人財・整備人財の能力開発と、グローバル人財マネジメント基盤の整備が遅れるリスク。[src_4de4295e6144]",
+        "サービス別の市場規模、競合、顧客単価および利益率が根拠資料にないため、事前の地域・顧客別実証なしに収益計画を確定できない。"
+      ],
+      "evidence_source_ids": [
+        "src_ec57cbad0c19",
+        "src_0533e6bf63f0",
+        "src_bf790c27b446",
+        "src_4de4295e6144",
+        "src_5bc89603eee2"
+      ]
+    },
+    {
+      "name": "自動運転・エネルギーマネジメントの段階的事業化",
+      "description": "車両販売・既存アフターサービスとは区分して、自動運転ソリューションを日本・米国で収益化し、バッテリーをアセットとするエネルギーマネジメントを複数地域で展開するという会社の長期方針を、実証、顧客価値検証、商用契約、地域展開の順に進める。新規事業は技術・規制・採算の不確実性が高いため、各段階で安全性、顧客便益、投資回収および法規制適合を満たす案件だけを次段階へ移行する。売上は本施策にのみ計上し、車両販売や既存保守サービスとの重複計上をしない。[src_3167e2117ff2][src_64e8d7fe681f]",
+      "expected_revenue_impact": null,
+      "expected_profit_impact": null,
+      "required_investment": "自動運転、コネクテッド、カーボンニュートラル技術などを含むイノベーション投資1.0兆円は全社累計計画であるが、新規事業別の投資額および収益化時期は資料上特定できない。したがって、個別投資額はnull相当として案件別のゲート審査で決定する。[src_bf790c27b446]",
+      "implementation_difficulty": "High",
+      "main_risks": [
+        "自動運転・エネルギーマネジメントの収益モデル、需要規模、競合状況、許認可および事業化時期を定量評価する資料が提示されていない。",
+        "技術革新、ビジネスモデル変化、ESG・脱炭素要請への対応遅延。[src_5bc89603eee2]",
+        "長期投資が先行する一方で、資材費・為替・金利変動により資金効率が悪化するリスク。[src_5bc89603eee2]"
+      ],
+      "evidence_source_ids": [
+        "src_3167e2117ff2",
+        "src_64e8d7fe681f",
+        "src_bf790c27b446",
+        "src_5bc89603eee2"
+      ]
+    }
+  ],
+  "risk_assessment": [
+    "需要・通商面では、米国関税影響、市況悪化、中東情勢による出荷停止が既に2026年3月期の業績に影響しており、地域・輸送ルート・調達先の集中は目標達成リスクである。[src_6a38ad7d52ce][src_5bc89603eee2]",
+    "為替は米ドル、タイバーツ等の円換算、原材料価格および販売価格に影響する。為替予約等を用いたリスク管理は行われているが、大幅変動の影響を完全には除去できない。[src_5bc89603eee2][src_830e10d52257]",
+    "2026年3月期には売上収益が前年比7.5%増加した一方、営業利益は11.2%減少した。したがって、売上成長だけを優先せず、案件別の採算・キャッシュフロー・投下資本管理が必要である。[src_6a38ad7d52ce]",
+    "市場規模、競合各社のシェア・価格・能力、施策別単価・契約率は根拠資料に含まれない。これらを事実として置いたシェア獲得や利益の定量計画は作成できない。",
+    "財務面では営業活動によるキャッシュ・フロー247,419百万円に対し投資活動によるキャッシュ・フローは169,996百万円の支出であり、配当性向平均40%維持と自己株式取得継続の方針もある。投資余力を単純に全額成長投資へ振り向ける前提は置かない。[src_5fafe4c25954][src_706399cb65ff]",
+    "新規事業・データ活用では、データ管理・移転規制、安全保障上の調達制限、許認可変更を含む内部統制・コンプライアンス上の確認を各段階で実施する。ヘッジ取引等についても既存の社内規程に従い、統制の回避や会計操作は行わない。[src_5bc89603eee2][src_830e10d52257]"
+  ],
+  "feasibility_assessment": {
+    "rating": "Medium",
+    "rationale": "20.0%成長は、2026年3月期売上収益3兆4,791億円から2031年3月期に約4兆1,749億円へ到達する水準であり、会社が掲げる2031年3月期売上高6兆円より低い。そのため会社の公表戦略との整合性はある。一方、会社目標自体は将来目標であって達成保証ではなく、足元では営業利益が減少している。加えて、関税・地政学・為替・資材費の影響、市場規模・競合・施策別収益性の定量根拠不足、新規事業の収益化不確実性があるため、「High」ではなくMediumと評価する。[src_dfa8a624e5ec][src_6a38ad7d52ce][src_5bc89603eee2]",
+    "constraints": [
+      "市場規模、競合比較、地域別シェア、価格・販売台数見通しが根拠資料にないため、施策別売上・利益寄与を定量化できない。",
+      "2031年3月期までの全社投資計画は2.6兆円であり、同時に財務健全性、平均40%の配当性向、自己株式取得の継続を方針としている。個別案件は資金制約と投資回収の審査を要する。[src_bf790c27b446][src_706399cb65ff]",
+      "人的資本経営、DXケイパビリティ、グローバル人財マネジメントを整備する方針は示されているが、施策別に必要な人員数・採用可能性・スキル充足率は未開示である。[src_4de4295e6144]",
+      "海外生産・販売への依存により、関税、規制、重要海上交通路、為替、原材料・半導体の変動を完全には統制できない。[src_5bc89603eee2]"
+    ],
+    "evidence_source_ids": [
+      "src_dfa8a624e5ec",
+      "src_6a38ad7d52ce",
+      "src_bf790c27b446",
+      "src_706399cb65ff",
+      "src_4de4295e6144",
+      "src_5bc89603eee2"
+    ]
+  },
+  "sources": [
+    {
+      "source_id": "src_0533e6bf63f0",
+      "file": "03_business_strategy/20240403_ISUZU_Transformation_JP.pdf",
+      "page": 28,
+      "category": "03_business_strategy"
+    },
+    {
+      "source_id": "src_0ec451a48175",
+      "file": "02_financial_reports/124.pdf",
+      "page": 24,
+      "category": "02_financial_reports"
+    },
+    {
+      "source_id": "src_3167e2117ff2",
+      "file": "03_business_strategy/20240403_ISUZU_Transformation_JP.pdf",
+      "page": 10,
+      "category": "03_business_strategy"
+    },
+    {
+      "source_id": "src_4de4295e6144",
+      "file": "03_business_strategy/20240403_ISUZU_Transformation_JP.pdf",
+      "page": 36,
+      "category": "03_business_strategy"
+    },
+    {
+      "source_id": "src_5bc89603eee2",
+      "file": "02_financial_reports/124.pdf",
+      "page": 25,
+      "category": "02_financial_reports"
+    },
+    {
+      "source_id": "src_5fafe4c25954",
+      "file": "02_financial_reports/124.pdf",
+      "page": 113,
+      "category": "02_financial_reports"
+    },
+    {
+      "source_id": "src_64e8d7fe681f",
+      "file": "03_business_strategy/20240403_ISUZU_Transformation_JP.pdf",
+      "page": 9,
+      "category": "03_business_strategy"
+    },
+    {
+      "source_id": "src_6a38ad7d52ce",
+      "file": "02_financial_reports/124.pdf",
+      "page": 30,
+      "category": "02_financial_reports"
+    },
+    {
+      "source_id": "src_706399cb65ff",
+      "file": "03_business_strategy/20240403_ISUZU_Transformation_JP.pdf",
+      "page": 33,
+      "category": "03_business_strategy"
+    },
+    {
+      "source_id": "src_830e10d52257",
+      "file": "02_financial_reports/124.pdf",
+      "page": 168,
+      "category": "02_financial_reports"
+    },
+    {
+      "source_id": "src_932359bc0ab7",
+      "file": "02_financial_reports/124.pdf",
+      "page": 110,
+      "category": "02_financial_reports"
+    },
+    {
+      "source_id": "src_b4e9b0155dab",
+      "file": "01_company_profile/integrated_report25_all.pdf",
+      "page": 23,
+      "category": "01_company_profile"
+    },
+    {
+      "source_id": "src_b9f09ddcc061",
+      "file": "01_company_profile/integrated_report25_all.pdf",
+      "page": 30,
+      "category": "01_company_profile"
+    },
+    {
+      "source_id": "src_bf790c27b446",
+      "file": "03_business_strategy/20240403_ISUZU_Transformation_JP.pdf",
+      "page": 34,
+      "category": "03_business_strategy"
+    },
+    {
+      "source_id": "src_dfa8a624e5ec",
+      "file": "01_company_profile/integrated_report25_all.pdf",
+      "page": 16,
+      "category": "01_company_profile"
+    },
+    {
+      "source_id": "src_ec57cbad0c19",
+      "file": "01_company_profile/integrated_report25_all.pdf",
+      "page": 17,
+      "category": "01_company_profile"
+    }
+  ]
+}
