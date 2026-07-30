@@ -720,7 +720,7 @@ def test_openai_client_uses_default_azure_credential(monkeypatch):
     monkeypatch.setenv(
         "AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/"
     )
-    monkeypatch.setenv("OPENAI_API_VERSION", "2025-04-01-preview")
+    monkeypatch.delenv("OPENAI_API_VERSION", raising=False)
     calls = {}
 
     class FakeCredential:
@@ -740,7 +740,7 @@ def test_openai_client_uses_default_azure_credential(monkeypatch):
     monkeypatch.setitem(sys.modules, "azure.identity", fake_identity)
     monkeypatch.setattr(
         openai_client,
-        "AzureOpenAI",
+        "OpenAI",
         lambda **kwargs: types.SimpleNamespace(kwargs=kwargs),
     )
 
@@ -751,7 +751,35 @@ def test_openai_client_uses_default_azure_credential(monkeypatch):
     )
     assert os.environ["AZURE_OPENAI_AD_TOKEN"] == "entra-token"
     assert client.kwargs == {
-        "azure_endpoint": "https://example.openai.azure.com/",
-        "api_version": "2025-04-01-preview",
-        "azure_ad_token_provider": "token-provider",
+        "base_url": "https://example.openai.azure.com/openai/v1/",
+        "api_key": "token-provider",
     }
+
+
+def test_openai_client_does_not_duplicate_v1_path(monkeypatch):
+    monkeypatch.setenv(
+        "AZURE_OPENAI_ENDPOINT",
+        "https://example.openai.azure.com/openai/v1/",
+    )
+
+    class FakeCredential:
+        def get_token(self, scope):
+            return types.SimpleNamespace(token="entra-token")
+
+    fake_identity = types.SimpleNamespace(
+        DefaultAzureCredential=FakeCredential,
+        get_bearer_token_provider=lambda *args: "token-provider",
+    )
+    monkeypatch.setitem(sys.modules, "azure", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "azure.identity", fake_identity)
+    monkeypatch.setattr(
+        openai_client,
+        "OpenAI",
+        lambda **kwargs: types.SimpleNamespace(kwargs=kwargs),
+    )
+
+    client = openai_client.create_openai_client()
+
+    assert client.kwargs["base_url"] == (
+        "https://example.openai.azure.com/openai/v1/"
+    )

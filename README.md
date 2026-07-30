@@ -18,7 +18,6 @@ Azure OpenAIをMicrosoft Entra IDで利用する場合は、`OPENAI_API_KEY`の�
 
 ```dotenv
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-OPENAI_API_VERSION=your_azure_openai_api_version
 OPENAI_MODEL=your-chat-deployment-name
 OPENAI_EMBEDDING_MODEL=your-embedding-deployment-name
 ```
@@ -26,7 +25,9 @@ OPENAI_EMBEDDING_MODEL=your-embedding-deployment-name
 `AZURE_OPENAI_ENDPOINT`が設定されている場合、CLIは`DefaultAzureCredential`で
 `https://cognitiveservices.azure.com/.default`のトークンを取得します。取得したトークンは
 `AZURE_OPENAI_AD_TOKEN`へ設定され、長時間実行中の更新にはBearerトークンプロバイダーが
-使用されます。ローカル開発では、Azure CLIのログインなど、
+使用されます。Azure OpenAIへのリクエストは
+`<endpoint>/openai/v1/`のResponses APIへ送信されます。日付形式の
+`OPENAI_API_VERSION`はこのv1接続では使用しません。ローカル開発では、Azure CLIのログインなど、
 `DefaultAzureCredential`が利用できる認証を事前に完了してください。
 
 ## Data layout

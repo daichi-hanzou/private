@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from openai import AzureOpenAI, OpenAI
+from openai import OpenAI
 
 
 AZURE_COGNITIVE_SERVICES_SCOPE = (
@@ -14,12 +14,6 @@ def create_openai_client() -> OpenAI:
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     if not endpoint:
         return OpenAI()
-
-    api_version = os.getenv("OPENAI_API_VERSION")
-    if not api_version:
-        raise ValueError(
-            "OPENAI_API_VERSION is required when AZURE_OPENAI_ENDPOINT is set"
-        )
 
     # Keep Azure Identity optional for users of the standard OpenAI endpoint.
     try:
@@ -35,14 +29,17 @@ def create_openai_client() -> OpenAI:
     credential = DefaultAzureCredential()
     token = credential.get_token(AZURE_COGNITIVE_SERVICES_SCOPE)
     os.environ["AZURE_OPENAI_AD_TOKEN"] = token.token
-    os.environ["OPENAI_API_VERSION"] = api_version
     os.environ["AZURE_OPENAI_ENDPOINT"] = endpoint
 
     token_provider = get_bearer_token_provider(
         credential, AZURE_COGNITIVE_SERVICES_SCOPE
     )
-    return AzureOpenAI(
-        azure_endpoint=endpoint,
-        api_version=api_version,
-        azure_ad_token_provider=token_provider,
+    normalized_endpoint = endpoint.rstrip("/")
+    if normalized_endpoint.endswith("/openai/v1"):
+        base_url = f"{normalized_endpoint}/"
+    else:
+        base_url = f"{normalized_endpoint}/openai/v1/"
+    return OpenAI(
+        base_url=base_url,
+        api_key=token_provider,
     )
