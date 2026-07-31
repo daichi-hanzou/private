@@ -6,6 +6,13 @@ SCORE_PROPERTIES = {
     )
 }
 
+FAILURE_PATTERNS = [
+    "DemandShortfall", "MarginErosion", "InventoryPush",
+    "FinancingRelaxation", "LargeDealConcentration", "ExcessPromotion",
+    "AcquisitionDependence", "ServiceChurn", "NewBusinessOverinvestment",
+    "QualityRecall", "RevenuePullForward", "SupplyDisruption",
+]
+
 FINANCIAL_OUTCOME_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": [
@@ -91,12 +98,15 @@ REALITY_OUTCOME_SCHEMA = {
             "items": {
                 "type": "object", "additionalProperties": False,
                 "required": [
-                    "failure_reason_id", "category", "proximate_cause",
+                    "failure_reason_id", "category", "failure_pattern", "proximate_cause",
                     "root_cause", "financial_effect", "evidence_source_ids",
                 ],
                 "properties": {
                     "failure_reason_id": {"type": "string"},
                     "category": {"type": "string"},
+                    "failure_pattern": {
+                        "type": "string", "enum": FAILURE_PATTERNS
+                    },
                     "proximate_cause": {"type": "string"},
                     "root_cause": {"type": "string"},
                     "financial_effect": {"type": "string"},
@@ -110,15 +120,29 @@ REALITY_OUTCOME_SCHEMA = {
             "type": "array", "items": {"type": "string"}
         },
         "synthetic_internal_data": {
-            "type": "array", "minItems": 3,
+            "type": "array", "minItems": 1, "maxItems": 12,
             "items": {
                 "type": "object", "additionalProperties": False,
                 "required": [
+                    "planning_option_id", "option_type",
+                    "predecessor_initiative_names",
                     "initiative_name", "addressable_pipeline_revenue_million_yen",
                     "conversion_rate_pct", "one_year_revenue_opportunity_million_yen",
                     "operating_margin_pct", "confidence", "assumption_basis",
+                    "suggested_resource_allocation", "failure_pattern_addressed",
                 ],
                 "properties": {
+                    "planning_option_id": {"type": "string"},
+                    "option_type": {
+                        "type": "string",
+                        "enum": [
+                            "Continue", "Expand", "Reduce", "Merge",
+                            "Replace", "Terminate", "New",
+                        ],
+                    },
+                    "predecessor_initiative_names": {
+                        "type": "array", "items": {"type": "string"}
+                    },
                     "initiative_name": {"type": "string"},
                     "addressable_pipeline_revenue_million_yen": {"type": "number"},
                     "conversion_rate_pct": {"type": "number"},
@@ -128,6 +152,27 @@ REALITY_OUTCOME_SCHEMA = {
                         "type": "string", "enum": ["Low", "Medium"]
                     },
                     "assumption_basis": {"type": "string"},
+                    "suggested_resource_allocation": {
+                        "type": "object", "additionalProperties": False,
+                        "required": [
+                            "investment_million_yen", "headcount_fte",
+                            "marketing_spend_million_yen",
+                            "production_capacity_pct",
+                        ],
+                        "properties": {
+                            "investment_million_yen": {"type": "number", "minimum": 0},
+                            "headcount_fte": {"type": "integer", "minimum": 0},
+                            "marketing_spend_million_yen": {
+                                "type": "number", "minimum": 0
+                            },
+                            "production_capacity_pct": {
+                                "type": "number", "minimum": 0, "maximum": 100
+                            },
+                        },
+                    },
+                    "failure_pattern_addressed": {
+                        "type": "string", "enum": FAILURE_PATTERNS,
+                    },
                 },
             },
         },

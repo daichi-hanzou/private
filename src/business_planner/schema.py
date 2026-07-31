@@ -4,7 +4,7 @@ BUSINESS_PLAN_SCHEMA = {
     "required": [
         "company_name", "target_revenue_growth", "planning_period", "business_model_summary",
         "financial_summary", "key_growth_drivers", "growth_plan",
-        "risk_assessment", "feasibility_assessment", "sources",
+        "portfolio_decisions", "risk_assessment", "feasibility_assessment", "sources",
     ],
     "properties": {
         "company_name": {"type": "string"},
@@ -22,13 +22,16 @@ BUSINESS_PLAN_SCHEMA = {
         "financial_summary": {"type": "string"},
         "key_growth_drivers": {"type": "array", "items": {"type": "string"}},
         "growth_plan": {
-            "type": "array", "minItems": 3, "maxItems": 3,
+            "type": "array", "minItems": 1, "maxItems": 8,
             "items": {
                 "type": "object", "additionalProperties": False,
                 "required": [
                     "name", "description", "expected_revenue_impact",
                     "expected_profit_impact", "required_investment",
                     "implementation_difficulty", "main_risks", "evidence_source_ids",
+                    "planning_option_id", "portfolio_action",
+                    "predecessor_initiative_names", "decision_rationale",
+                    "resource_allocation",
                 ],
                 "properties": {
                     "name": {"type": "string"},
@@ -43,6 +46,72 @@ BUSINESS_PLAN_SCHEMA = {
                     "evidence_source_ids": {
                         "type": "array", "items": {"type": "string"}
                     },
+                    "planning_option_id": {"type": ["string", "null"]},
+                    "portfolio_action": {
+                        "type": "string",
+                        "enum": [
+                            "Continue", "Expand", "Reduce", "Merge",
+                            "Replace", "Terminate", "New",
+                        ],
+                    },
+                    "predecessor_initiative_names": {
+                        "type": "array", "items": {"type": "string"}
+                    },
+                    "decision_rationale": {"type": "string"},
+                    "resource_allocation": {
+                        "type": "object", "additionalProperties": False,
+                        "required": [
+                            "investment_million_yen", "headcount_fte",
+                            "marketing_spend_million_yen",
+                            "production_capacity_pct",
+                            "allocation_rationale",
+                        ],
+                        "properties": {
+                            "investment_million_yen": {"type": "number", "minimum": 0},
+                            "headcount_fte": {"type": "integer", "minimum": 0},
+                            "marketing_spend_million_yen": {
+                                "type": "number", "minimum": 0
+                            },
+                            "production_capacity_pct": {
+                                "type": "number", "minimum": 0, "maximum": 100
+                            },
+                            "allocation_rationale": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+        "portfolio_decisions": {
+            "type": "array", "maxItems": 16,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": [
+                    "action", "predecessor_initiative_names",
+                    "successor_initiative_names", "reason",
+                    "investment_change_million_yen",
+                    "headcount_change_fte",
+                    "marketing_spend_change_million_yen",
+                    "production_capacity_change_pct",
+                ],
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "Continue", "Expand", "Reduce", "Merge",
+                            "Replace", "Terminate", "New",
+                        ],
+                    },
+                    "predecessor_initiative_names": {
+                        "type": "array", "items": {"type": "string"}
+                    },
+                    "successor_initiative_names": {
+                        "type": "array", "items": {"type": "string"}
+                    },
+                    "reason": {"type": "string"},
+                    "investment_change_million_yen": {"type": "number"},
+                    "headcount_change_fte": {"type": "integer"},
+                    "marketing_spend_change_million_yen": {"type": "number"},
+                    "production_capacity_change_pct": {"type": "number"},
                 },
             },
         },

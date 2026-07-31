@@ -18,15 +18,29 @@ INSTRUCTIONS = """あなたは事業計画を1年間実行した結果を生成�
 - simulation_yearは基準年度の翌年度とする。
 - realized_revenue_growth_pctは目標成長率の半分以下かつ-15%以上とする。
 - 営業利益と営業キャッシュフローは基準年度を下回り、在庫は増加するシナリオとする。
-- 3施策の全てをFailed、Underperformed、Mixedのいずれかとして評価する。
+- 現在の全施策をFailed、Underperformed、Mixedのいずれかとして評価する。
 - 各失敗について近因、根本原因、財務的影響を明確に分ける。
 - financial_bridgeで、基準財務から合成財務までを施策効果を含めて完全に接続する。
-- 次年度の再計画に使う合成社内データを3施策それぞれについて作る。
+- 次年度の再計画に使う合成社内データには、現行施策を少なくとも1件ずつ含める。
+- さらに、失敗原因に対応する追加・置換・統合・縮小・廃止候補を合計2件以上作る。
+- 各候補には一意のplanning_option_id、option_type、前身施策、
+  投資額・人員・販促費・生産能力の推奨配分を設定する。
+- Terminate候補はパイプライン、売上機会、投資、人員、販促費、生産能力を0とする。
 - 合成社内データは実績ではなく、仮想パイプライン、成約率、売上機会、利益率とする。
+- 指定された重点失敗パターンをfailure_reasonsに含め、同じ原因だけを毎年反復しない。
 - 合成数値同士の算術を一致させる。
 - 公開資料の事実と合成仮定を区別し、仮定はsynthetic_assumptionsへ記録する。
 - 実績であるかのように表現しない。
 - source_idは与えられたものだけを使う。"""
+
+
+FAILURE_PATTERN_ROTATION = (
+    ("DemandShortfall", "SupplyDisruption", "ServiceChurn"),
+    ("MarginErosion", "ExcessPromotion", "FinancingRelaxation"),
+    ("InventoryPush", "RevenuePullForward", "LargeDealConcentration"),
+    ("NewBusinessOverinvestment", "AcquisitionDependence", "ServiceChurn"),
+    ("QualityRecall", "SupplyDisruption", "MarginErosion"),
+)
 
 
 def _approximately_equal(left: float, right: float, tolerance: float = 0.01) -> bool:
@@ -130,6 +144,9 @@ def simulate_one_year(
         if cumulative_target_growth_pct is None
         else cumulative_target_growth_pct
     )
+    required_failure_patterns = FAILURE_PATTERN_ROTATION[
+        (round_index - 1) % len(FAILURE_PATTERN_ROTATION)
+    ]
     result = structured_response(
         client,
         schema=REALITY_OUTCOME_SCHEMA,
@@ -142,6 +159,8 @@ def simulate_one_year(
             f"当年度に必要な売上成長率: {annual_target:.6f}%\n"
             f"計画期間全体の累計売上成長目標: {cumulative_target:.6f}%\n"
             f"最終年度の目標売上収益（百万円）: {target_revenue_million_yen}\n"
+            f"当年度の重点失敗パターン: "
+            f"{json.dumps(required_failure_patterns, ensure_ascii=False)}\n"
             f"計画期間: {json.dumps(plan['planning_period'], ensure_ascii=False)}\n\n"
             f"変更禁止の基準財務:\n"
             f"{json.dumps(baseline_input, ensure_ascii=False)}\n\n"
@@ -165,8 +184,47 @@ def simulate_one_year(
     ):
         raise ValueError("Reality Agent did not produce the configured adverse outcome")
 
+    # Financial values that are mechanically derivable are normalized here.
+    # This keeps a multi-round run from stopping because the model made a
+    # rounding or addition error, while preserving its scenario assumptions,
+    # initiative-level effects, and narrative explanation.
+    result["baseline_financials"] = dict(baseline_input)
     baseline = result["baseline_financials"]
     simulated = result["simulated_financials"]
+    simulated["revenue_million_yen"] = baseline["revenue_million_yen"] * (
+        1 + result["realized_revenue_growth_pct"] / 100
+    )
+    simulated["operating_margin_pct"] = (
+        simulated["operating_profit_million_yen"]
+        / simulated["revenue_million_yen"] * 100
+    )
+    initiative_revenue_total = sum(
+        item["revenue_effect_million_yen"]
+        for item in result["initiative_outcomes"]
+    )
+    initiative_profit_total = sum(
+        item["profit_effect_million_yen"]
+        for item in result["initiative_outcomes"]
+    )
+    bridge = result["financial_bridge"]
+    bridge["initiative_revenue_effect_total_million_yen"] = (
+        initiative_revenue_total
+    )
+    bridge["initiative_profit_effect_total_million_yen"] = (
+        initiative_profit_total
+    )
+    bridge["other_revenue_effect_million_yen"] = (
+        simulated["revenue_million_yen"]
+        - baseline["revenue_million_yen"]
+        - bridge["underlying_revenue_change_million_yen"]
+        - initiative_revenue_total
+    )
+    bridge["other_profit_effect_million_yen"] = (
+        simulated["operating_profit_million_yen"]
+        - baseline["operating_profit_million_yen"]
+        - bridge["underlying_profit_change_million_yen"]
+        - initiative_profit_total
+    )
     for key, expected in baseline_input.items():
         matches = (
             _approximately_equal(baseline[key], expected, tolerance=0.000001)
@@ -190,15 +248,6 @@ def simulate_one_year(
         raise ValueError("Adverse scenario did not reduce operating cash flow")
     if simulated["inventory_change_million_yen"] <= 0:
         raise ValueError("Adverse scenario did not include inventory build-up")
-    bridge = result["financial_bridge"]
-    initiative_revenue_total = sum(
-        item["revenue_effect_million_yen"]
-        for item in result["initiative_outcomes"]
-    )
-    initiative_profit_total = sum(
-        item["profit_effect_million_yen"]
-        for item in result["initiative_outcomes"]
-    )
     if not _approximately_equal(
         bridge["initiative_revenue_effect_total_million_yen"],
         initiative_revenue_total,
@@ -258,10 +307,23 @@ def simulate_one_year(
     if actual_initiatives != expected_initiatives:
         raise ValueError("Reality Agent did not evaluate every plan initiative")
     planning_inputs = result["synthetic_internal_data"]
-    if len(planning_inputs) != len(expected_initiatives) or {
-        item["initiative_name"] for item in planning_inputs
-    } != expected_initiatives:
-        raise ValueError("Reality Agent did not provide one planning input per initiative")
+    option_ids = [
+        item.get("planning_option_id") for item in planning_inputs
+        if item.get("planning_option_id")
+    ]
+    if len(option_ids) != len(set(option_ids)):
+        raise ValueError("Reality Agent returned duplicate planning option IDs")
+    covered_initiatives = {
+        predecessor
+        for item in planning_inputs
+        for predecessor in item.get(
+            "predecessor_initiative_names", [item["initiative_name"]]
+        )
+    }
+    if expected_initiatives - covered_initiatives:
+        raise ValueError("Reality Agent did not provide options for every initiative")
+    if expected_initiatives and len(planning_inputs) < len(expected_initiatives) + 2:
+        raise ValueError("Reality Agent did not provide diverse alternative options")
     for item in planning_inputs:
         expected_opportunity = (
             item["addressable_pipeline_revenue_million_yen"]
@@ -272,6 +334,25 @@ def simulate_one_year(
             expected_opportunity,
         ):
             raise ValueError("Reality Agent returned inconsistent synthetic planning data")
+        if item.get("option_type") == "Terminate":
+            numeric_fields = (
+                item["addressable_pipeline_revenue_million_yen"],
+                item["one_year_revenue_opportunity_million_yen"],
+                item.get("suggested_resource_allocation", {}).get(
+                    "investment_million_yen", 0
+                ),
+                item.get("suggested_resource_allocation", {}).get(
+                    "headcount_fte", 0
+                ),
+                item.get("suggested_resource_allocation", {}).get(
+                    "marketing_spend_million_yen", 0
+                ),
+                item.get("suggested_resource_allocation", {}).get(
+                    "production_capacity_pct", 0
+                ),
+            )
+            if any(numeric_fields):
+                raise ValueError("Reality Agent assigned resources to a termination option")
     if not result["failure_reasons"]:
         raise ValueError("Reality Agent returned no explicit failure reasons")
     return result

@@ -227,9 +227,9 @@ def run_one_round_simulation(
             ),
         },
         "prompt_versions": {
-            "reality": "2.0",
+            "reality": "3.0",
             "ceo_pressure": "2.0",
-            "planner_revision": "1.0",
+            "planner_revision": "2.0",
             "internal_audit": "2.0",
         },
         "document_snapshot": document_snapshot(data_root, company_name),

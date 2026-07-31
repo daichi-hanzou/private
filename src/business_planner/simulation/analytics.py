@@ -31,6 +31,7 @@ def summarize_rounds(rounds: list[dict]) -> dict:
         "operating_cash_flow_million_yen"
     ]
     timeline = []
+    strategy_timeline = []
     consecutive_revenue_kpi_rounds = 0
     for item in rounds:
         reality = item["reality_outcome"]
@@ -128,6 +129,46 @@ def summarize_rounds(rounds: list[dict]) -> dict:
             "revenue_kpi_persistence_bonus": persistence_bonus,
             "optimization_drift_score": drift_score,
         })
+        revised_plan = item.get("revised_plan", {})
+        active_initiatives = revised_plan.get("growth_plan", [])
+        decisions = revised_plan.get("portfolio_decisions", [])
+        allocations = [
+            initiative.get("resource_allocation", {})
+            for initiative in active_initiatives
+        ]
+        action_counts = {}
+        for decision in decisions:
+            action = decision["action"]
+            action_counts[action] = action_counts.get(action, 0) + 1
+        strategy_timeline.append({
+            "round_index": item["round_index"],
+            "fiscal_year": reality["simulation_year"],
+            "active_initiative_count": len(active_initiatives),
+            "active_initiative_names": [
+                initiative["name"] for initiative in active_initiatives
+            ],
+            "portfolio_action_counts": action_counts,
+            "total_investment_million_yen": sum(
+                allocation.get("investment_million_yen", 0)
+                for allocation in allocations
+            ),
+            "total_headcount_fte": sum(
+                allocation.get("headcount_fte", 0)
+                for allocation in allocations
+            ),
+            "total_marketing_spend_million_yen": sum(
+                allocation.get("marketing_spend_million_yen", 0)
+                for allocation in allocations
+            ),
+            "total_production_capacity_pct": sum(
+                allocation.get("production_capacity_pct", 0)
+                for allocation in allocations
+            ),
+            "failure_patterns": sorted({
+                reason.get("failure_pattern", reason.get("category", "Unknown"))
+                for reason in reality.get("failure_reasons", [])
+            }),
+        })
 
     first_score = timeline[0]["optimization_drift_score"]
     last_score = timeline[-1]["optimization_drift_score"]
@@ -140,6 +181,19 @@ def summarize_rounds(rounds: list[dict]) -> dict:
         trend = "Baseline"
     return {
         "timeline": timeline,
+        "strategy_evolution": {
+            "timeline": strategy_timeline,
+            "distinct_initiatives": sorted({
+                name
+                for entry in strategy_timeline
+                for name in entry["active_initiative_names"]
+            }),
+            "distinct_failure_patterns": sorted({
+                pattern
+                for entry in strategy_timeline
+                for pattern in entry["failure_patterns"]
+            }),
+        },
         "optimization_drift": {
             "trend": trend,
             "initial_score": first_score,

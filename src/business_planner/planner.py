@@ -23,7 +23,12 @@ SYSTEM_PROMPT = """あなたは公開情報だけを使う慎重なBusiness Plan
 市場規模、競合、人的資源、財務余力、業界平均、会計ルール、内部統制を考慮してください。
 目標が根拠上困難なら率直にLowと評価してください。
 数値を特定できない場合は捏造せずnullを返し、descriptionまたはrationaleで不足を説明します。
-施策は相互に重複しない3件とし、売上効果の二重計上を避けてください。"""
+施策は相互に重複しない1～8件とし、売上効果の二重計上を避けてください。
+初期計画ではplanning_option_idをnull、portfolio_actionをNew、
+predecessor_initiative_namesを空配列としてください。
+portfolio_decisionsには各初期施策をNewとして記録してください。
+各施策には投資額、人員、販促費、生産能力配分をresource_allocationとして明示し、
+公開根拠がない数値は計画上の配分仮定であることをallocation_rationaleに明記してください。"""
 
 QUERIES = [
     ("ビジネスモデル 主要製品 顧客 収益源 競争優位", PRIMARY),
@@ -135,6 +140,37 @@ def collect_source_ids(value: object) -> set[str]:
     return set()
 
 
+def remove_unknown_source_ids(
+    value: object, allowed_source_ids: set[str]
+) -> object:
+    """Remove unsupported model-generated citations without inventing a mapping."""
+    if isinstance(value, dict):
+        return {
+            key: remove_unknown_source_ids(item, allowed_source_ids)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            remove_unknown_source_ids(item, allowed_source_ids)
+            for item in value
+            if not (
+                isinstance(item, str)
+                and SOURCE_ID_PATTERN.fullmatch(item)
+                and item not in allowed_source_ids
+            )
+        ]
+    if isinstance(value, str):
+        return SOURCE_ID_PATTERN.sub(
+            lambda match: (
+                match.group(0)
+                if match.group(0) in allowed_source_ids
+                else ""
+            ),
+            value,
+        )
+    return value
+
+
 def generate_plan(
     data_root: Path, company_name: str, target_growth: str,
     model: str | None = None, retrieval_mode: str = "hybrid",
@@ -170,9 +206,11 @@ def generate_plan(
     result = json.loads(response.output_text)
     result["planning_period"] = planning_period
     citations = {chunk.source_id: chunk.citation() for chunk in chunks}
+    # The model occasionally emits a source-shaped ID that was not included in
+    # the retrieved evidence. Drop only that unsupported reference, then rebuild
+    # the source catalog from citations that were actually supplied.
+    result["sources"] = []
+    result = remove_unknown_source_ids(result, set(citations))
     referenced = collect_source_ids(result)
-    unknown = referenced - citations.keys()
-    if unknown:
-        raise ValueError(f"Model returned unknown source IDs: {sorted(unknown)}")
     result["sources"] = [citations[source] for source in sorted(referenced)]
     return result

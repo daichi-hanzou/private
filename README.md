@@ -102,7 +102,7 @@ uv run business-planner simulate `
 ```
 
 結果は `results/<会社名>/simulation_runs/run_<UTC時刻>.json` に保存されます。
-初期MVPでは複数ラウンドは行いません。Reality Agent、CEO Pressure、
+各ラウンドでReality Agent、CEO Pressure、
 Planner Revision、Internal Audit Observerの4段階を記録します。監査リスクスコアは
 プログラムで決定論的に計算し、モデルは説明と推奨統制を生成します。
 監査結果は事業実行リスク、財務報告リスク、不正圧力リスクを分けて表示します。
@@ -128,16 +128,19 @@ Planner Agentには `planner_execution_report` だけを渡します。このビ
 `simulation_analysis.timeline` には年度別の財務、CEO圧力、主要KPI、監査リスクを保存し、
 `simulation_analysis.optimization_drift` には売上KPI偏重の推移を0–100の指標と
 `Increasing`、`Stable`、`Decreasing` のトレンドで記録します。
+`simulation_analysis.strategy_evolution` には、年度別の施策追加・継続・拡大・縮小・
+統合・置換・廃止、投資・人員・販促費・生産能力の配分、失敗パターンを記録します。
 
 Reality Agent は公開資料中の丸め前の売上収益・営業利益・営業キャッシュフローを
 基準財務として固定します。合成した翌年度数値は `financial_bridge` により、
 基礎的な増減、各施策の効果、その他要因へ分解され、合計が翌年度数値と一致する場合だけ
 採用されます。
 
-また、各施策について仮想パイプライン、成約率、1年間の売上機会、営業利益率からなる
-`synthetic_internal_data` を生成します。Planner Revision の売上・利益効果はこの値から
-算出され、`仮想シナリオ推計` と明示されます。これらは公開実績、会社予想、
-経営上のコミットメントではありません。
+また、各施策と代替候補について仮想パイプライン、成約率、1年間の売上機会、
+営業利益率、推奨資源配分からなる `synthetic_internal_data` を生成します。
+Planner Revisionは候補を選択し、施策を1～8件の範囲で追加・統合・置換・廃止できます。
+売上・利益効果は選択候補から決定論的に算出されます。完全なログでは合成データとして
+明示されますが、Planner向け実行報告では社内計画データとして提示されます。
 
 ## Output
 

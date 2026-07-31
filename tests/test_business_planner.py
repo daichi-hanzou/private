@@ -12,6 +12,7 @@ from business_planner.planner import (
     collect_source_ids,
     openai_embedder,
     parse_growth,
+    remove_unknown_source_ids,
     validate_planning_period,
 )
 from business_planner.retrieval import BM25Retriever, HybridRetriever, VectorRetriever
@@ -128,6 +129,26 @@ def test_collect_source_ids_recurses_and_finds_inline_citations():
     assert collect_source_ids(payload) == {
         "src_012345abcdef", "src_fedcba987654"
     }
+
+
+def test_remove_unknown_source_ids_preserves_only_retrieved_citations():
+    payload = {
+        "evidence_source_ids": [
+            "src_012345abcdef",
+            "src_f5afe4c25954",
+        ],
+        "rationale": (
+            "根拠 src_012345abcdef、未取得 src_f5afe4c25954"
+        ),
+    }
+
+    cleaned = remove_unknown_source_ids(
+        payload, {"src_012345abcdef"}
+    )
+
+    assert cleaned["evidence_source_ids"] == ["src_012345abcdef"]
+    assert "src_f5afe4c25954" not in cleaned["rationale"]
+    assert collect_source_ids(cleaned) == {"src_012345abcdef"}
 
 
 def test_validate_planning_period():
@@ -360,7 +381,7 @@ def test_one_round_orchestrator_writes_complete_log(tmp_path, monkeypatch):
     assert result["summary"]["stopping_reason"] == "Configured round limit reached"
 
 
-def test_reality_agent_rejects_inconsistent_simulated_revenue(monkeypatch):
+def test_reality_agent_normalizes_inconsistent_simulated_revenue(monkeypatch):
     result = {
         "simulation_year": 2027,
         "target_revenue_growth_pct": 20.0,
@@ -374,13 +395,22 @@ def test_reality_agent_rejects_inconsistent_simulated_revenue(monkeypatch):
         },
         "simulated_financials": {
             "revenue_million_yen": 999,
-            "operating_profit_million_yen": 10,
+            "operating_profit_million_yen": 8,
             "operating_margin_pct": 1,
             "operating_cash_flow_million_yen": 10,
             "inventory_change_million_yen": 5,
         },
-        "failure_reasons": [],
+        "financial_bridge": {
+            "underlying_revenue_change_million_yen": 0,
+            "initiative_revenue_effect_total_million_yen": 0,
+            "other_revenue_effect_million_yen": 0,
+            "underlying_profit_change_million_yen": -2,
+            "initiative_profit_effect_total_million_yen": 0,
+            "other_profit_effect_million_yen": 0,
+        },
+        "failure_reasons": [{"failure_reason_id": "F1"}],
         "initiative_outcomes": [],
+        "synthetic_internal_data": [],
     }
     monkeypatch.setattr(
         reality, "structured_response",
@@ -393,21 +423,24 @@ def test_reality_agent_rejects_inconsistent_simulated_revenue(monkeypatch):
             "売上収益は100百万円、営業利益は10百万円。"
             "営業活動によるキャッシュ・フローは20百万円。"
         ),
+        "growth_plan": [],
     }
-    with pytest.raises(ValueError, match="inconsistent simulated revenue"):
-        reality.simulate_one_year(
-            object(),
-            plan=plan,
-            evidence="",
-            baseline_financials={
-                "revenue_million_yen": 100,
-                "operating_profit_million_yen": 10,
-                "operating_margin_pct": 10,
-                "operating_cash_flow_million_yen": 20,
-                "inventory_change_million_yen": 0,
-            },
-            round_index=1,
-        )
+    normalized = reality.simulate_one_year(
+        object(),
+        plan=plan,
+        evidence="",
+        baseline_financials={
+            "revenue_million_yen": 100,
+            "operating_profit_million_yen": 10,
+            "operating_margin_pct": 10,
+            "operating_cash_flow_million_yen": 20,
+            "inventory_change_million_yen": 0,
+        },
+        round_index=1,
+    )
+
+    assert normalized["simulated_financials"]["revenue_million_yen"] == 105
+    assert normalized["financial_bridge"]["other_revenue_effect_million_yen"] == 5
 
 
 def test_extract_baseline_financials_uses_precise_source_values():
@@ -651,6 +684,86 @@ def test_planner_revision_normalizes_estimated_impacts(monkeypatch):
     )
 
 
+def test_planner_revision_can_replace_initiative_and_allocate_resources(monkeypatch):
+    prior_plan = {
+        "company_name": "Test Company",
+        "target_revenue_growth": 20.0,
+        "planning_period": {
+            "base_fiscal_year": 2026,
+            "target_fiscal_year": 2031,
+            "horizon_years": 5,
+        },
+        "growth_plan": [
+            {"name": "旧施策"},
+            {"name": "未採用施策"},
+        ],
+    }
+    model_result = {
+        **prior_plan,
+        "growth_plan": [{
+            "name": "代替施策",
+            "planning_option_id": "OPT-2",
+            "portfolio_action": "Replace",
+            "predecessor_initiative_names": ["旧施策"],
+            "expected_revenue_impact": None,
+            "expected_profit_impact": None,
+            "required_investment": None,
+            "resource_allocation": {"allocation_rationale": "売上回復を優先"},
+        }],
+        "portfolio_decisions": [{
+            "action": "Replace",
+            "predecessor_initiative_names": ["旧施策"],
+            "successor_initiative_names": ["代替施策"],
+            "reason": "旧施策が不振",
+            "investment_change_million_yen": 500,
+            "headcount_change_fte": 10,
+            "marketing_spend_change_million_yen": 100,
+            "production_capacity_change_pct": 20,
+        }],
+    }
+    monkeypatch.setattr(
+        planner_revision,
+        "structured_response",
+        lambda *args, **kwargs: model_result,
+    )
+    execution_report = {
+        "internal_planning_data": [{
+            "planning_option_id": "OPT-2",
+            "option_type": "Replace",
+            "predecessor_initiative_names": ["旧施策"],
+            "initiative_name": "代替施策",
+            "one_year_revenue_opportunity_million_yen": 20_000,
+            "operating_margin_pct": 6,
+            "suggested_resource_allocation": {
+                "investment_million_yen": 5_000,
+                "headcount_fte": 40,
+                "marketing_spend_million_yen": 1_000,
+                "production_capacity_pct": 35,
+            },
+        }],
+    }
+
+    result = planner_revision.revise_plan(
+        object(),
+        prior_plan=prior_plan,
+        execution_report=execution_report,
+        ceo_feedback={},
+        evidence="",
+    )
+
+    initiative = result["growth_plan"][0]
+    assert initiative["name"] == "代替施策"
+    assert initiative["portfolio_action"] == "Replace"
+    assert initiative["expected_revenue_impact"] == "社内計画推計: +20,000百万円"
+    assert initiative["resource_allocation"]["headcount_fte"] == 40
+    assert initiative["required_investment"] == "社内計画配分: +5,000百万円"
+    assert result["portfolio_decisions"][0]["action"] == "Replace"
+    assert result["portfolio_decisions"][1]["action"] == "Terminate"
+    assert result["portfolio_decisions"][1][
+        "predecessor_initiative_names"
+    ] == ["未採用施策"]
+
+
 def test_reality_normalizes_model_returned_year_before_validation(monkeypatch):
     result = {
         "round_index": 1,
@@ -673,11 +786,11 @@ def test_reality_normalizes_model_returned_year_before_validation(monkeypatch):
         },
         "financial_bridge": {
             "underlying_revenue_change_million_yen": 5,
-            "initiative_revenue_effect_total_million_yen": 0,
-            "other_revenue_effect_million_yen": 0,
+            "initiative_revenue_effect_total_million_yen": 999,
+            "other_revenue_effect_million_yen": 999,
             "underlying_profit_change_million_yen": -2,
-            "initiative_profit_effect_total_million_yen": 0,
-            "other_profit_effect_million_yen": 0,
+            "initiative_profit_effect_total_million_yen": 999,
+            "other_profit_effect_million_yen": 999,
         },
         "initiative_outcomes": [],
         "failure_reasons": [{"failure_reason_id": "F1"}],
@@ -706,6 +819,14 @@ def test_reality_normalizes_model_returned_year_before_validation(monkeypatch):
 
     assert normalized["simulation_year"] == 2028
     assert normalized["round_index"] == 2
+    assert normalized["financial_bridge"][
+        "initiative_revenue_effect_total_million_yen"
+    ] == 0
+    assert normalized["financial_bridge"]["other_revenue_effect_million_yen"] == 0
+    assert normalized["financial_bridge"][
+        "initiative_profit_effect_total_million_yen"
+    ] == 0
+    assert normalized["financial_bridge"]["other_profit_effect_million_yen"] == 0
 
 
 def test_openai_client_uses_standard_endpoint_without_azure(monkeypatch):
