@@ -10,12 +10,18 @@ from openai import OpenAI
 from ..agents.ceo_pressure import generate_ceo_feedback
 from ..agents.internal_audit import observe_internal_audit
 from ..agents.planner_revision import revise_plan
-from ..agents.reality import extract_baseline_financials, simulate_one_year
+from ..agents.reality import extract_baseline_financials
 from ..ingestion import chunk_documents, company_slug, load_documents
+from ..executive_principles import (
+    load_executive_principles,
+    principles_metadata,
+    resolve_principles_path,
+)
 from ..planner import (
     collect_source_ids,
     make_retriever,
     parse_growth,
+    remove_unknown_source_ids,
     validate_planning_period,
 )
 from ..openai_client import create_chat_client, create_embedding_client
@@ -27,6 +33,7 @@ from .state import (
 )
 from .views import build_planner_execution_report
 from .analytics import summarize_rounds
+from .reality_pipeline import simulate_one_year
 
 
 REALITY_QUERY = (
@@ -71,11 +78,16 @@ def run_one_round_simulation(
     ceo_pressure: str = "high",
     rounds: int = 1,
     model: str | None = None,
+    principles_file: Path | None = None,
+    use_executive_principles: bool = True,
+    retrieval_limit: int = 4,
 ) -> tuple[dict, Path]:
     growth = parse_growth(target_growth)
     planning_period = validate_planning_period(base_fiscal_year, target_fiscal_year)
     if rounds < 1:
         raise ValueError("--rounds must be at least 1")
+    if not 1 <= retrieval_limit <= 50:
+        raise ValueError("--retrieval-limit must be between 1 and 50")
     maximum_rounds = target_fiscal_year - base_fiscal_year
     configured_rounds = min(rounds, maximum_rounds)
     plan_path = plan_path or (
@@ -107,6 +119,12 @@ def run_one_round_simulation(
             f"Business plan contains unknown source IDs: {sorted(unknown_plan_sources)}"
         )
     plan["sources"] = [citations[source] for source in sorted(plan_source_ids)]
+    principles_path = (
+        resolve_principles_path(data_root, company_name, principles_file)
+        if use_executive_principles
+        else None
+    )
+    executive_principles = load_executive_principles(principles_path)
     embedding_client = (
         create_embedding_client() if retrieval_mode == "hybrid" else None
     )
@@ -123,7 +141,7 @@ def run_one_round_simulation(
         current_plan = state["current_plan"]
         annual_target_growth = required_annual_growth_pct(state)
         evidence_chunks = _retrieve_evaluation_evidence(
-            retriever, current_plan
+            retriever, current_plan, per_query=retrieval_limit
         )
         if not evidence_chunks:
             raise ValueError("No evidence was retrieved for reality evaluation")
@@ -156,6 +174,7 @@ def run_one_round_simulation(
             pressure_level=ceo_pressure,
             round_index=round_index,
             model=model,
+            executive_principles=executive_principles,
         )
         planner_execution_report = build_planner_execution_report(
             reality_outcome
@@ -167,14 +186,12 @@ def run_one_round_simulation(
             ceo_feedback=ceo_feedback,
             evidence=_evidence_text(evidence_chunks),
             model=model,
+            executive_principles=executive_principles,
+        )
+        revised_plan = remove_unknown_source_ids(
+            revised_plan, allowed_ids
         )
         revised_source_ids = collect_source_ids(revised_plan)
-        unknown_revised_sources = revised_source_ids - allowed_ids
-        if unknown_revised_sources:
-            raise ValueError(
-                f"Planner Revision returned unknown source IDs: "
-                f"{sorted(unknown_revised_sources)}"
-            )
         revised_plan["sources"] = [
             citations[source] for source in sorted(revised_source_ids)
         ]
@@ -195,6 +212,13 @@ def run_one_round_simulation(
         )
         round_results.append({
             "round_index": round_index,
+            "environment_outcome": reality_outcome.get(
+                "environment_outcome"
+            ),
+            "execution_outcome": reality_outcome.get(
+                "execution_outcome"
+            ),
+            "financial_engine": reality_outcome.get("financial_engine"),
             "reality_outcome": reality_outcome,
             "planner_execution_report": planner_execution_report,
             "ceo_feedback": ceo_feedback,
@@ -216,6 +240,7 @@ def run_one_round_simulation(
             "rounds": configured_rounds,
             "requested_rounds": rounds,
             "retrieval": retrieval_mode,
+            "retrieval_limit_per_query": retrieval_limit,
             "ceo_pressure": ceo_pressure.title(),
             "revenue_target_interpretation": (
                 "Cumulative growth from base fiscal year to target fiscal year"
@@ -225,9 +250,16 @@ def run_one_round_simulation(
             "embedding_model": os.getenv(
                 "OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"
             ),
+            "executive_principles": principles_metadata(
+                executive_principles, principles_path
+            ),
+            "executive_principles_enabled": use_executive_principles,
         },
         "prompt_versions": {
-            "reality": "3.0",
+            "environment": "1.0",
+            "execution": "1.0",
+            "financial_engine": "1.0",
+            "reality_integration": "4.0",
             "ceo_pressure": "2.0",
             "planner_revision": "2.0",
             "internal_audit": "2.0",

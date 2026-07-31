@@ -7,10 +7,11 @@ SCORE_PROPERTIES = {
 }
 
 FAILURE_PATTERNS = [
-    "DemandShortfall", "MarginErosion", "InventoryPush",
-    "FinancingRelaxation", "LargeDealConcentration", "ExcessPromotion",
-    "AcquisitionDependence", "ServiceChurn", "NewBusinessOverinvestment",
-    "QualityRecall", "RevenuePullForward", "SupplyDisruption",
+    "DemandShortfall", "SupplyDisruption", "ServiceChurn",
+    "QualityRecall", "CostInflation", "RegulatoryDelay",
+    "TechnologyDelay", "CustomerAdoptionDelay",
+    "LaborCapacityConstraint", "CompetitivePressure",
+    "FXHeadwind", "ProjectExecutionDelay",
 ]
 
 FINANCIAL_OUTCOME_SCHEMA = {

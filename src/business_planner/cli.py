@@ -24,7 +24,18 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--target-fiscal-year", type=int)
     plan.add_argument("--model")
     plan.add_argument("--retrieval", choices=["hybrid", "bm25"], default="hybrid")
+    plan.add_argument(
+        "--retrieval-limit", type=int, default=5,
+        help="Maximum retrieved chunks per planning query (1-50)",
+    )
     plan.add_argument("--output", type=Path)
+    plan.add_argument("--principles-file", type=Path)
+    plan.add_argument(
+        "--principles-mode",
+        choices=["enabled", "disabled"],
+        default="enabled",
+        help="Enable or disable executive principles for the Planner",
+    )
 
     inspect = commands.add_parser("inspect", help="Inspect retrieved evidence")
     inspect.add_argument("--company-name", required=True)
@@ -41,10 +52,21 @@ def parser() -> argparse.ArgumentParser:
     simulate.add_argument("--target-fiscal-year", type=int, required=True)
     simulate.add_argument("--retrieval", choices=["hybrid", "bm25"], default="hybrid")
     simulate.add_argument(
+        "--retrieval-limit", type=int, default=4,
+        help="Maximum retrieved chunks per simulation query (1-50)",
+    )
+    simulate.add_argument(
         "--ceo-pressure", choices=["low", "medium", "high"], default="high"
     )
     simulate.add_argument("--model")
     simulate.add_argument("--plan-file", type=Path)
+    simulate.add_argument("--principles-file", type=Path)
+    simulate.add_argument(
+        "--principles-mode",
+        choices=["enabled", "disabled"],
+        default="enabled",
+        help="Enable or disable executive principles for CEO and Planner",
+    )
     simulate.add_argument(
         "--rounds",
         type=int,
@@ -69,6 +91,9 @@ def main(argv: list[str] | None = None) -> int:
             payload = generate_plan(
                 args.data_root, args.company_name, args.target_revenue_growth, args.model,
                 args.retrieval, args.base_fiscal_year, args.target_fiscal_year,
+                args.principles_file,
+                args.principles_mode == "enabled",
+                args.retrieval_limit,
             )
             output = args.output or (
                 Path("results") / company_slug(args.company_name) / "business_plan.json"
@@ -89,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
                 ceo_pressure=args.ceo_pressure,
                 rounds=args.rounds,
                 model=args.model,
+                principles_file=args.principles_file,
+                use_executive_principles=(
+                    args.principles_mode == "enabled"
+                ),
+                retrieval_limit=args.retrieval_limit,
             )
             payload = {**payload, "output_file": output.as_posix()}
         print(json.dumps(payload, ensure_ascii=False, indent=2))

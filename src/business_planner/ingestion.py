@@ -54,6 +54,12 @@ def load_documents(data_root: Path, company_name: str) -> list[Document]:
         if not path.is_file() or path.suffix.lower() not in SUPPORTED:
             continue
         relative = path.relative_to(company_dir)
+        # Trusted agent configuration is not source evidence and must never be
+        # retrieved by Reality or passed indirectly to Internal Audit.
+        if relative.as_posix() == (
+            "00_governance/executive_principles.json"
+        ):
+            continue
         category = _category(relative)
         suffix = path.suffix.lower()
         if suffix == ".pdf":

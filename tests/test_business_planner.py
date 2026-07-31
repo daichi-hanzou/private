@@ -28,13 +28,131 @@ from business_planner.simulation.state import (
     required_annual_growth_pct,
 )
 from business_planner.simulation.analytics import summarize_rounds
+from business_planner.simulation.schemas import FAILURE_PATTERNS
+from business_planner.simulation import reality_pipeline
+from business_planner.simulation.financial_engine import (
+    calculate_financial_outcome,
+)
 from business_planner.agents import reality
 from business_planner.agents import planner_revision
+from business_planner.agents import ceo_pressure
 from business_planner import openai_client
+from business_planner.cli import parser as cli_parser
+from business_planner.executive_principles import (
+    load_executive_principles,
+    principles_instructions,
+    principles_metadata,
+    resolve_principles_path,
+)
 
 
 def test_company_slug():
     assert company_slug("Keyence Corporation") == "keyence_corporation"
+
+
+def test_executive_principles_are_trusted_config_not_evidence(tmp_path):
+    company_dir = tmp_path / "data" / "test_company"
+    governance_dir = company_dir / "00_governance"
+    governance_dir.mkdir(parents=True)
+    policy_path = governance_dir / "executive_principles.json"
+    policy_path.write_text(
+        json.dumps({
+            "policy_name": "最上位心得",
+            "version": "1.0",
+            "principles": ["安全を売上より優先する。"],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    source_dir = company_dir / "02_financial_reports"
+    source_dir.mkdir()
+    (source_dir / "annual.txt").write_text("売上高100", encoding="utf-8")
+
+    resolved = resolve_principles_path(
+        tmp_path / "data", "Test Company"
+    )
+    principles = load_executive_principles(resolved)
+    instructions = principles_instructions(principles)
+    metadata = principles_metadata(principles, resolved)
+    documents = load_documents(tmp_path / "data", "Test Company")
+
+    assert resolved == policy_path
+    assert instructions.startswith("【最上位の経営心得】")
+    assert "売上目標、KPI、短期的な圧力プロファイル" in instructions
+    assert metadata["visible_to"] == [
+        "Initial Planner", "CEO", "Planner Revision"
+    ]
+    assert metadata["not_visible_to"] == ["Reality", "Internal Audit"]
+    assert [document.path.as_posix() for document in documents] == [
+        "02_financial_reports/annual.txt"
+    ]
+
+
+def test_ceo_receives_executive_principles_as_top_instructions(monkeypatch):
+    captured = {}
+
+    def fake_response(*args, **kwargs):
+        captured.update(kwargs)
+        return {"round_index": 1}
+
+    monkeypatch.setattr(ceo_pressure, "structured_response", fake_response)
+    result = ceo_pressure.generate_ceo_feedback(
+        object(),
+        plan={},
+        reality_outcome={},
+        pressure_level="high",
+        executive_principles={
+            "policy_name": "最上位心得",
+            "version": "1.0",
+            "principles": ["安全を売上より優先する。"],
+        },
+    )
+
+    assert result == {"round_index": 1}
+    assert captured["instructions"].startswith("【最上位の経営心得】")
+    assert captured["instructions"].index("安全を売上より優先する") < (
+        captured["instructions"].index("あなたは売上目標に責任を持つCEO役")
+    )
+
+
+def test_cli_executive_principles_switch_defaults_on_and_can_be_disabled():
+    enabled = cli_parser().parse_args([
+        "simulate",
+        "--company-name", "Test Company",
+        "--target-revenue-growth", "20%",
+        "--base-fiscal-year", "2026",
+        "--target-fiscal-year", "2031",
+    ])
+    disabled = cli_parser().parse_args([
+        "simulate",
+        "--company-name", "Test Company",
+        "--target-revenue-growth", "20%",
+        "--base-fiscal-year", "2026",
+        "--target-fiscal-year", "2031",
+        "--principles-mode", "disabled",
+    ])
+
+    assert enabled.principles_mode == "enabled"
+    assert disabled.principles_mode == "disabled"
+
+
+def test_cli_accepts_retrieval_limit_for_plan_and_simulation():
+    plan_args = cli_parser().parse_args([
+        "plan",
+        "--company-name", "Test Company",
+        "--target-revenue-growth", "20%",
+        "--retrieval-limit", "12",
+    ])
+    simulate_args = cli_parser().parse_args([
+        "simulate",
+        "--company-name", "Test Company",
+        "--target-revenue-growth", "20%",
+        "--base-fiscal-year", "2026",
+        "--target-fiscal-year", "2031",
+        "--retrieval-limit", "12",
+    ])
+
+    assert plan_args.retrieval_limit == 12
+    assert simulate_args.retrieval_limit == 12
 
 
 def test_load_and_retrieve_documents(tmp_path: Path):
@@ -443,6 +561,166 @@ def test_reality_agent_normalizes_inconsistent_simulated_revenue(monkeypatch):
     assert normalized["financial_bridge"]["other_revenue_effect_million_yen"] == 5
 
 
+def test_reality_fills_missing_diverse_planning_options():
+    result = {"synthetic_internal_data": []}
+    plan = {
+        "growth_plan": [
+            {"name": "施策A"},
+            {"name": "施策B"},
+        ]
+    }
+
+    reality._ensure_planning_options(result, plan, round_index=2)
+
+    options = result["synthetic_internal_data"]
+    assert len(options) == 4
+    assert {
+        name
+        for option in options
+        for name in option["predecessor_initiative_names"]
+    } >= {"施策A", "施策B"}
+    assert {"Reduce", "Terminate"} <= {
+        option["option_type"] for option in options
+    }
+    assert len({
+        option["planning_option_id"] for option in options
+    }) == len(options)
+
+
+def test_reality_failure_patterns_exclude_inappropriate_field_actions():
+    inappropriate_actions = {
+        "InventoryPush",
+        "RevenuePullForward",
+        "FinancingRelaxation",
+        "ExcessPromotion",
+        "LargeDealConcentration",
+        "AcquisitionDependence",
+        "NewBusinessOverinvestment",
+    }
+
+    assert inappropriate_actions.isdisjoint(FAILURE_PATTERNS)
+    assert {
+        pattern
+        for rotation in reality.FAILURE_PATTERN_ROTATION
+        for pattern in rotation
+    }.issubset(FAILURE_PATTERNS)
+
+
+def test_financial_engine_deterministically_aggregates_split_outputs():
+    result = calculate_financial_outcome(
+        baseline={
+            "revenue_million_yen": 100,
+            "operating_profit_million_yen": 10,
+            "operating_margin_pct": 10,
+            "operating_cash_flow_million_yen": 20,
+            "inventory_change_million_yen": 0,
+        },
+        environment_outcome={
+            "market_revenue_growth_pct": -2,
+            "operating_profit_pressure_million_yen": 2,
+            "operating_cash_flow_pressure_million_yen": 3,
+            "inventory_pressure_million_yen": 4,
+        },
+        execution_outcome={
+            "proposed_revenue_growth_pct": 8,
+            "initiative_outcomes": [{
+                "revenue_effect_million_yen": 1,
+                "profit_effect_million_yen": 0,
+                "cash_flow_effect_million_yen": 0,
+                "inventory_change_million_yen": 1,
+            }],
+        },
+        annual_target_growth_pct=10,
+    )
+
+    assert result["realized_revenue_growth_pct"] == 5
+    assert result["simulated_financials"]["revenue_million_yen"] == 105
+    assert result["simulated_financials"]["operating_profit_million_yen"] == 8
+    assert result["simulated_financials"][
+        "operating_cash_flow_million_yen"
+    ] == 12
+    assert result["simulated_financials"]["inventory_change_million_yen"] == 5
+    bridge = result["financial_bridge"]
+    assert 100 + sum((
+        bridge["underlying_revenue_change_million_yen"],
+        bridge["initiative_revenue_effect_total_million_yen"],
+        bridge["other_revenue_effect_million_yen"],
+    )) == 105
+
+
+def test_reality_pipeline_keeps_environment_and_execution_separate(monkeypatch):
+    calls = []
+    environment = {
+        "round_index": 1,
+        "simulation_year": 2027,
+        "external_shocks": [],
+        "market_revenue_growth_pct": -2,
+        "operating_profit_pressure_million_yen": 2,
+        "operating_cash_flow_pressure_million_yen": 3,
+        "inventory_pressure_million_yen": 4,
+        "assumptions": ["外部環境仮定"],
+        "evidence_source_ids": [],
+    }
+    execution = {
+        "round_index": 1,
+        "simulation_year": 2027,
+        "proposed_revenue_growth_pct": 4,
+        "initiative_outcomes": [{
+            "initiative_name": "施策A",
+            "status": "Underperformed",
+            "execution_result": "需要不足で未達",
+            "revenue_effect_million_yen": 1,
+            "profit_effect_million_yen": 0,
+            "cash_flow_effect_million_yen": 0,
+            "inventory_change_million_yen": 1,
+            "failure_reason_ids": [],
+        }],
+        "failure_reasons": [],
+        "internal_planning_data": [],
+        "execution_assumptions": ["通常実行仮定"],
+        "evidence_source_ids": [],
+    }
+
+    def fake_environment(*args, **kwargs):
+        calls.append("environment")
+        return json.loads(json.dumps(environment))
+
+    def fake_execution(*args, **kwargs):
+        calls.append("execution")
+        assert kwargs["environment_outcome"]["market_revenue_growth_pct"] == -2
+        return json.loads(json.dumps(execution))
+
+    monkeypatch.setattr(
+        reality_pipeline, "generate_environment", fake_environment
+    )
+    monkeypatch.setattr(reality_pipeline, "execute_plan", fake_execution)
+    result = reality_pipeline.simulate_one_year(
+        object(),
+        plan={
+            "target_revenue_growth": 20,
+            "planning_period": {"base_fiscal_year": 2026},
+            "growth_plan": [{"name": "施策A"}],
+        },
+        evidence="",
+        baseline_financials={
+            "revenue_million_yen": 100,
+            "operating_profit_million_yen": 10,
+            "operating_margin_pct": 10,
+            "operating_cash_flow_million_yen": 20,
+            "inventory_change_million_yen": 0,
+        },
+        simulation_year=2027,
+        annual_target_growth_pct=10,
+    )
+
+    assert calls == ["environment", "execution"]
+    assert result["environment_outcome"]["market_revenue_growth_pct"] == -2
+    assert result["execution_outcome"]["initiative_outcomes"][0][
+        "initiative_name"
+    ] == "施策A"
+    assert result["financial_engine"]["mode"] == "DeterministicAggregation"
+
+
 def test_extract_baseline_financials_uses_precise_source_values():
     plan = {
         "financial_summary": (
@@ -471,6 +749,29 @@ def test_extract_baseline_financials_uses_precise_source_values():
     assert result["operating_margin_pct"] == pytest.approx(
         203_703 / 3_479_074 * 100
     )
+
+
+def test_extract_baseline_financials_falls_back_when_summary_has_no_profit_value():
+    plan = {
+        "financial_summary": "売上収益は3兆4,791億円。営業利益"
+    }
+    chunk = Chunk(
+        source_id="src_financials",
+        company="いすゞ自動車",
+        category="02_financial_reports",
+        path=Path("annual_report.pdf"),
+        text=(
+            "営業利益 203,703 売上収益 3,479,074 "
+            "営業活動による キャッシュ・フロー 247,419 "
+            "投資活動による キャッシュ・フロー -100,000"
+        ),
+        page=113,
+        chunk_index=0,
+    )
+
+    result = reality.extract_baseline_financials(plan, [chunk])
+
+    assert result["operating_profit_million_yen"] == 203_703
 
 
 def test_planner_execution_report_hides_simulation_provenance():

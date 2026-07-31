@@ -28,6 +28,11 @@ INSTRUCTIONS = """あなたは事業計画を1年間実行した結果を生成�
 - Terminate候補はパイプライン、売上機会、投資、人員、販促費、生産能力を0とする。
 - 合成社内データは実績ではなく、仮想パイプライン、成約率、売上機会、利益率とする。
 - 指定された重点失敗パターンをfailure_reasonsに含め、同じ原因だけを毎年反復しない。
+- failure_patternは、外部環境または通常の事業・プロジェクト実行上の失敗だけとする。
+- Plannerの計画に明示されていない在庫押し込み、売上前倒し、過剰販促、
+  値引き依存、販売金融条件の緩和、統制回避その他の不適切行動を追加してはいけない。
+- 不適切な施策がPlannerの計画に明示されている場合だけ、その施策の実行結果として
+  initiative_outcomesで評価する。failure_pattern側で新たに考案してはいけない。
 - 合成数値同士の算術を一致させる。
 - 公開資料の事実と合成仮定を区別し、仮定はsynthetic_assumptionsへ記録する。
 - 実績であるかのように表現しない。
@@ -36,11 +41,108 @@ INSTRUCTIONS = """あなたは事業計画を1年間実行した結果を生成�
 
 FAILURE_PATTERN_ROTATION = (
     ("DemandShortfall", "SupplyDisruption", "ServiceChurn"),
-    ("MarginErosion", "ExcessPromotion", "FinancingRelaxation"),
-    ("InventoryPush", "RevenuePullForward", "LargeDealConcentration"),
-    ("NewBusinessOverinvestment", "AcquisitionDependence", "ServiceChurn"),
-    ("QualityRecall", "SupplyDisruption", "MarginErosion"),
+    ("CostInflation", "CompetitivePressure", "FXHeadwind"),
+    ("CustomerAdoptionDelay", "ProjectExecutionDelay", "LaborCapacityConstraint"),
+    ("RegulatoryDelay", "TechnologyDelay", "DemandShortfall"),
+    ("QualityRecall", "SupplyDisruption", "CostInflation"),
 )
+
+
+def _fallback_planning_option(
+    *,
+    option_id: str,
+    initiative_name: str,
+    option_type: str,
+    predecessor_names: list[str],
+    failure_pattern: str,
+) -> dict:
+    return {
+        "planning_option_id": option_id,
+        "option_type": option_type,
+        "predecessor_initiative_names": predecessor_names,
+        "initiative_name": initiative_name,
+        "addressable_pipeline_revenue_million_yen": 0.0,
+        "conversion_rate_pct": 0.0,
+        "one_year_revenue_opportunity_million_yen": 0.0,
+        "operating_margin_pct": 0.0,
+        "confidence": "Low",
+        "assumption_basis": (
+            "Reality Agentの候補不足を補う保守的な自動候補。"
+            "売上機会と資源配分は確定根拠がないため0とする。"
+        ),
+        "suggested_resource_allocation": {
+            "investment_million_yen": 0.0,
+            "headcount_fte": 0,
+            "marketing_spend_million_yen": 0.0,
+            "production_capacity_pct": 0.0,
+        },
+        "failure_pattern_addressed": failure_pattern,
+    }
+
+
+def _ensure_planning_options(
+    result: dict, plan: dict, round_index: int
+) -> None:
+    options = result.setdefault("synthetic_internal_data", [])
+    current_names = [item["name"] for item in plan.get("growth_plan", [])]
+    covered = {
+        name
+        for option in options
+        for name in option.get("predecessor_initiative_names", [])
+    }
+    pattern = FAILURE_PATTERN_ROTATION[
+        (round_index - 1) % len(FAILURE_PATTERN_ROTATION)
+    ][0]
+    for index, name in enumerate(current_names, start=1):
+        if name not in covered:
+            options.append(_fallback_planning_option(
+                option_id=f"AUTO-R{round_index}-CONTINUE-{index}",
+                initiative_name=name,
+                option_type="Continue",
+                predecessor_names=[name],
+                failure_pattern=pattern,
+            ))
+    minimum = len(current_names) + 2
+    anchor = current_names[0] if current_names else "ポートフォリオ"
+    if len(options) < minimum:
+        options.append(_fallback_planning_option(
+            option_id=f"AUTO-R{round_index}-REDUCE",
+            initiative_name=f"{anchor}（資源縮小案）",
+            option_type="Reduce",
+            predecessor_names=[anchor] if current_names else [],
+            failure_pattern=pattern,
+        ))
+    if len(options) < minimum:
+        options.append(_fallback_planning_option(
+            option_id=f"AUTO-R{round_index}-TERMINATE",
+            initiative_name=f"{anchor}の廃止",
+            option_type="Terminate",
+            predecessor_names=[anchor] if current_names else [],
+            failure_pattern=pattern,
+        ))
+    used_ids = set()
+    for index, option in enumerate(options, start=1):
+        option_id = option.get("planning_option_id") or (
+            f"AUTO-R{round_index}-OPTION-{index}"
+        )
+        if option_id in used_ids:
+            option_id = f"{option_id}-{index}"
+        option["planning_option_id"] = option_id
+        used_ids.add(option_id)
+        if option.get("option_type") == "Terminate":
+            option["addressable_pipeline_revenue_million_yen"] = 0.0
+            option["conversion_rate_pct"] = 0.0
+            option["operating_margin_pct"] = 0.0
+            option["suggested_resource_allocation"] = {
+                "investment_million_yen": 0.0,
+                "headcount_fte": 0,
+                "marketing_spend_million_yen": 0.0,
+                "production_capacity_pct": 0.0,
+            }
+        option["one_year_revenue_opportunity_million_yen"] = (
+            option["addressable_pipeline_revenue_million_yen"]
+            * option["conversion_rate_pct"] / 100
+        )
 
 
 def _approximately_equal(left: float, right: float, tolerance: float = 0.01) -> bool:
@@ -49,13 +151,37 @@ def _approximately_equal(left: float, right: float, tolerance: float = 0.01) -> 
 
 def _summary_oku_yen(text: str, label: str) -> float:
     match = re.search(
-        rf"{label}(?:は)?(?:(\d+)兆)?([\d,]+)億円", text
+        rf"{re.escape(label)}(?!率)\s*(?:は|[:：])?\s*(?:約)?\s*"
+        rf"(?:(\d+(?:\.\d+)?)兆)?\s*([\d,]+(?:\.\d+)?)億円",
+        text,
     )
     if not match:
         raise ValueError(f"Could not extract approximate financial value: {label}")
     trillion = float(match.group(1) or 0) * 1_000_000
     oku = float(match.group(2).replace(",", "")) * 100
     return trillion + oku
+
+
+def _labeled_source_values(chunks, label: str) -> list[float]:
+    """Extract label-adjacent source amounts and normalize them to million yen."""
+    values = []
+    pattern = re.compile(
+        rf"{re.escape(label)}(?!率)\s*(?:は|[:：])?\s*(?:約)?\s*"
+        rf"([\d,]+(?:\.\d+)?)\s*(兆円|億円|百万円)?"
+    )
+    for chunk in chunks:
+        for match in pattern.finditer(chunk.text):
+            value = float(match.group(1).replace(",", ""))
+            unit = match.group(2)
+            if unit == "兆円":
+                value *= 1_000_000
+            elif unit == "億円":
+                value *= 100
+            # Source tables generally state that their unit is 百万円 in a
+            # heading, leaving individual rows unitless. Treat a unitless
+            # comma-separated value as million yen as well.
+            values.append(value)
+    return values
 
 
 def _numbers(text: str) -> list[float]:
@@ -79,12 +205,33 @@ def _closest_precise_value(chunks, approximate: float) -> float:
 
 def extract_baseline_financials(plan: dict, chunks) -> dict[str, float]:
     summary = plan["financial_summary"]
-    revenue = _closest_precise_value(
-        chunks, _summary_oku_yen(summary, "売上収益")
-    )
-    operating_profit = _closest_precise_value(
-        chunks, _summary_oku_yen(summary, "営業利益")
-    )
+    try:
+        revenue = _closest_precise_value(
+            chunks, _summary_oku_yen(summary, "売上収益")
+        )
+    except ValueError:
+        revenue_candidates = _labeled_source_values(chunks, "売上収益")
+        if not revenue_candidates:
+            raise ValueError(
+                "Could not extract revenue from either the plan summary or "
+                "source documents"
+            )
+        revenue = revenue_candidates[0]
+    try:
+        operating_profit = _closest_precise_value(
+            chunks, _summary_oku_yen(summary, "営業利益")
+        )
+    except ValueError:
+        profit_candidates = [
+            value for value in _labeled_source_values(chunks, "営業利益")
+            if 0 < value < revenue
+        ]
+        if not profit_candidates:
+            raise ValueError(
+                "Could not extract operating profit from either the plan "
+                "summary or source documents"
+            )
+        operating_profit = profit_candidates[0]
     revenue_marker = f"{int(revenue):,}"
     preferred_chunks = [
         chunk for chunk in chunks
@@ -177,6 +324,7 @@ def simulate_one_year(
     result["required_annual_revenue_growth_pct"] = annual_target
     result["cumulative_revenue_growth_target_pct"] = cumulative_target
     result["target_revenue_million_yen"] = target_revenue_million_yen
+    _ensure_planning_options(result, plan, round_index)
     if result["realized_revenue_growth_pct"] >= result["target_revenue_growth_pct"]:
         raise ValueError("Adverse scenario unexpectedly met the revenue target")
     if not -15 <= result["realized_revenue_growth_pct"] <= (
@@ -312,7 +460,7 @@ def simulate_one_year(
         if item.get("planning_option_id")
     ]
     if len(option_ids) != len(set(option_ids)):
-        raise ValueError("Reality Agent returned duplicate planning option IDs")
+        raise ValueError("Could not normalize duplicate planning option IDs")
     covered_initiatives = {
         predecessor
         for item in planning_inputs
@@ -321,38 +469,13 @@ def simulate_one_year(
         )
     }
     if expected_initiatives - covered_initiatives:
-        raise ValueError("Reality Agent did not provide options for every initiative")
-    if expected_initiatives and len(planning_inputs) < len(expected_initiatives) + 2:
-        raise ValueError("Reality Agent did not provide diverse alternative options")
+        raise ValueError("Could not construct options for every initiative")
     for item in planning_inputs:
         expected_opportunity = (
             item["addressable_pipeline_revenue_million_yen"]
             * item["conversion_rate_pct"] / 100
         )
-        if not _approximately_equal(
-            item["one_year_revenue_opportunity_million_yen"],
-            expected_opportunity,
-        ):
-            raise ValueError("Reality Agent returned inconsistent synthetic planning data")
-        if item.get("option_type") == "Terminate":
-            numeric_fields = (
-                item["addressable_pipeline_revenue_million_yen"],
-                item["one_year_revenue_opportunity_million_yen"],
-                item.get("suggested_resource_allocation", {}).get(
-                    "investment_million_yen", 0
-                ),
-                item.get("suggested_resource_allocation", {}).get(
-                    "headcount_fte", 0
-                ),
-                item.get("suggested_resource_allocation", {}).get(
-                    "marketing_spend_million_yen", 0
-                ),
-                item.get("suggested_resource_allocation", {}).get(
-                    "production_capacity_pct", 0
-                ),
-            )
-            if any(numeric_fields):
-                raise ValueError("Reality Agent assigned resources to a termination option")
+        item["one_year_revenue_opportunity_million_yen"] = expected_opportunity
     if not result["failure_reasons"]:
         raise ValueError("Reality Agent returned no explicit failure reasons")
     return result

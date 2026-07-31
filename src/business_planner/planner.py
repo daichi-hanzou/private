@@ -8,6 +8,11 @@ from pathlib import Path
 from openai import OpenAI
 
 from .ingestion import chunk_documents, load_documents
+from .executive_principles import (
+    load_executive_principles,
+    principles_instructions,
+    resolve_principles_path,
+)
 from .openai_client import create_chat_client, create_embedding_client
 from .retrieval import BM25Retriever, HybridRetriever
 from .schema import BUSINESS_PLAN_SCHEMA
@@ -18,17 +23,13 @@ PRIMARY = {
 }
 EXTERNAL = {"05_peer_companies", "06_industry_market"}
 
-SYSTEM_PROMPT = """あなたは公開情報だけを使う慎重なBusiness Plannerです。
-与えられた根拠以外を事実として述べてはいけません。全ての主要判断にsource_idを付けます。
-市場規模、競合、人的資源、財務余力、業界平均、会計ルール、内部統制を考慮してください。
-目標が根拠上困難なら率直にLowと評価してください。
-数値を特定できない場合は捏造せずnullを返し、descriptionまたはrationaleで不足を説明します。
+SYSTEM_PROMPT = """あなたはBusiness Plannerです。
+市場規模、競合、人的資源、財務余力、業界平均を考慮してください。
 施策は相互に重複しない1～8件とし、売上効果の二重計上を避けてください。
 初期計画ではplanning_option_idをnull、portfolio_actionをNew、
 predecessor_initiative_namesを空配列としてください。
 portfolio_decisionsには各初期施策をNewとして記録してください。
-各施策には投資額、人員、販促費、生産能力配分をresource_allocationとして明示し、
-公開根拠がない数値は計画上の配分仮定であることをallocation_rationaleに明記してください。"""
+各施策には投資額、人員、販促費、生産能力配分をresource_allocationとして明示してください。"""
 
 QUERIES = [
     ("ビジネスモデル 主要製品 顧客 収益源 競争優位", PRIMARY),
@@ -175,7 +176,12 @@ def generate_plan(
     data_root: Path, company_name: str, target_growth: str,
     model: str | None = None, retrieval_mode: str = "hybrid",
     base_fiscal_year: int | None = None, target_fiscal_year: int | None = None,
+    principles_file: Path | None = None,
+    use_executive_principles: bool = True,
+    retrieval_limit: int = 5,
 ) -> dict:
+    if not 1 <= retrieval_limit <= 50:
+        raise ValueError("--retrieval-limit must be between 1 and 50")
     growth = parse_growth(target_growth)
     planning_period = validate_planning_period(base_fiscal_year, target_fiscal_year)
     client = create_chat_client()
@@ -185,14 +191,23 @@ def generate_plan(
     chunks = retrieve_context(
         data_root,
         company_name,
+        per_query=retrieval_limit,
         mode=retrieval_mode,
         client=embedding_client,
     )
     if not chunks:
         raise ValueError("No relevant evidence was retrieved")
+    principles_path = (
+        resolve_principles_path(data_root, company_name, principles_file)
+        if use_executive_principles
+        else None
+    )
+    executive_principles = load_executive_principles(principles_path)
     response = client.responses.create(
         model=model or os.getenv("OPENAI_MODEL", "gpt-5.6"),
-        instructions=SYSTEM_PROMPT,
+        instructions=(
+            principles_instructions(executive_principles) + SYSTEM_PROMPT
+        ),
         input=build_user_prompt(company_name, growth, chunks, planning_period),
         text={
             "format": {

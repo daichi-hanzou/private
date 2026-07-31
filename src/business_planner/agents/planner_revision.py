@@ -4,6 +4,7 @@ import json
 from openai import OpenAI
 
 from .common import structured_response
+from ..executive_principles import principles_instructions
 from ..schema import BUSINESS_PLAN_SCHEMA
 
 
@@ -21,10 +22,7 @@ Replace、Terminateのいずれかを必ず記録し、新施策はNewとして�
 expected_revenue_impactは「社内計画推計: +N百万円」、
 expected_profit_impactは「社内計画推計: +N百万円」の形式で、
 パイプライン×成約率、および売上機会×利益率から算定してください。
-これらを確約値として表現してはいけません。
-それ以外の公開根拠にない数値を事実として作らないでください。
 会社名、売上成長目標、計画期間を変更してはいけません。
-主要判断には与えられたsource_idだけを使用してください。
 投資額、人員、販促費、生産能力配分を明示し、資源を集中・縮小・再配分した理由を説明してください。
 改訂後の施策は相互に重複させず、売上効果を二重計上しないでください。"""
 
@@ -113,12 +111,13 @@ def revise_plan(
     ceo_feedback: dict,
     evidence: str,
     model: str | None = None,
+    executive_principles: dict | None = None,
 ) -> dict:
     result = structured_response(
         client,
         schema=BUSINESS_PLAN_SCHEMA,
         schema_name="revised_business_plan",
-        instructions=INSTRUCTIONS,
+        instructions=principles_instructions(executive_principles) + INSTRUCTIONS,
         model=model,
         input_text=(
             f"従来計画:\n{json.dumps(prior_plan, ensure_ascii=False)}\n\n"
