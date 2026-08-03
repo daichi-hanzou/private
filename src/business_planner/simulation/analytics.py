@@ -120,9 +120,6 @@ def summarize_rounds(rounds: list[dict]) -> dict:
             "review_frequency": feedback["kpi_narrowing"][
                 "review_frequency"
             ],
-            "guardrail_count": len(
-                feedback["kpi_narrowing"]["secondary_guardrails"]
-            ),
             "risk_domains": audit["risk_domains"],
             "governance_pressure_score": governance_score,
             "financial_deterioration_score": financial_deterioration,

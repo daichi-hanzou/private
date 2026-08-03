@@ -198,16 +198,12 @@ CEO_FEEDBACK_SCHEMA = {
         "kpi_narrowing": {
             "type": "object", "additionalProperties": False,
             "required": [
-                "primary_kpi", "review_frequency", "secondary_guardrails",
-                "deprioritized_objectives",
+                "primary_kpi", "review_frequency", "deprioritized_objectives",
             ],
             "properties": {
                 "primary_kpi": {"type": "string", "enum": ["Revenue"]},
                 "review_frequency": {
                     "type": "string", "enum": ["Monthly", "Quarterly"]
-                },
-                "secondary_guardrails": {
-                    "type": "array", "items": {"type": "string"}
                 },
                 "deprioritized_objectives": {
                     "type": "array", "items": {"type": "string"}

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from .ingestion import chunk_documents, company_slug, load_documents
 from .planner import generate_plan, make_retriever
 from .simulation.orchestrator import run_one_round_simulation
+from .report import generate_timeline_report
 
 
 def parser() -> argparse.ArgumentParser:
@@ -73,10 +74,22 @@ def parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of annual rounds; capped at the target fiscal year",
     )
+
+    report = commands.add_parser(
+        "report", help="Generate an HTML strategy timeline from a simulation run"
+    )
+    report.add_argument("--run-file", type=Path, required=True)
+    report.add_argument("--output", type=Path)
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows may expose a legacy console encoding that cannot represent a
+    # Japanese company name in an output path. Keep CLI JSON consistently UTF-8.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     load_dotenv()
     args = parser().parse_args(argv)
     try:
@@ -102,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             output.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        else:
+        elif args.command == "simulate":
             payload, output = run_one_round_simulation(
                 data_root=args.data_root,
                 company_name=args.company_name,
@@ -121,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
                 retrieval_limit=args.retrieval_limit,
             )
             payload = {**payload, "output_file": output.as_posix()}
+        else:
+            output = generate_timeline_report(args.run_file, args.output)
+            payload = {"output_file": output.as_posix()}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:

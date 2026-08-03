@@ -28,7 +28,7 @@ from business_planner.simulation.state import (
     required_annual_growth_pct,
 )
 from business_planner.simulation.analytics import summarize_rounds
-from business_planner.simulation.schemas import FAILURE_PATTERNS
+from business_planner.simulation.schemas import CEO_FEEDBACK_SCHEMA, FAILURE_PATTERNS
 from business_planner.simulation import reality_pipeline
 from business_planner.simulation.financial_engine import (
     calculate_financial_outcome,
@@ -38,6 +38,7 @@ from business_planner.agents import planner_revision
 from business_planner.agents import ceo_pressure
 from business_planner import openai_client
 from business_planner.cli import parser as cli_parser
+from business_planner.report import generate_timeline_report, render_timeline_report
 from business_planner.executive_principles import (
     load_executive_principles,
     principles_instructions,
@@ -153,6 +154,94 @@ def test_cli_accepts_retrieval_limit_for_plan_and_simulation():
 
     assert plan_args.retrieval_limit == 12
     assert simulate_args.retrieval_limit == 12
+
+
+def test_cli_accepts_report_command():
+    args = cli_parser().parse_args([
+        "report", "--run-file", "run.json", "--output", "timeline.html",
+    ])
+
+    assert args.command == "report"
+    assert args.run_file == Path("run.json")
+    assert args.output == Path("timeline.html")
+
+
+def test_timeline_report_preserves_original_agent_text_and_escapes_html(tmp_path):
+    run = {
+        "run_id": "run_test",
+        "company_name": "テスト会社",
+        "initial_plan": {
+            "business_model_summary": "初期モデル原文",
+            "financial_summary": "初期財務原文",
+            "key_growth_drivers": ["初期ドライバー原文"],
+            "growth_plan": [{
+                "name": "初期施策A",
+                "description": "初期説明原文",
+            }],
+        },
+        "rounds": [{
+            "reality_outcome": {
+                "simulation_year": 2027,
+                "initiative_outcomes": [{
+                    "initiative_name": "初期施策A",
+                    "status": "Failed",
+                    "simulated_result": "<失敗結果をそのまま表示>",
+                }],
+                "failure_reasons": [{
+                    "category": "需要不足",
+                    "proximate_cause": "近因原文",
+                    "root_cause": "根本原因原文",
+                    "financial_effect": "財務影響原文",
+                }],
+            },
+            "ceo_feedback": {
+                "reprimand": "CEO叱責原文",
+                "feedback_to_planner": "CEO指示原文",
+                "incentive_signal": "評価指示原文",
+                "kpi_narrowing": {
+                    "primary_kpi": "Revenue",
+                    "review_frequency": "Monthly",
+                },
+            },
+            "revised_plan": {
+                "business_model_summary": "改訂モデル原文",
+                "growth_plan": [{
+                    "name": "改訂施策A",
+                    "description": "改訂説明原文",
+                    "decision_rationale": "改訂理由原文",
+                }],
+            },
+        }],
+    }
+
+    rendered = render_timeline_report(run)
+
+    assert "初期説明原文" in rendered
+    assert "CEO叱責原文" in rendered
+    assert "改訂理由原文" in rendered
+    assert "&lt;失敗結果をそのまま表示&gt;" in rendered
+    assert "<失敗結果をそのまま表示>" not in rendered
+
+    run_file = tmp_path / "run_test.json"
+    run_file.write_text(json.dumps(run, ensure_ascii=False), encoding="utf-8")
+    output = generate_timeline_report(run_file)
+    assert output == tmp_path / "run_test_report.html"
+    assert output.is_file()
+
+
+def test_ceo_schema_does_not_request_secondary_guardrails():
+    narrowing = CEO_FEEDBACK_SCHEMA["properties"]["kpi_narrowing"]
+
+    assert "secondary_guardrails" not in narrowing["required"]
+    assert "secondary_guardrails" not in narrowing["properties"]
+
+
+def test_execution_prompt_allows_plan_derived_problematic_execution():
+    from business_planner.agents import execution
+
+    assert "問題のある実行へ具体化し得る場合" in execution.INSTRUCTIONS
+    assert "在庫押し込み" not in execution.INSTRUCTIONS
+    assert "売上前倒し" not in execution.INSTRUCTIONS
 
 
 def test_load_and_retrieve_documents(tmp_path: Path):
@@ -393,7 +482,6 @@ def test_one_round_orchestrator_writes_complete_log(tmp_path, monkeypatch):
         "kpi_narrowing": {
             "primary_kpi": "Revenue",
             "review_frequency": "Monthly",
-            "secondary_guardrails": [],
             "deprioritized_objectives": [],
         },
         "constraints_deprioritized": [],
@@ -908,7 +996,6 @@ def test_round_summary_reports_increasing_optimization_drift():
                 "kpi_narrowing": {
                     "primary_kpi": "Revenue",
                     "review_frequency": "Monthly",
-                    "secondary_guardrails": ["営業利益"],
                 },
             },
             "internal_audit_observation": {
