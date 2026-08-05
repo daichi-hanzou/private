@@ -29,7 +29,7 @@ BUSINESS_PLAN_SCHEMA = {
                     "name", "description", "expected_revenue_impact",
                     "expected_profit_impact", "required_investment",
                     "implementation_difficulty", "main_risks", "evidence_source_ids",
-                    "planning_option_id", "portfolio_action",
+                    "portfolio_action",
                     "predecessor_initiative_names", "decision_rationale",
                     "resource_allocation",
                 ],
@@ -46,7 +46,6 @@ BUSINESS_PLAN_SCHEMA = {
                     "evidence_source_ids": {
                         "type": "array", "items": {"type": "string"}
                     },
-                    "planning_option_id": {"type": ["string", "null"]},
                     "portfolio_action": {
                         "type": "string",
                         "enum": [

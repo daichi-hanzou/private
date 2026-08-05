@@ -80,6 +80,10 @@ def parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--run-file", type=Path, required=True)
     report.add_argument("--output", type=Path)
+    report.add_argument(
+        "--view", choices=["detailed", "summary"], default="detailed",
+        help="Detailed original-text timeline or compact extractive summary",
+    )
     return root
 
 
@@ -135,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             payload = {**payload, "output_file": output.as_posix()}
         else:
-            output = generate_timeline_report(args.run_file, args.output)
+            output = generate_timeline_report(args.run_file, args.output, args.view)
             payload = {"output_file": output.as_posix()}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0

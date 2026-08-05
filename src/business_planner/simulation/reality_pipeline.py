@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from copy import deepcopy
-
 from openai import OpenAI
 
 from ..agents.environment import generate_environment
 from ..agents.execution import execute_plan
-from ..agents.reality import (
-    FAILURE_PATTERN_ROTATION,
-    _ensure_planning_options,
-)
+from ..agents.reality import FAILURE_PATTERN_ROTATION
 from ..planner import collect_source_ids, remove_unknown_source_ids
 from .financial_engine import calculate_financial_outcome
 
@@ -118,15 +113,6 @@ def simulate_one_year(
     )
     _normalize_initiative_outcomes(plan, execution_outcome)
     _normalize_failure_references(execution_outcome)
-    planning_container = {
-        "synthetic_internal_data": deepcopy(
-            execution_outcome.get("internal_planning_data", [])
-        )
-    }
-    _ensure_planning_options(planning_container, plan, round_index)
-    execution_outcome["internal_planning_data"] = planning_container[
-        "synthetic_internal_data"
-    ]
     financial = calculate_financial_outcome(
         baseline=baseline_financials,
         environment_outcome=environment_outcome,
@@ -169,9 +155,6 @@ def simulate_one_year(
         "financial_bridge": financial["financial_bridge"],
         "initiative_outcomes": public_initiative_outcomes,
         "failure_reasons": execution_outcome.get("failure_reasons", []),
-        "synthetic_internal_data": execution_outcome[
-            "internal_planning_data"
-        ],
         "synthetic_assumptions": (
             environment_outcome.get("assumptions", [])
             + execution_outcome.get("execution_assumptions", [])

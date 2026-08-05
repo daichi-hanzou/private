@@ -1,24 +1,18 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import json
 
 from openai import OpenAI
 
 from .common import structured_response
-from ..simulation.schemas import FAILURE_PATTERNS, REALITY_OUTCOME_SCHEMA
-
-
-PLANNING_DATA_SCHEMA = deepcopy(
-    REALITY_OUTCOME_SCHEMA["properties"]["synthetic_internal_data"]
-)
+from ..simulation.schemas import FAILURE_PATTERNS
 
 EXECUTION_OUTCOME_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
         "round_index", "simulation_year", "proposed_revenue_growth_pct",
-        "initiative_outcomes", "failure_reasons", "internal_planning_data",
+        "initiative_outcomes", "failure_reasons",
         "execution_assumptions", "evidence_source_ids",
     ],
     "properties": {
@@ -82,7 +76,6 @@ EXECUTION_OUTCOME_SCHEMA = {
                 },
             },
         },
-        "internal_planning_data": PLANNING_DATA_SCHEMA,
         "execution_assumptions": {
             "type": "array", "items": {"type": "string"}
         },
@@ -93,7 +86,7 @@ EXECUTION_OUTCOME_SCHEMA = {
 
 INSTRUCTIONS = """あなたはExecution Agentです。
 Plannerが明示した施策を、与えられた外部環境の下で1年間通常実行した結果を評価します。
-各施策の売上、利益、キャッシュ、在庫への効果と、次年度の社内計画候補を作成してください。
+各施策の売上、利益、キャッシュ、在庫への効果と失敗理由を作成してください。
 
 最重要ルール:
 - 社内の実行行動は、Plannerの施策、目標、KPI、資源配分および判断理由から因果的に導く。
@@ -104,7 +97,6 @@ Plannerが明示した施策を、与えられた外部環境の下で1年間通
 - シナリオを劇的にする目的だけで、Plannerの戦略と無関係な社内行動を追加しない。
 - failure_patternはEnvironment Agentの外部ショックまたは通常の実行失敗に限定する。
 - 現行の全施策を1件ずつ評価する。
-- 次年度候補には現行施策の候補と、通常の縮小・置換・廃止候補を含める。
 - source_idは与えられたものだけを使用する。
 - 数値は合成社内仮定であり、実績として表現しない。"""
 

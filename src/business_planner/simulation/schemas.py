@@ -266,3 +266,30 @@ AUDIT_OBSERVATION_SCHEMA = {
         "recommended_controls": {"type": "array", "items": {"type": "string"}},
     },
 }
+
+# Used independently by the plan-audit and execution-audit LLM calls.  The
+# deterministic score block remains outside these qualitative reviews.
+INDEPENDENT_AUDIT_REVIEW_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["audit_observation", "red_flags", "recommended_controls"],
+    "properties": {
+        "audit_observation": {"type": "string"},
+        "red_flags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["type", "description", "basis"],
+                "properties": {
+                    "type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "basis": {"type": "string"},
+                },
+            },
+        },
+        "recommended_controls": {
+            "type": "array", "items": {"type": "string"}
+        },
+    },
+}

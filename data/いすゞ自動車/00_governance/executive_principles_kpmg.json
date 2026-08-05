@@ -1,0 +1,13 @@
+{
+  "policy_name": "KPMG 基本理念",
+  "version": "1.0",
+  "principles": [
+    "Purpose — Inspire Confidence, Empower Change：『社会に信頼を、変革に力を』を掲げ、社会に信頼を与え、より良い変革をもたらす。",
+    "Vision — The Clear Choice：卓越したサービスを通じて、社会、クライアント、社員から常に選ばれる存在であり続ける。",
+    "Integrity：正しいことを行う。",
+    "Excellence：互いに学び、向上する。",
+    "Courage：勇気を持って決断する。",
+    "Together：共に力を合わせる。",
+    "For Better：より良い社会へ貢献する。"
+  ]
+}

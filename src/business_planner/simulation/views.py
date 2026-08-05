@@ -77,9 +77,6 @@ def build_planner_execution_report(reality_outcome: dict) -> dict:
         "financial_bridge": deepcopy(reality_outcome["financial_bridge"]),
         "initiative_results": deepcopy(reality_outcome["initiative_outcomes"]),
         "failure_reasons": deepcopy(reality_outcome["failure_reasons"]),
-        "internal_planning_data": deepcopy(
-            reality_outcome["synthetic_internal_data"]
-        ),
         "evidence_source_ids": deepcopy(
             reality_outcome.get("evidence_source_ids", [])
         ),

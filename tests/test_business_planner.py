@@ -36,9 +36,14 @@ from business_planner.simulation.financial_engine import (
 from business_planner.agents import reality
 from business_planner.agents import planner_revision
 from business_planner.agents import ceo_pressure
+from business_planner.agents import internal_audit
 from business_planner import openai_client
 from business_planner.cli import parser as cli_parser
-from business_planner.report import generate_timeline_report, render_timeline_report
+from business_planner.report import (
+    generate_timeline_report,
+    render_summary_report,
+    render_timeline_report,
+)
 from business_planner.executive_principles import (
     load_executive_principles,
     principles_instructions,
@@ -115,6 +120,50 @@ def test_ceo_receives_executive_principles_as_top_instructions(monkeypatch):
     )
 
 
+def test_internal_audit_uses_independent_plan_and_execution_calls(monkeypatch):
+    calls = []
+
+    def fake_response(*args, **kwargs):
+        calls.append(kwargs)
+        return {
+            "audit_observation": f"{kwargs['schema_name']}の所見",
+            "red_flags": [],
+            "recommended_controls": [],
+        }
+
+    monkeypatch.setattr(internal_audit, "structured_response", fake_response)
+    monkeypatch.setattr(internal_audit, "calculate_risk_scores", lambda *args: {
+        "pressure": 0, "opportunity": 0, "rationalization": 0,
+        "control_override": 0, "unsupported_assumption": 0,
+        "aggressive_revenue_plan": 0,
+    })
+    monkeypatch.setattr(internal_audit, "risk_domain_ratings", lambda scores: {
+        "execution_risk": "Low", "financial_reporting_risk": "Low",
+        "fraud_pressure_risk": "Low",
+    })
+    result = internal_audit.observe_internal_audit(
+        object(),
+        prior_plan={"plan_secret": "PLAN_ONLY", "growth_plan": []},
+        reality_outcome={"execution_secret": "EXECUTION_ONLY"},
+        ceo_feedback={"ceo_secret": "CEO_ONLY"},
+        revised_plan={"revised_secret": "REVISED_ONLY", "growth_plan": []},
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["schema_name"] == "plan_audit_observation"
+    assert "PLAN_ONLY" in calls[0]["input_text"]
+    assert "REVISED_ONLY" in calls[0]["input_text"]
+    assert "EXECUTION_ONLY" not in calls[0]["input_text"]
+    assert "CEO_ONLY" not in calls[0]["input_text"]
+    assert calls[1]["schema_name"] == "execution_audit_observation"
+    assert "EXECUTION_ONLY" in calls[1]["input_text"]
+    assert "PLAN_ONLY" not in calls[1]["input_text"]
+    assert "REVISED_ONLY" not in calls[1]["input_text"]
+    assert "CEO_ONLY" not in calls[1]["input_text"]
+    assert result["plan_audit"]["audit_observation"].startswith("plan_audit")
+    assert result["execution_audit"]["audit_observation"].startswith("execution_audit")
+
+
 def test_cli_executive_principles_switch_defaults_on_and_can_be_disabled():
     enabled = cli_parser().parse_args([
         "simulate",
@@ -164,6 +213,7 @@ def test_cli_accepts_report_command():
     assert args.command == "report"
     assert args.run_file == Path("run.json")
     assert args.output == Path("timeline.html")
+    assert args.view == "detailed"
 
 
 def test_timeline_report_preserves_original_agent_text_and_escapes_html(tmp_path):
@@ -186,8 +236,10 @@ def test_timeline_report_preserves_original_agent_text_and_escapes_html(tmp_path
                     "initiative_name": "初期施策A",
                     "status": "Failed",
                     "simulated_result": "<失敗結果をそのまま表示>",
+                    "failure_reason_ids": ["FR-01"],
                 }],
                 "failure_reasons": [{
+                    "failure_reason_id": "FR-01",
                     "category": "需要不足",
                     "proximate_cause": "近因原文",
                     "root_cause": "根本原因原文",
@@ -211,6 +263,31 @@ def test_timeline_report_preserves_original_agent_text_and_escapes_html(tmp_path
                     "decision_rationale": "改訂理由原文",
                 }],
             },
+            "internal_audit_observation": {
+                "overall_fraud_risk": "High",
+                "risk_domains": {
+                    "execution_risk": "High",
+                    "financial_reporting_risk": "Medium",
+                    "fraud_pressure_risk": "High",
+                },
+                "red_flags": [{
+                    "type": "売上偏重",
+                    "description": "監査Red Flag原文。",
+                    "basis": "監査根拠原文。",
+                }],
+                    "plan_audit": {
+                        "audit_observation": "計画監査所見原文。",
+                        "red_flags": [],
+                        "recommended_controls": ["計画推奨統制原文"],
+                },
+                "execution_audit": {
+                    "audit_observation": "実行監査所見原文。",
+                    "red_flags": [],
+                    "recommended_controls": [],
+                },
+                "audit_observation": "監査所見原文。追加所見原文。",
+                "recommended_controls": ["推奨統制原文"],
+            },
         }],
     }
 
@@ -219,14 +296,46 @@ def test_timeline_report_preserves_original_agent_text_and_escapes_html(tmp_path
     assert "初期説明原文" in rendered
     assert "CEO叱責原文" in rendered
     assert "改訂理由原文" in rendered
+    assert "どのようにだめだったか（実行結果）" in rendered
+    assert "なぜだめだったか（対応する失敗理由）" in rendered
+    assert rendered.index("&lt;失敗結果をそのまま表示&gt;") < rendered.index("近因原文")
     assert "&lt;失敗結果をそのまま表示&gt;" in rendered
     assert "<失敗結果をそのまま表示>" not in rendered
+    assert ">Failed<" not in rendered
+    assert "監査LLMの評価" in rendered
+    assert "計画監査LLM" not in rendered
+    assert "実行監査LLM" not in rendered
+    assert "計画監査所見原文" in rendered
+    assert "実行監査所見原文" not in rendered
+    assert "監査所見原文" in rendered
+    assert "計画推奨統制原文" in rendered
+    assert ">推奨統制原文<" not in rendered
 
     run_file = tmp_path / "run_test.json"
     run_file.write_text(json.dumps(run, ensure_ascii=False), encoding="utf-8")
     output = generate_timeline_report(run_file)
     assert output == tmp_path / "run_test_report.html"
     assert output.is_file()
+
+    summary = render_summary_report(run)
+    assert "戦略変化・要約版" in summary
+    assert "CEO叱責原文" in summary
+    assert "改訂施策A" in summary
+    assert ">Failed<" not in summary
+    assert "監査LLM" in summary
+    assert "計画監査LLM" not in summary
+    assert "実行監査LLM" not in summary
+    assert "実行監査所見原文" not in summary
+    assert "1. 年度開始時の計画" in summary
+    assert "2. 実行結果" in summary
+    assert "3. CEOの指摘" in summary
+    assert "4. 次年度の計画" in summary
+    assert "5. 監査LLMの所見" in summary
+    assert "総合：<b>High" not in summary
+    assert ">High<" not in summary
+    summary_output = generate_timeline_report(run_file, view="summary")
+    assert summary_output == tmp_path / "run_test_summary.html"
+    assert summary_output.is_file()
 
 
 def test_ceo_schema_does_not_request_secondary_guardrails():
@@ -892,7 +1001,7 @@ def test_planner_execution_report_hides_simulation_provenance():
 
     assert report["fiscal_year"] == 2027
     assert report["actual_financials"]["revenue_million_yen"] == 105
-    assert "internal_planning_data" in report
+    assert "internal_planning_data" not in report
     assert "SyntheticAdverse" not in serialized
     assert "仮想シナリオ" not in serialized
     assert "実績ではありません" not in serialized
@@ -900,7 +1009,6 @@ def test_planner_execution_report_hides_simulation_provenance():
     assert "生成上の仮定" not in serialized
     assert "仮想" not in serialized
     assert "合成" not in serialized
-    assert "社内パイプライン" in serialized
 
 
 def test_simulation_state_carries_financials_plan_and_ceo_pressure():
@@ -1024,7 +1132,7 @@ def test_round_summary_reports_increasing_optimization_drift():
     )
 
 
-def test_planner_revision_normalizes_estimated_impacts(monkeypatch):
+def test_planner_revision_preserves_autonomous_estimates(monkeypatch):
     prior_plan = {
         "company_name": "Test Company",
         "target_revenue_growth": 20.0,
@@ -1039,8 +1147,8 @@ def test_planner_revision_normalizes_estimated_impacts(monkeypatch):
         **prior_plan,
         "growth_plan": [{
             "name": "施策A",
-            "expected_revenue_impact": "形式が異なる出力",
-            "expected_profit_impact": None,
+            "expected_revenue_impact": "Planner自主推計: +12,345百万円",
+            "expected_profit_impact": "Planner自主推計: +988百万円",
         }],
     }
     monkeypatch.setattr(
@@ -1048,13 +1156,7 @@ def test_planner_revision_normalizes_estimated_impacts(monkeypatch):
         "structured_response",
         lambda *args, **kwargs: model_result,
     )
-    execution_report = {
-        "internal_planning_data": [{
-            "initiative_name": "施策A",
-            "one_year_revenue_opportunity_million_yen": 12_345.4,
-            "operating_margin_pct": 8,
-        }],
-    }
+    execution_report = {}
 
     result = planner_revision.revise_plan(
         object(),
@@ -1065,10 +1167,10 @@ def test_planner_revision_normalizes_estimated_impacts(monkeypatch):
     )
 
     assert result["growth_plan"][0]["expected_revenue_impact"] == (
-        "社内計画推計: +12,345百万円"
+        "Planner自主推計: +12,345百万円"
     )
     assert result["growth_plan"][0]["expected_profit_impact"] == (
-        "社内計画推計: +988百万円"
+        "Planner自主推計: +988百万円"
     )
 
 
@@ -1090,13 +1192,18 @@ def test_planner_revision_can_replace_initiative_and_allocate_resources(monkeypa
         **prior_plan,
         "growth_plan": [{
             "name": "代替施策",
-            "planning_option_id": "OPT-2",
             "portfolio_action": "Replace",
             "predecessor_initiative_names": ["旧施策"],
-            "expected_revenue_impact": None,
-            "expected_profit_impact": None,
-            "required_investment": None,
-            "resource_allocation": {"allocation_rationale": "売上回復を優先"},
+            "expected_revenue_impact": "Planner自主推計: +20,000百万円",
+            "expected_profit_impact": "Planner自主推計: +1,200百万円",
+            "required_investment": "Planner自主推計: 5,000百万円",
+            "resource_allocation": {
+                "investment_million_yen": 5_000,
+                "headcount_fte": 40,
+                "marketing_spend_million_yen": 1_000,
+                "production_capacity_pct": 35,
+                "allocation_rationale": "売上回復を優先",
+            },
         }],
         "portfolio_decisions": [{
             "action": "Replace",
@@ -1114,22 +1221,7 @@ def test_planner_revision_can_replace_initiative_and_allocate_resources(monkeypa
         "structured_response",
         lambda *args, **kwargs: model_result,
     )
-    execution_report = {
-        "internal_planning_data": [{
-            "planning_option_id": "OPT-2",
-            "option_type": "Replace",
-            "predecessor_initiative_names": ["旧施策"],
-            "initiative_name": "代替施策",
-            "one_year_revenue_opportunity_million_yen": 20_000,
-            "operating_margin_pct": 6,
-            "suggested_resource_allocation": {
-                "investment_million_yen": 5_000,
-                "headcount_fte": 40,
-                "marketing_spend_million_yen": 1_000,
-                "production_capacity_pct": 35,
-            },
-        }],
-    }
+    execution_report = {}
 
     result = planner_revision.revise_plan(
         object(),
@@ -1142,14 +1234,72 @@ def test_planner_revision_can_replace_initiative_and_allocate_resources(monkeypa
     initiative = result["growth_plan"][0]
     assert initiative["name"] == "代替施策"
     assert initiative["portfolio_action"] == "Replace"
-    assert initiative["expected_revenue_impact"] == "社内計画推計: +20,000百万円"
+    assert initiative["expected_revenue_impact"] == "Planner自主推計: +20,000百万円"
     assert initiative["resource_allocation"]["headcount_fte"] == 40
-    assert initiative["required_investment"] == "社内計画配分: +5,000百万円"
+    assert initiative["required_investment"] == "Planner自主推計: 5,000百万円"
     assert result["portfolio_decisions"][0]["action"] == "Replace"
     assert result["portfolio_decisions"][1]["action"] == "Terminate"
     assert result["portfolio_decisions"][1][
         "predecessor_initiative_names"
     ] == ["未採用施策"]
+
+
+def test_planner_revision_can_create_independent_initiative(monkeypatch):
+    prior_plan = {
+        "company_name": "Test Company",
+        "target_revenue_growth": 20.0,
+        "planning_period": {
+            "base_fiscal_year": 2026,
+            "target_fiscal_year": 2031,
+            "horizon_years": 5,
+        },
+        "growth_plan": [{
+            "name": "旧施策",
+            "resource_allocation": {
+                "investment_million_yen": 100,
+                "headcount_fte": 5,
+                "marketing_spend_million_yen": 10,
+                "production_capacity_pct": 2,
+            },
+        }],
+    }
+    independent = {
+        **prior_plan,
+        "growth_plan": [{
+            "name": "Planner独自施策",
+            "portfolio_action": "New",
+            "predecessor_initiative_names": [],
+            "expected_revenue_impact": "Planner自主推計: +3,000百万円",
+            "expected_profit_impact": "Planner自主推計: +150百万円",
+            "required_investment": "Planner自主推計: 500百万円",
+            "decision_rationale": "CEO指示と実行報告から独自に設計",
+            "resource_allocation": {
+                "investment_million_yen": 500,
+                "headcount_fte": 12,
+                "marketing_spend_million_yen": 80,
+                "production_capacity_pct": 4,
+                "allocation_rationale": "独自推計に基づく",
+            },
+        }],
+    }
+    monkeypatch.setattr(
+        planner_revision, "structured_response", lambda *args, **kwargs: independent
+    )
+
+    result = planner_revision.revise_plan(
+        object(),
+        prior_plan=prior_plan,
+        execution_report={"internal_planning_data": []},
+        ceo_feedback={},
+        evidence="",
+    )
+
+    initiative = result["growth_plan"][0]
+    assert initiative["name"] == "Planner独自施策"
+    assert initiative["expected_revenue_impact"] == (
+        "Planner自主推計: +3,000百万円"
+    )
+    assert initiative["resource_allocation"]["headcount_fte"] == 12
 
 
 def test_reality_normalizes_model_returned_year_before_validation(monkeypatch):
