@@ -234,11 +234,11 @@ structured classification/candidate fields; they do not contain the full mail
 body or provider-specific metadata. Attachment content and filenames are not
 loaded.
 
-This demo does not connect to Gmail, Microsoft Graph, Google Calendar,
-Outlook Calendar, LINE, or an LLM. Calendar candidates with complete dates and
-times can be converted to the existing `CalendarRequest`; ambiguous candidates
-and deadlines without explicit times are rejected at that boundary rather
-than receiving invented values.
+The local-provider command above does not connect to Gmail, Microsoft Graph,
+Google Calendar, Outlook Calendar, LINE, or an LLM. Calendar candidates with
+complete dates and times can be converted to the existing `CalendarRequest`;
+ambiguous candidates and deadlines without explicit times are rejected at that
+boundary rather than receiving invented values.
 
 ## Mail-to-Calendar Orchestrator demo
 
@@ -288,11 +288,231 @@ provider-specific metadata, attachments, and attachment names are not copied
 into the combined log. Output is written through an atomic replacement after
 the complete batch succeeds.
 
-This remains a local rule-based demo. Gmail, Microsoft Graph, real calendar
-APIs, LINE, LLMs, and OpenClaw are not connected. A future Gmail or Outlook
-adapter can replace `LocalMailProvider` through `MailProvider`; the same
-orchestration service can later be invoked from another execution surface such
-as an OpenClaw Skill.
+The `process` command remains fully local. Its default analysis mode is the
+hybrid rule/Ollama mode described below; pass `--analysis-mode rule-only` for
+the original deterministic behavior. Gmail and real calendar APIs, LINE, and
+OpenClaw are not connected. Providers replace
+`LocalMailProvider` through `MailProvider`; the same orchestration service can
+later be invoked from another execution surface such as an OpenClaw Skill.
+
+## Personal Outlook read-only provider
+
+`OutlookProvider` can explicitly fetch a small number of messages from a
+personal Outlook.com Inbox through Microsoft Graph. It uses an MSAL public
+client with device code flow and the delegated `Mail.Read` permission only.
+There is no client secret, application permission, mailbox mutation method, or
+calendar API call. The HTTP transport exposes GET only.
+
+The `msal` dependency is used so OAuth token acquisition is not implemented by
+this repository. The lightweight `requests` dependency is used instead of the
+larger Microsoft Graph SDK because this provider only needs read-only message
+GET requests. See Microsoft's documentation for [app
+registration](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app),
+[device code flow](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-acquire-token-device-code-flow),
+[Mail.Read](https://learn.microsoft.com/en-us/graph/permissions-reference#mailread),
+and [listing messages](https://learn.microsoft.com/en-us/graph/api/user-list-messages?view=graph-rest-1.0).
+
+### One-time Microsoft Entra setup
+
+1. In Microsoft Entra admin center, create an App registration.
+2. Select a supported account type that includes personal Microsoft accounts.
+   For personal-only use, configure the personal Microsoft account audience;
+   for a combined registration, select organizational directories and personal
+   Microsoft accounts.
+3. Copy the Application (client) ID. Do not create a client secret.
+4. Under Authentication, enable the public client flow required for device
+   code authentication.
+5. Under API permissions, add Microsoft Graph delegated `Mail.Read`. Do not add
+   `Mail.ReadWrite`, `Mail.Send`, calendar, file, contact, admin, or application
+   permissions.
+6. Set the client ID locally, for example:
+
+   ```bash
+   export AGENTLEDGER_MICROSOFT_CLIENT_ID="<APPLICATION_CLIENT_ID>"
+   ```
+
+The first CLI run prints Microsoft's verification URL and device code. Complete
+sign-in with the personal Microsoft account whose mail should be read. Later
+runs first attempt silent acquisition from the local MSAL cache.
+
+The default cache is
+`~/.config/agentledger/microsoft_token_cache.json`. It is written atomically
+with mode `0600` where supported. The cache contains sensitive authentication
+material: never commit, print, attach, or share it. The repository ignores
+Microsoft token-cache filename patterns. MSAL's serializable file cache is a
+minimal local persistence mechanism; users needing OS-protected encrypted
+storage should use an appropriate secure cache integration in a future change.
+
+Start with at most five unread messages:
+
+```bash
+uv run mail-calendar-orchestrator outlook \
+  --client-id "$AGENTLEDGER_MICROSOFT_CLIENT_ID" \
+  --token-cache ~/.config/agentledger/microsoft_token_cache.json \
+  --folder inbox \
+  --max-messages 5 \
+  --unread-only \
+  --received-after "2026-08-01T00:00:00+09:00" \
+  --output /tmp/outlook-mail-calendar.jsonl \
+  --base-year 2026 \
+  --timezone Asia/Tokyo \
+  --requires-approval
+
+uv run agentledger build \
+  /tmp/outlook-mail-calendar.jsonl \
+  --output /tmp/outlook-mail-calendar.html
+```
+
+The CLI states that it is read-only and masks the authenticated address. It
+does not print tokens or message bodies. `max-messages` must be between 1 and
+100; unread-only is the default. Graph paging follows only HTTPS next links on
+`graph.microsoft.com`, stops at the message/page limits, detects loops, and
+performs bounded retries for throttling and server errors.
+
+HTML bodies are converted locally without executing scripts, loading images,
+or following URLs. Script/style elements are removed, text is size-limited,
+and the existing audit layer still stores only the capped preview—not the full
+body, Graph response, provider metadata, tokens, headers, or attachments.
+
+This command produces local audit JSONL and pending local Calendar proposals;
+it does not mark mail as read or change mail/calendar state. Real calendar
+registration, Gmail, LINE, LLM, OpenClaw, and periodic monitoring remain
+unimplemented except for the optional local Ollama analysis described below.
+Access can be revoked later from the Microsoft account's app
+permission/privacy management page.
+
+## Local Ollama/Qwen-assisted mail analysis
+
+Mail analysis uses a locally running Qwen model for semantic understanding and
+a deterministic Validator for factual and safety checks. The default and
+recommended operational mode is `llm-first`: every email is normally analyzed
+by the LLM, but only a validated `calendar_candidate` may reach Calendar Agent.
+`rule-only` is for deterministic comparison or LLM outages. `hybrid` preserves
+the earlier comparison behavior and can still pass a high-confidence rule
+false positive without LLM review. `llm-all` is a fail-closed experimental
+comparison mode. None of these modes bypasses Validator when an LLM result is
+used.
+
+The defaults are `http://localhost:11434`, `qwen3:8b`, a 120-second timeout,
+`temperature=0`, `stream=false`, `think=false`, and `keep_alive=5m`.
+Thinking is disabled for mail analysis because Qwen 3 otherwise emits a
+separate, potentially long reasoning trace. `--ollama-thinking` can enable it
+for diagnostics, but the trace is never parsed or written to AgentLedger;
+`--no-ollama-thinking` is the default. Models that reject the setting follow
+the normal safe fallback/error path. `qwen3:4b` can be selected for smaller
+machines. The client uses the existing `requests` dependency and
+Ollama's native [`POST /api/chat`](https://docs.ollama.com/api/chat), passes a
+JSON Schema in `format` as documented for [structured
+outputs](https://docs.ollama.com/capabilities/structured-outputs), and uses the
+official [`GET /api/tags`](https://docs.ollama.com/api/tags) model list for the
+connection check. No Ollama Python dependency is added.
+
+Start Ollama and confirm the model before processing mail:
+
+```bash
+ollama list
+ollama run qwen3:8b
+
+uv run mail-calendar-orchestrator check-llm \
+  --ollama-model qwen3:8b
+```
+
+The check performs both model discovery and a short structured-output email
+probe, and reports the probe latency. Model absence, timeout, and invalid JSON
+are reported as distinct errors rather than treating API reachability alone as
+success.
+
+For the first real-mail comparison, generate analysis events only—no Calendar
+Agent proposal Actions:
+
+```bash
+uv run mail-calendar-orchestrator outlook \
+  --client-id "$AGENTLEDGER_MICROSOFT_CLIENT_ID" \
+  --max-messages 5 \
+  --unread-only \
+  --analysis-mode llm-first \
+  --analysis-only \
+  --ollama-model qwen3:8b \
+  --output /tmp/outlook-llm-analysis.jsonl \
+  --base-year 2026 \
+  --timezone Asia/Tokyo
+
+uv run agentledger build \
+  /tmp/outlook-llm-analysis.jsonl \
+  --output /tmp/outlook-llm-analysis.html
+```
+
+After reviewing the rule/LLM decisions in Explorer, omit `--analysis-only` and
+keep `--requires-approval` to create pending local proposals. Nothing writes to
+an actual calendar.
+
+Only one email is analyzed per Ollama request. The input contains sender,
+subject, received time, bounded body text (6000 characters by default, maximum
+20000), timezone, base year, compact rule results, importance/categories, and
+the attachment-presence flag. It never includes Microsoft tokens, token cache,
+Graph headers/responses, attachment contents, unrelated messages, or the
+AgentLedger log. With the default localhost URL, email content stays on the
+local machine. A non-loopback Ollama host is rejected unless
+`--allow-remote-ollama` is explicitly supplied.
+
+Email subject/body are placed only in the user message inside explicit
+untrusted-data delimiters. The system prompt tells the model to ignore email
+instructions and forbids tools, files, URLs, sending mail, and calendar
+changes. Structured output is revalidated for exact fields, enum/numeric/size
+limits, ISO date/time syntax, short evidence that occurs in the original
+email, user-commitment evidence, and grounded dates, times, duration, location,
+and title. Relative or conflicting dates and low confidence (default threshold
+`0.75`) become clarification only when a realistic personal calendar item is
+possible. Invented facts become invalid rather than clarification.
+Here, a calendar candidate means an item the user may add to their own personal
+calendar—not registration for or RSVP to an event. Public seminars and event
+advertisements require explicit evidence that the user intends to attend;
+security notices, promotions, and general information are not scheduled by
+default.
+
+Every LLM analysis ends in exactly one auditable classification:
+`calendar_candidate`, `clarification_required`, `informational`, `promotion`,
+`security_notification`, `ignored`, or `invalid`. General seminar/webinar
+advertising remains `promotion` or `informational` even when it contains a
+date. New sign-ins, app connections, security codes, password changes, and
+suspicious-access notices become `security_notification`; they are not sent to
+Calendar Agent or to clarification. Clarification is reserved for cases such
+as a personal meeting whose date or participation details remain genuinely
+ambiguous.
+
+Validator distinguishes the model's `llm_proposed_classification` from the
+normalized `final_classification` and records `classification_corrections`.
+Sentinel security types such as `"none"` are treated as null. A security
+classification requires a security category, a real notification type, or a
+deterministically recognized security phrase. Non-candidates
+(`candidate_type=none` and `should_create_calendar_candidate=false`) do not run
+irrelevant date/time/duration grounding checks.
+
+In `llm-first`, connection refusal, timeout, missing model, HTTP failure, empty or
+oversized response, invalid JSON, and schema failure fall back conservatively
+to `invalid` without stopping the batch or accepting the rule result as a
+semantic decision. `hybrid` retains its rule fallback for comparison.
+`--require-llm` makes an invoked LLM failure fatal;
+`llm-all` is also fail-closed. Environment overrides are
+`AGENTLEDGER_OLLAMA_BASE_URL` and `AGENTLEDGER_OLLAMA_MODEL`.
+
+AgentLedger records the mode, whether the LLM was used, model name, prompt
+template/schema/config hashes and versions, final classification, user
+commitment detection, generic-event flag, security-notification type,
+candidate rejection reason, confidence, final source, validation issues,
+fallback reason, suspicious-instruction flag, latency, input truncation, and
+compact rule/LLM summaries. It does not record the full
+body, completed prompt, raw model response, access tokens, token cache, Graph
+response, or authorization headers. Prompt hashes cover templates and schema,
+not the body-bearing completed prompt.
+
+Cloud LLMs, Gmail, real calendar writes, LINE approval, OpenClaw, automatic
+model downloads, training, and a persistent LLM cache are not part of this
+implementation.
+
+Calendar proposals still require human approval. Meaning is decided by the
+local LLM, facts are checked by Validator, and external calendar operations
+remain unimplemented.
 
 Run the AgentLedger volume smoke tests:
 

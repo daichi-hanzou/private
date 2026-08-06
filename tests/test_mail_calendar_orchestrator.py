@@ -264,6 +264,8 @@ def test_cli_prints_non_overlapping_summary(
             "2026",
             "--timezone",
             "Asia/Tokyo",
+            "--analysis-mode",
+            "rule-only",
             "--requires-approval",
         ],
     )

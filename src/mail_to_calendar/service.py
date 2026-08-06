@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .classifier import RuleBasedImportanceClassifier
 from .extractor import RuleBasedCalendarExtractor
+from .hybrid_analyzer import HybridMailAnalyzer
+from .llm_models import HybridAnalysisResult
 from .models import CalendarCandidate, EmailMessage, ImportanceResult
 from .provider import MailProvider
 
@@ -20,6 +22,10 @@ class ProcessingResult:
     important: int
     clarification_required: int
     ignored: int
+    rule_only_decisions: int = 0
+    llm_assisted_decisions: int = 0
+    analysis_results: list[HybridAnalysisResult] | None = None
+    classification_counts: dict[str, int] = field(default_factory=dict)
 
 
 class MailToCalendarService:
@@ -27,7 +33,13 @@ class MailToCalendarService:
     tool_version = "local-mail-provider-0.1.0"
     preview_limit = 160
 
-    def __init__(self, *, base_year: int, timezone: str = "Asia/Tokyo") -> None:
+    def __init__(
+        self,
+        *,
+        base_year: int,
+        timezone: str = "Asia/Tokyo",
+        analyzer: HybridMailAnalyzer | None = None,
+    ) -> None:
         self.base_year = base_year
         self.timezone = timezone
         self.classifier = RuleBasedImportanceClassifier()
@@ -35,6 +47,7 @@ class MailToCalendarService:
             base_year=base_year,
             timezone=timezone,
         )
+        self.analyzer = analyzer
 
     def process(self, provider: MailProvider) -> ProcessingResult:
         messages = provider.list_messages()
@@ -44,14 +57,28 @@ class MailToCalendarService:
         important_count = 0
         clarification_count = 0
         ignored_count = 0
+        analyses: list[HybridAnalysisResult] = []
+        classification_counts: dict[str, int] = {}
         for message in messages:
             importance = self.classifier.classify(message)
             candidate = self.extractor.extract(message, importance)
+            analysis = None
+            if self.analyzer is not None:
+                analysis = self.analyzer.analyze(message, importance, candidate)
+                analyses.append(analysis)
+                importance = analysis.final_importance
+                candidate = analysis.final_candidate
+                classification_counts[analysis.final_classification] = (
+                    classification_counts.get(analysis.final_classification, 0)
+                    + 1
+                )
             if importance.is_important:
                 important_count += 1
             if candidate is not None:
                 candidates.append(candidate)
-            selected_action = self._selected_action(importance, candidate)
+            selected_action = self._selected_action(
+                importance, candidate, analysis
+            )
             if selected_action == "request_clarification":
                 clarification_count += 1
             if selected_action == "ignore_email":
@@ -63,6 +90,7 @@ class MailToCalendarService:
                     candidate,
                     selected_action,
                     run_id,
+                    analysis,
                 )
             )
         return ProcessingResult(
@@ -72,13 +100,28 @@ class MailToCalendarService:
             important=important_count,
             clarification_required=clarification_count,
             ignored=ignored_count,
+            rule_only_decisions=sum(not item.llm_used for item in analyses),
+            llm_assisted_decisions=sum(item.llm_used for item in analyses),
+            analysis_results=analyses,
+            classification_counts=classification_counts,
         )
 
     @staticmethod
     def _selected_action(
         importance: ImportanceResult,
         candidate: CalendarCandidate | None,
+        analysis: HybridAnalysisResult | None = None,
     ) -> str:
+        if analysis is not None:
+            if analysis.final_classification == "calendar_candidate":
+                return (
+                    "propose_calendar_candidate"
+                    if candidate is not None
+                    else "request_clarification"
+                )
+            if analysis.final_classification == "clarification_required":
+                return "request_clarification"
+            return "ignore_email"
         if not importance.is_important:
             return "ignore_email"
         if candidate is None or candidate.clarification_required:
@@ -108,6 +151,7 @@ class MailToCalendarService:
         candidate: CalendarCandidate | None,
         selected_action: str,
         run_id: str,
+        analysis: HybridAnalysisResult | None = None,
     ) -> list[dict[str, Any]]:
         digest = hashlib.sha256(
             f"{message.provider}:{message.message_id}".encode()
@@ -169,6 +213,8 @@ class MailToCalendarService:
             "importance_reasons": importance.reasons,
             "category": importance.category,
         }
+        if analysis is not None:
+            decision["analysis"] = self._analysis_audit(analysis)
         parameters = self._action_parameters(
             importance,
             candidate,
@@ -183,7 +229,7 @@ class MailToCalendarService:
             "action": selected_action,
             "action_parameters": parameters,
             "status": "success",
-            "execution_context": self._execution_context(),
+            "execution_context": self._execution_context(analysis),
         }
         outcome = {
             **shared,
@@ -270,7 +316,9 @@ class MailToCalendarService:
             **self._candidate_parameters(candidate),
         }
 
-    def _execution_context(self) -> dict[str, Any]:
+    def _execution_context(
+        self, analysis: HybridAnalysisResult | None = None
+    ) -> dict[str, Any]:
         context: dict[str, Any] = {
             "model_name": "rule-based-mail-to-calendar",
             "model_version": self.version,
@@ -285,10 +333,102 @@ class MailToCalendarService:
                 "timezone": self.timezone,
             },
         }
+        if analysis is not None and self.analyzer is not None:
+            context["model_name"] = analysis.model_name or context["model_name"]
+            context["prompt_hash"] = None
+            context["confidence_threshold"] = (
+                self.analyzer.validator.confidence_threshold
+            )
+            context["analysis_mode"] = self.analyzer.mode
+            classifier = self.analyzer.classifier
+            if classifier is not None:
+                metadata = classifier.prompt_metadata
+                context["prompt_hash"] = metadata.system_template_hash
+                context["prompt_template_version"] = metadata.template_version
+                context["schema_hash"] = metadata.schema_hash
+                context["ollama_base_url"] = classifier.client.safe_host
+                context["temperature"] = classifier.client.temperature
+                context["thinking"] = getattr(
+                    classifier.client, "thinking", False
+                )
+                context["model_version"] = None
+                config_value = json.dumps(
+                    {
+                        "analysis_mode": self.analyzer.mode,
+                        "model": classifier.client.model,
+                        "ollama_host": classifier.client.safe_host,
+                        "temperature": classifier.client.temperature,
+                        "thinking": getattr(classifier.client, "thinking", False),
+                        "confidence_threshold": self.analyzer.validator.confidence_threshold,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                context["config_hash"] = "sha256:" + hashlib.sha256(
+                    config_value.encode()
+                ).hexdigest()
         commit = self._git_commit()
         if commit:
             context["git_commit"] = commit
         return context
+
+    def _analysis_audit(self, analysis: HybridAnalysisResult) -> dict[str, Any]:
+        value = {
+            "analysis_mode": (
+                self.analyzer.mode if self.analyzer is not None else "rule-only"
+            ),
+            "llm_used": analysis.llm_used,
+            "model_name": analysis.model_name,
+            "confidence": analysis.confidence,
+            "final_source": analysis.final_source,
+            "final_classification": analysis.final_classification,
+            "llm_proposed_classification": (
+                analysis.llm_proposed_classification
+            ),
+            "classification_corrections": (
+                analysis.classification_corrections
+            ),
+            "validation_issues": analysis.validation_issues,
+            "fallback_reason": analysis.fallback_reason,
+            "calendar_candidate_rejected_reason": (
+                analysis.calendar_candidate_rejected_reason
+            ),
+            "user_commitment_detected": bool(
+                analysis.llm_result
+                and analysis.llm_result.user_commitment_detected
+            ),
+            "generic_event_advertisement": bool(
+                analysis.llm_result
+                and analysis.llm_result.generic_event_advertisement
+            ),
+            "security_notification_type": (
+                analysis.llm_result.security_notification_type
+                if analysis.llm_result
+                else None
+            ),
+            "suspicious_instructions_detected": bool(
+                analysis.llm_result
+                and analysis.llm_result.suspicious_instructions_detected
+            ),
+            "latency_ms": analysis.latency_ms,
+            "input_truncated": analysis.input_truncated,
+            "rule_result_summary": analysis.rule_result,
+            "llm_result_summary": (
+                analysis.llm_result.summary() if analysis.llm_result else None
+            ),
+        }
+        classifier = self.analyzer.classifier if self.analyzer else None
+        if classifier is not None:
+            value.update(
+                {
+                    "model_version": None,
+                    "prompt_template_version": classifier.prompt_metadata.template_version,
+                    "system_prompt_template_hash": classifier.prompt_metadata.system_template_hash,
+                    "schema_version": "mail-analysis-schema-v2",
+                    "schema_hash": classifier.prompt_metadata.schema_hash,
+                }
+            )
+        return value
 
     @staticmethod
     def _git_commit() -> str | None:

@@ -18,5 +18,7 @@ credentials.json
 token.json
 *.credentials.json
 *.token.json
+microsoft_token_cache.json
+*microsoft*token*.json
 private_mail/
 mail_data/

@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Decision-centric audit and exploration framework for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["openai>=1.0,<3", "pytest>=8,<10"]
+dependencies = [
+    "msal>=1.32,<2",
+    "openai>=1.0,<3",
+    "pytest>=8,<10",
+    "requests>=2.32,<3",
+]
 
 [project.scripts]
 agentledger = "agentledger.cli:main"

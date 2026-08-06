@@ -8,6 +8,8 @@ from calendar_agent.agent import CalendarAgent
 from mail_to_calendar.extractor import to_calendar_request
 from mail_to_calendar.local_provider import LocalMailProvider
 from mail_to_calendar.models import CalendarCandidate
+from mail_to_calendar.hybrid_analyzer import HybridMailAnalyzer
+from mail_to_calendar.provider import MailProvider
 from mail_to_calendar.service import MailToCalendarService
 
 from .audit import write_jsonl_atomic
@@ -17,9 +19,16 @@ from .models import OrchestrationResult
 class MailCalendarOrchestrator:
     """Connect the existing mail pipeline to CalendarAgent in-process."""
 
-    def __init__(self, *, base_year: int, timezone: str = "Asia/Tokyo") -> None:
+    def __init__(
+        self,
+        *,
+        base_year: int,
+        timezone: str = "Asia/Tokyo",
+        analyzer: HybridMailAnalyzer | None = None,
+    ) -> None:
         self.base_year = base_year
         self.timezone = timezone
+        self.analyzer = analyzer
 
     def process(
         self,
@@ -27,16 +36,32 @@ class MailCalendarOrchestrator:
         output_path: str | Path,
         *,
         requires_approval: bool = True,
+        analysis_only: bool = False,
     ) -> OrchestrationResult:
         source = Path(input_path)
         output = Path(output_path)
         if source.resolve() == output.resolve():
             raise ValueError("input and output must be different files")
+        return self.process_provider(
+            LocalMailProvider(source),
+            output,
+            requires_approval=requires_approval,
+            analysis_only=analysis_only,
+        )
 
-        provider = LocalMailProvider(source)
+    def process_provider(
+        self,
+        provider: MailProvider,
+        output_path: str | Path,
+        *,
+        requires_approval: bool = True,
+        analysis_only: bool = False,
+    ) -> OrchestrationResult:
+        output = Path(output_path)
         mail_result = MailToCalendarService(
             base_year=self.base_year,
             timezone=self.timezone,
+            analyzer=self.analyzer,
         ).process(provider)
         mail_relations = self._mail_relations(mail_result.events)
         statuses: dict[str, tuple[str, str | None]] = {}
@@ -50,10 +75,26 @@ class MailCalendarOrchestrator:
             candidate.source_message_id: candidate
             for candidate in mail_result.candidates
         }
-        for message in provider.list_messages():
+        messages = provider.list_messages()
+        classification_by_message = {
+            message.message_id: analysis.final_classification
+            for message, analysis in zip(
+                messages,
+                mail_result.analysis_results or [],
+                strict=False,
+            )
+        }
+        for message in messages:
             candidate = candidate_by_message.get(message.message_id)
             relation = mail_relations[message.message_id]
             mail_action = relation["action_type"]
+            if analysis_only:
+                statuses[message.message_id] = ("analysis_only", None)
+                continue
+            classification = classification_by_message.get(message.message_id)
+            if classification and classification != "calendar_candidate":
+                statuses[message.message_id] = (classification, None)
+                continue
             if mail_action == "ignore_email":
                 statuses[message.message_id] = ("ignored", None)
                 continue
@@ -109,6 +150,24 @@ class MailCalendarOrchestrator:
             generated_events=len(events),
             output_path=written,
             events=events,
+            rule_only_decisions=mail_result.rule_only_decisions,
+            llm_assisted_decisions=mail_result.llm_assisted_decisions,
+            analysis_only=analysis_only,
+            informational_messages=mail_result.classification_counts.get(
+                "informational", 0
+            ),
+            promotion_messages=mail_result.classification_counts.get(
+                "promotion", 0
+            ),
+            security_notifications=mail_result.classification_counts.get(
+                "security_notification", 0
+            ),
+            invalid_messages=mail_result.classification_counts.get(
+                "invalid", 0
+            ),
+            calendar_candidate_messages=mail_result.classification_counts.get(
+                "calendar_candidate", 0
+            ),
         )
 
     @staticmethod

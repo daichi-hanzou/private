@@ -20,3 +20,11 @@ class OrchestrationResult:
     generated_events: int
     output_path: Path
     events: list[dict[str, Any]] = field(repr=False)
+    rule_only_decisions: int = 0
+    llm_assisted_decisions: int = 0
+    analysis_only: bool = False
+    informational_messages: int = 0
+    promotion_messages: int = 0
+    security_notifications: int = 0
+    invalid_messages: int = 0
+    calendar_candidate_messages: int = 0
