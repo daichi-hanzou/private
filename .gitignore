@@ -14,3 +14,9 @@ outputs/
 results/
 volume_test/html/
 audit_replay*.txt
+credentials.json
+token.json
+*.credentials.json
+*.token.json
+private_mail/
+mail_data/

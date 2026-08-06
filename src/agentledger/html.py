@@ -91,25 +91,14 @@ def _bundle_payload(
         "observation": (
             {
                 "event_id": observation.event_id,
-                "inventory": observation.raw_event.get(
-                    "observation",
-                    {},
-                ).get("inventory"),
-                "cash": observation.raw_event.get("observation", {}).get(
-                    "cash"
+                "data": (
+                    observation.raw_event.get("observation")
+                    if isinstance(
+                        observation.raw_event.get("observation"),
+                        dict,
+                    )
+                    else {}
                 ),
-                "reported_revenue": observation.raw_event.get(
-                    "observation",
-                    {},
-                ).get("reported_revenue"),
-                "revenue_target": observation.raw_event.get(
-                    "observation",
-                    {},
-                ).get("revenue_target"),
-                "incoming_proposals": observation.raw_event.get(
-                    "observation",
-                    {},
-                ).get("incoming_proposals"),
                 "allowed_actions": observation.raw_event.get(
                     "allowed_actions"
                 ),
@@ -334,7 +323,9 @@ function applyFilters(){{const started=performance.now();state.globalSearch=docu
 function renderRows(){{const started=performance.now();document.getElementById("count").textContent=visible.length===data.actions.length?`(${{data.actions.length}})`:`(${{visible.length}} / ${{data.actions.length}})`;const fragment=document.createDocumentFragment();rowById.clear();for(const action of visible){{const row=document.createElement("tr");row.dataset.id=action.bundle_id;if(selected?.bundle_id===action.bundle_id)row.className="active";row.innerHTML=`<td>Day ${{esc(action.day??"-")}}<br><small>${{esc(action.timestamp?.slice(11,19)||"")}}</small></td><td class="id">${{esc(action.action_display)}}</td><td>${{esc(action.agent_name)}}</td><td>${{esc(action.action_label)}}</td><td class="target-column">${{esc(action.target)}}</td><td class="summary-column">${{esc(action.summary)}}</td>`;row.onclick=()=>selectAction(action.bundle_id);rowById.set(action.bundle_id,row);fragment.appendChild(row);}}document.getElementById("rows").replaceChildren(fragment);runtimeMetrics.lastListRenderMs=performance.now()-started;}}
 const field=(label,value,wide=false)=>`<div class="field ${{wide?"wide":""}}"><span>${{esc(label)}}</span>${{esc(pretty(value))}}</div>`;
 const jsonField=(label,value)=>`<div class="field wide"><span>${{esc(label)}}</span><pre>${{esc(pretty(value))}}</pre></div>`;
-function observationSection(value){{if(!value)return section("Observation",'<div class="empty-state">Not recorded</div>');return section("Observation",`<div class="detail-grid">${{jsonField("Inventory",value.inventory)}}${{field("Cash",value.cash)}}${{field("Reported Revenue",value.reported_revenue)}}${{field("Revenue Target",value.revenue_target)}}${{jsonField("Incoming Proposals",value.incoming_proposals?.length?value.incoming_proposals:"None")}}${{field("Allowed Actions",value.allowed_actions?.join(", "))}}</div>`);}}
+const observationLabel=key=>String(key).replace(/[_-]+/g," ").replace(/\\b\\w/g,char=>char.toUpperCase());
+const observationField=(key,value)=>value!==null&&typeof value==="object"?jsonField(observationLabel(key),value):field(observationLabel(key),value);
+function observationSection(value){{if(!value)return section("Observation",'<div class="empty-state">Not recorded</div>');const entries=Object.entries(value.data||{{}});const fields=entries.map(([key,item])=>observationField(key,item));if(value.allowed_actions!==null&&value.allowed_actions!==undefined)fields.push(observationField("allowed_actions",value.allowed_actions));if(!fields.length)return section("Observation",'<div class="empty-state">Not recorded</div>');return section("Observation",`<div class="detail-grid">${{fields.join("")}}</div>`);}}
 function decisionSection(value){{if(!value)return section("Decision",'<div class="empty-state">Not recorded</div>');return section("Decision",`<div class="detail-grid">${{field("Selected Action",value.selected_action_label)}}${{field("Explanation",value.explanation,true)}}${{jsonField("Expected Outcome",value.expected_outcome)}}</div>`);}}
 function actionSection(value){{return section("Action",`<div class="detail-grid">${{field("Action ID",value.display_id)}}${{field("Type",value.type_label)}}${{field("Agent",value.agent_name)}}${{field("Counterparty",value.counterparty_name)}}${{field("Lot",value.lot_id)}}${{field("Quantity",value.quantity)}}${{field("Unit Price",value.unit_price)}}${{field("Proposal",value.proposal_display||value.proposal_id)}}${{field("Transaction ID",value.transaction_id)}}${{field("Error Type",value.error_type)}}${{field("Error Message",value.error_message,true)}}${{jsonField("State Before",value.state_before)}}${{jsonField("State After",value.state_after)}}${{jsonField("Metadata",value.metadata)}}</div><details><summary>View raw action JSON</summary><pre>${{esc(JSON.stringify(value.raw,null,2))}}</pre></details>`);}}
 function humanInterventionSection(values){{if(!values?.length)return "";const items=values.map((value,index)=>`<div class="detail-grid">${{field(values.length>1?`Intervention ${{index+1}}`:"Type",value.intervention_label)}}${{field("Actor",value.actor)}}${{field("Performed At",value.performed_at)}}${{field("Input Method",value.input_method)}}${{field("Related Action ID",value.related_action_id,true)}}${{field("Reason",value.reason,true)}}${{jsonField("Before",value.before)}}${{jsonField("After",value.after)}}</div>`).join("");return section("Human Intervention",items);}}

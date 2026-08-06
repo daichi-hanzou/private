@@ -6,6 +6,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["openai>=1.0,<3", "pytest>=8,<10"]
 
+[project.scripts]
+agentledger = "agentledger.cli:main"
+calendar-agent = "calendar_agent.cli:main"
+mail-to-calendar = "mail_to_calendar.cli:main"
+mail-calendar-orchestrator = "mail_calendar_orchestrator.cli:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

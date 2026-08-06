@@ -218,13 +218,14 @@ The CLI combines ingestion, normalization, optional event filtering, case
 expansion, bundle construction, and HTML output:
 
 ```bash
-uv run python -m agentledger.cli build \
+uv run agentledger build \
   path/to/audit_events.jsonl \
   --output outputs/agentledger.html
 ```
 
 No console-script entry point is currently declared in `pyproject.toml`, so
-`python -m agentledger.cli` is the canonical repository command.
+`uv run agentledger` is the canonical repository command. The module form,
+`uv run python -m agentledger.cli`, remains available as a fallback.
 
 ## Step 13: Follow CoffeeBench event emission
 

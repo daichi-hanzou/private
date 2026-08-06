@@ -151,13 +151,148 @@ uv run pytest
 Build an AgentLedger Explorer from an existing audit log:
 
 ```bash
-uv run python -m agentledger.cli build \
+uv run agentledger build \
   path/to/audit_events.jsonl \
   --output outputs/agentledger.html
 ```
 
+Try the minimal pending and confirmed audit flows:
+
+```bash
+uv run agentledger build \
+  examples/minimal_audit_pending.jsonl \
+  --output /tmp/agentledger-pending.html
+uv run agentledger build \
+  examples/minimal_audit_confirmed.jsonl \
+  --output /tmp/agentledger-confirmed.html
+```
+
 The command accepts filters such as `--day`, `--agent`, `--action-type`,
 `--proposal-id`, `--decision-id`, and `--search`.
+
+## Calendar Agent demo
+
+The local Calendar Agent is a deterministic, rule-based integration example.
+It does not call Google Calendar, Gmail, an LLM, or any external service.
+
+```bash
+uv run calendar-agent propose \
+  --title "Dental appointment" \
+  --date "2026-08-12" \
+  --preferred-period afternoon \
+  --duration 60 \
+  --slots 13:00 15:00 \
+  --requires-approval \
+  --output /tmp/calendar-pending.jsonl
+
+uv run agentledger build \
+  /tmp/calendar-pending.jsonl \
+  --output /tmp/calendar-pending.html
+
+uv run calendar-agent approve \
+  --input /tmp/calendar-pending.jsonl \
+  --action-id <ACTION_ID> \
+  --actor daichi \
+  --reason "Approved" \
+  --output /tmp/calendar-approved.jsonl
+
+uv run agentledger build \
+  /tmp/calendar-approved.jsonl \
+  --output /tmp/calendar-approved.html
+```
+
+An approval-required proposal contains Observation, Decision, and Action and
+appears as `pending` until `approve` or `reject` writes a separate output log.
+Use `--no-requires-approval` for an immediate confirmed Outcome. The `reject`
+command accepts the same arguments as `approve` and records a contradicted
+Outcome. Resolution stops without writing output if the input has malformed
+lines, the Action is missing or ambiguous, or it already has an Outcome.
+
+## Mail-to-Calendar Agent demo
+
+The Mail-to-Calendar Agent converts provider-neutral email records into
+calendar candidates and AgentLedger audit events. The current implementation
+uses deterministic rules and `LocalMailProvider`; future Gmail and Outlook
+integrations can implement the small `MailProvider` interface without changing
+classification or extraction logic.
+
+```bash
+uv run mail-to-calendar process \
+  --input examples/mail_to_calendar/sample_messages.jsonl \
+  --output /tmp/mail-to-calendar.jsonl \
+  --base-year 2026 \
+  --timezone Asia/Tokyo
+
+uv run agentledger build \
+  /tmp/mail-to-calendar.jsonl \
+  --output /tmp/mail-to-calendar.html
+```
+
+The service uses full `body_text` only while applying local rules. Audit logs
+contain a maximum 160-character provider preview, source message ID, and
+structured classification/candidate fields; they do not contain the full mail
+body or provider-specific metadata. Attachment content and filenames are not
+loaded.
+
+This demo does not connect to Gmail, Microsoft Graph, Google Calendar,
+Outlook Calendar, LINE, or an LLM. Calendar candidates with complete dates and
+times can be converted to the existing `CalendarRequest`; ambiguous candidates
+and deadlines without explicit times are rejected at that boundary rather
+than receiving invented values.
+
+## Mail-to-Calendar Orchestrator demo
+
+The Mail-to-Calendar Agent classifies mail and extracts candidates; the
+Calendar Agent manages calendar proposals and their approval lifecycle. The
+Orchestrator connects those existing Python services directly, without calling
+either CLI as a subprocess:
+
+```text
+LocalMailProvider
+    → MailToCalendarService
+    → CalendarCandidate
+    → CalendarRequest
+    → CalendarAgent.propose
+    → combined AgentLedger JSONL
+```
+
+Run the approval-required flow:
+
+```bash
+uv run mail-calendar-orchestrator process \
+  --input examples/mail_to_calendar/sample_messages.jsonl \
+  --output /tmp/mail-calendar-flow.jsonl \
+  --base-year 2026 \
+  --timezone Asia/Tokyo \
+  --requires-approval
+
+uv run agentledger build \
+  /tmp/mail-calendar-flow.jsonl \
+  --output /tmp/mail-calendar-flow.html
+```
+
+Use `--no-requires-approval` to include confirmed Calendar Outcomes in the
+same run. With approval enabled, each ready Calendar Action has no Outcome and
+appears as `pending` in the Explorer.
+
+Candidates are classified into four non-overlapping orchestration states:
+
+- `ready`: complete date, start time, and duration; sent to Calendar Agent
+- `clarification_required`: explicitly ambiguous; remains in the mail flow
+- `unsupported`: unsafe conversion such as a deadline without a time
+- `ignored`: non-important mail; never sent to Calendar Agent
+
+Calendar events retain the source provider/message/thread IDs, candidate ID,
+and parent Mail Action/Decision/Correlation IDs as metadata. Full mail bodies,
+provider-specific metadata, attachments, and attachment names are not copied
+into the combined log. Output is written through an atomic replacement after
+the complete batch succeeds.
+
+This remains a local rule-based demo. Gmail, Microsoft Graph, real calendar
+APIs, LINE, LLMs, and OpenClaw are not connected. A future Gmail or Outlook
+adapter can replace `LocalMailProvider` through `MailProvider`; the same
+orchestration service can later be invoked from another execution surface such
+as an OpenClaw Skill.
 
 Run the AgentLedger volume smoke tests:
 
