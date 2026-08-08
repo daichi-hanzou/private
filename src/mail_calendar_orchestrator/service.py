@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from calendar_agent.agent import CalendarAgent
 from mail_to_calendar.extractor import to_calendar_request
@@ -14,6 +15,15 @@ from mail_to_calendar.service import MailToCalendarService
 
 from .audit import write_jsonl_atomic
 from .models import OrchestrationResult
+from .state import MailStateStore
+
+
+class _MessagesProvider:
+    def __init__(self, messages: list[Any]) -> None:
+        self.messages = messages
+
+    def list_messages(self) -> list[Any]:
+        return self.messages
 
 
 class MailCalendarOrchestrator:
@@ -25,10 +35,16 @@ class MailCalendarOrchestrator:
         base_year: int,
         timezone: str = "Asia/Tokyo",
         analyzer: HybridMailAnalyzer | None = None,
+        state_store: MailStateStore | None = None,
+        analysis_mode: str = "rule-only",
+        model_name: str | None = None,
     ) -> None:
         self.base_year = base_year
         self.timezone = timezone
         self.analyzer = analyzer
+        self.state_store = state_store
+        self.analysis_mode = analysis_mode
+        self.model_name = model_name
 
     def process(
         self,
@@ -37,6 +53,8 @@ class MailCalendarOrchestrator:
         *,
         requires_approval: bool = True,
         analysis_only: bool = False,
+        reprocess: bool = False,
+        retry_failed: bool = False,
     ) -> OrchestrationResult:
         source = Path(input_path)
         output = Path(output_path)
@@ -47,6 +65,8 @@ class MailCalendarOrchestrator:
             output,
             requires_approval=requires_approval,
             analysis_only=analysis_only,
+            reprocess=reprocess,
+            retry_failed=retry_failed,
         )
 
     def process_provider(
@@ -56,8 +76,82 @@ class MailCalendarOrchestrator:
         *,
         requires_approval: bool = True,
         analysis_only: bool = False,
+        reprocess: bool = False,
+        retry_failed: bool = False,
     ) -> OrchestrationResult:
         output = Path(output_path)
+        fetched = provider.list_messages()
+        unique = []
+        seen: set[tuple[str, str]] = set()
+        for message in fetched:
+            key = (message.provider, message.message_id)
+            if key not in seen:
+                seen.add(key)
+                unique.append(message)
+        duplicate_count = len(fetched) - len(unique)
+        run_id = f"mail-batch-{uuid4()}"
+        selected = unique
+        skipped = duplicate_count
+        decisions = {}
+        if self.state_store is not None:
+            selected = []
+            for message in unique:
+                decision = self.state_store.decision(
+                    message, reprocess=reprocess, retry_failed=retry_failed
+                )
+                decisions[message.message_id] = decision
+                if decision.process:
+                    selected.append(message)
+                else:
+                    skipped += 1
+            provider_name = unique[0].provider if unique else "unknown"
+            self.state_store.start_run(
+                run_id, provider=provider_name,
+                analysis_mode=self.analysis_mode, model_name=self.model_name,
+                fetched=len(fetched), new=len(selected), skipped=skipped,
+            )
+            for message in selected:
+                self.state_store.mark_processing(
+                    message, run_id=run_id, analysis_mode=self.analysis_mode,
+                    model_name=self.model_name,
+                    digest=decisions[message.message_id].content_hash,
+                )
+        if not selected:
+            if self.state_store is not None:
+                self.state_store.finish_run(run_id, status="completed")
+            return OrchestrationResult(
+                processed_messages=0, important_messages=0,
+                ignored_messages=0, candidates=0, ready_candidates=0,
+                clarification_required=0, unsupported_candidates=0,
+                calendar_proposals=0, pending_calendar_actions=0,
+                confirmed_calendar_actions=0, generated_events=0,
+                output_path=output, events=[],
+                analysis_only=analysis_only, fetched_messages=len(fetched),
+                new_messages=0, skipped_messages=skipped, run_id=run_id,
+                state_db=self.state_store.path if self.state_store else None,
+            )
+        filtered_provider = _MessagesProvider(selected)
+        try:
+            return self._process_selected(
+                filtered_provider, output, requires_approval=requires_approval,
+                analysis_only=analysis_only, fetched_count=len(fetched),
+                skipped_count=skipped, run_id=run_id,
+            )
+        except Exception as exc:
+            if self.state_store is not None:
+                status = "retryable" if isinstance(exc, (OSError, RuntimeError)) else "failed"
+                for message in selected:
+                    self.state_store.mark_result(message, status=status, error=exc)
+                self.state_store.finish_run(
+                    run_id, failed_messages=len(selected), status="failed"
+                )
+            raise
+
+    def _process_selected(
+        self, provider: MailProvider, output: Path, *, requires_approval: bool,
+        analysis_only: bool, fetched_count: int, skipped_count: int,
+        run_id: str,
+    ) -> OrchestrationResult:
         mail_result = MailToCalendarService(
             base_year=self.base_year,
             timezone=self.timezone,
@@ -104,6 +198,11 @@ class MailCalendarOrchestrator:
                     None,
                 )
                 continue
+            if self.state_store is not None and self.state_store.candidate_seen(
+                candidate.candidate_id
+            ):
+                statuses[message.message_id] = ("duplicate_candidate", None)
+                continue
             try:
                 request = to_calendar_request(candidate)
             except ValueError as exc:
@@ -136,6 +235,85 @@ class MailCalendarOrchestrator:
         )
         events = [*mail_events, *calendar_events]
         written = write_jsonl_atomic(output, events)
+        failed_analyses = {
+            message.message_id: analysis
+            for message, analysis in zip(
+                messages, mail_result.analysis_results or [], strict=False
+            )
+            if "llm_unavailable" in analysis.validation_issues
+        }
+        retryable_ids = {
+            message_id
+            for message_id, analysis in failed_analyses.items()
+            if self._is_retryable_llm_failure(analysis.fallback_reason)
+        }
+        permanent_ids = set(failed_analyses) - retryable_ids
+        if self.state_store is not None:
+            candidate_map = {
+                item.source_message_id: item.candidate_id
+                for item in mail_result.candidates
+            }
+            calendar_action_map = {
+                str(event.get("metadata", {}).get("source_message_id")): str(event["action_id"])
+                for event in calendar_events
+                if event.get("event_type") == "action_executed"
+            }
+            execution_context = next(
+                (
+                    event["execution_context"]
+                    for event in mail_result.events
+                    if event.get("event_type") == "action_executed"
+                    and isinstance(event.get("execution_context"), dict)
+                ),
+                {},
+            )
+            source_run_id = str(mail_result.events[0]["run_id"])
+            for message in messages:
+                relation = mail_relations[message.message_id]
+                classification = classification_by_message.get(message.message_id)
+                self.state_store.mark_result(
+                    message,
+                    status=(
+                        "retryable" if message.message_id in retryable_ids
+                        else "failed" if message.message_id in permanent_ids
+                        else "processed"
+                    ),
+                    final_classification=classification,
+                    candidate_id=candidate_map.get(message.message_id),
+                    mail_action_id=relation.get("action_id"),
+                    calendar_action_id=calendar_action_map.get(message.message_id),
+                    prompt_template_version=execution_context.get(
+                        "prompt_template_version"
+                    ),
+                    schema_version=execution_context.get(
+                        "schema_version", "mail-analysis-schema-v2"
+                    ),
+                    source_run_id=source_run_id,
+                    error=(
+                        failed_analyses[message.message_id].fallback_reason
+                        if message.message_id in failed_analyses else None
+                    ),
+                )
+            retryable_count = len(retryable_ids)
+            permanent_count = len(permanent_ids)
+            self.state_store.finish_run(
+                run_id,
+                processed_messages=len(messages) - retryable_count - permanent_count,
+                failed_messages=retryable_count + permanent_count,
+                calendar_candidates=mail_result.classification_counts.get("calendar_candidate", 0),
+                clarification_required=mail_result.clarification_required,
+                promotions=mail_result.classification_counts.get("promotion", 0),
+                informational=mail_result.classification_counts.get("informational", 0),
+                security_notifications=mail_result.classification_counts.get("security_notification", 0),
+                invalid=mail_result.classification_counts.get("invalid", 0),
+                status=(
+                    "completed_with_errors"
+                    if retryable_count or permanent_count else "completed"
+                ),
+            )
+        else:
+            retryable_count = 0
+            permanent_count = 0
         return OrchestrationResult(
             processed_messages=mail_result.processed,
             important_messages=mail_result.important,
@@ -168,7 +346,23 @@ class MailCalendarOrchestrator:
             calendar_candidate_messages=mail_result.classification_counts.get(
                 "calendar_candidate", 0
             ),
+            fetched_messages=fetched_count,
+            new_messages=len(messages),
+            skipped_messages=skipped_count,
+            retryable_failures=retryable_count,
+            permanent_failures=permanent_count,
+            run_id=run_id,
+            state_db=self.state_store.path if self.state_store else None,
         )
+
+    @staticmethod
+    def _is_retryable_llm_failure(reason: str | None) -> bool:
+        value = (reason or "").lower()
+        retryable_markers = (
+            "timeout", "timed out", "connection", "connect", "refused",
+            "unreachable", "temporar", "429", "http 5", "network",
+        )
+        return any(marker in value for marker in retryable_markers)
 
     @staticmethod
     def _mail_relations(

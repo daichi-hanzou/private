@@ -287,6 +287,9 @@ class MailToCalendarService:
             "duration_minutes": candidate.duration_minutes,
             "timezone": candidate.timezone,
             "clarification_required": candidate.clarification_required,
+            "original_time_expression": candidate.original_time_expression,
+            "normalized_time": candidate.normalized_time,
+            "date_rollover_days": candidate.date_rollover_days,
         }
 
     def _action_parameters(
@@ -388,6 +391,7 @@ class MailToCalendarService:
             "classification_corrections": (
                 analysis.classification_corrections
             ),
+            "time_normalization": analysis.time_normalization,
             "validation_issues": analysis.validation_issues,
             "fallback_reason": analysis.fallback_reason,
             "calendar_candidate_rejected_reason": (

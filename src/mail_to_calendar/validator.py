@@ -6,6 +6,7 @@ from datetime import date, time
 
 from .llm_models import FinalClassification, LLMAnalysisResult
 from .models import EmailMessage
+from .time_normalization import normalize_calendar_datetime
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class ValidationResult:
     candidate_allowed: bool
     rejected_reason: str | None = None
     classification_corrections: list[str] = field(default_factory=list)
+    time_normalization: dict[str, str | int] | None = None
 
 
 class LLMResultValidator:
@@ -29,6 +31,24 @@ class LLMResultValidator:
         "suspicious_access": ("不審なアクセス", "suspicious access", "security alert"),
         "account_change": ("アカウント設定変更", "account settings changed"),
     }
+    _security_type_aliases = {
+        "new_signin": "new_sign_in",
+        "sign_in": "new_sign_in",
+        "new_application_connection": "new_app_connection",
+        "app_connection": "new_app_connection",
+        "password_changed": "password_change",
+        "security_alert": "suspicious_access",
+        "suspicious_sign_in": "suspicious_access",
+        "account_settings_change": "account_change",
+    }
+    _allowed_security_types = frozenset(
+        {
+            *_security_patterns.keys(),
+            "account_activity",
+            "account_connection",
+            "account_setting_change",
+        }
+    )
     _generic_event_patterns = (
         "参加者募集中", "一般募集", "おすすめセミナー", "無料ウェビナー",
         "セミナーのご案内", "ウェビナーのご案内", "展示会のご案内",
@@ -55,6 +75,9 @@ class LLMResultValidator:
             result.candidate_type == "none"
             and not result.should_create_calendar_candidate
         )
+        normalized_date = result.date
+        normalized_start = result.start
+        time_normalization = None
         for evidence in result.evidence:
             if evidence not in text:
                 issues.append("evidence_not_in_email")
@@ -69,17 +92,29 @@ class LLMResultValidator:
             else:
                 if not self._date_grounded(result.date, text):
                     issues.append("date_not_grounded")
-        for name, value in (("start", result.start), ("end", result.end)):
-            if not temporal_validation_required:
-                continue
-            if value:
-                try:
-                    time.fromisoformat(value)
-                except ValueError:
-                    issues.append(f"invalid_{name}")
-                else:
-                    if not self._time_grounded(value, text):
-                        issues.append(f"{name}_not_grounded")
+        if temporal_validation_required and result.start:
+            try:
+                normalized_datetime = normalize_calendar_datetime(
+                    result.date,
+                    result.start,
+                    original_time_expression=result.start,
+                )
+            except ValueError:
+                issues.append("invalid_start")
+            else:
+                normalized_date = normalized_datetime.date
+                normalized_start = normalized_datetime.time
+                time_normalization = normalized_datetime.audit_data()
+                if not self._time_grounded(result.start, text):
+                    issues.append("start_not_grounded")
+        if temporal_validation_required and result.end:
+            try:
+                time.fromisoformat(result.end)
+            except ValueError:
+                issues.append("invalid_end")
+            else:
+                if not self._time_grounded(result.end, text):
+                    issues.append("end_not_grounded")
         if (
             temporal_validation_required
             and result.location
@@ -108,7 +143,6 @@ class LLMResultValidator:
         security = bool(
             detected_security_type
             or normalized_security_type
-            or result.category == "security_notification"
         )
         generic_ad = result.generic_event_advertisement or any(
             pattern.casefold() in folded for pattern in self._generic_event_patterns
@@ -180,14 +214,22 @@ class LLMResultValidator:
         if candidate_requested and not candidate_allowed:
             rejected_reason = ", ".join(sorted(set(issues))) or classification
         corrections: list[str] = []
+        if result.security_notification_type != normalized_security_type:
+            original_type = (result.security_notification_type or "").strip()
+            corrections.append(
+                "security_notification_type:"
+                + (original_type.casefold() or "<empty>")
+                + "->"
+                + (normalized_security_type or "null")
+            )
         if proposed_classification != classification:
             corrections.append(
                 f"final_classification:{proposed_classification}->{classification}"
             )
-        if result.security_notification_type != normalized_security_type:
-            corrections.append("security_notification_type:sentinel->null")
         normalized = replace(
             result,
+            date=normalized_date,
+            start=normalized_start,
             final_classification=classification,
             should_create_calendar_candidate=candidate_allowed,
             clarification_required=classification == "clarification_required",
@@ -204,14 +246,29 @@ class LLMResultValidator:
             candidate_allowed,
             rejected_reason,
             corrections,
+            time_normalization,
         )
 
-    @staticmethod
-    def _normalize_security_type(value: str | None) -> str | None:
+    @classmethod
+    def _normalize_security_type(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = value.strip()
-        if normalized.casefold() in {"", "none", "null", "n/a", "na", "unknown"}:
+        normalized = value.strip().casefold().replace("-", "_").replace(" ", "_")
+        if normalized in {
+            "",
+            "none",
+            "null",
+            "n/a",
+            "na",
+            "unknown",
+            "ignored",
+            "ignore",
+            "not_applicable",
+            "notapplicable",
+        }:
+            return None
+        normalized = cls._security_type_aliases.get(normalized, normalized)
+        if normalized not in cls._allowed_security_types:
             return None
         return normalized
 
@@ -235,6 +292,11 @@ class LLMResultValidator:
 
     @staticmethod
     def _time_grounded(value: str, text: str) -> bool:
+        if value == "24:00":
+            return any(
+                expression in text
+                for expression in ("24:00", "24時", "24時00分")
+            )
         parsed = time.fromisoformat(value)
         hour, minute = parsed.hour, parsed.minute
         variants = {value, f"{hour}:{minute:02d}", f"{hour}時"}

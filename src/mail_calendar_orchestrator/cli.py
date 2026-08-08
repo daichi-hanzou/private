@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,45 @@ from mail_to_calendar.llm_classifier import LLMCalendarClassifier
 from mail_to_calendar.ollama_client import OllamaClient, OllamaError
 
 from .service import MailCalendarOrchestrator
+from .state import DEFAULT_STATE_DB, MailStateStore
+
+
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _load_dotenv(path: Path = Path(".env")) -> list[str]:
+    """Load AGENTLEDGER_* values without executing the file as shell code."""
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"could not read {path}: {exc}") from exc
+    loaded: list[str] = []
+    for line_number, original in enumerate(lines, start=1):
+        line = original.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            raise ValueError(f"invalid .env entry on line {line_number}")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not _ENV_KEY.fullmatch(key):
+            raise ValueError(f"invalid .env key on line {line_number}")
+        if not key.startswith("AGENTLEDGER_"):
+            continue
+        if value[:1] in {'"', "'"}:
+            quote = value[0]
+            if len(value) < 2 or value[-1] != quote:
+                raise ValueError(f"unterminated .env quote on line {line_number}")
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
 
 
 def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
@@ -71,6 +111,13 @@ def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-body-max-chars", type=int, default=6000)
     parser.add_argument("--allow-remote-ollama", action="store_true")
     parser.add_argument("--require-llm", action="store_true")
+    parser.add_argument(
+        "--state-db", type=Path, default=DEFAULT_STATE_DB,
+        help="SQLite operational state database.",
+    )
+    parser.add_argument("--no-state", action="store_true")
+    parser.add_argument("--reprocess", action="store_true")
+    parser.add_argument("--retry-failed", action="store_true")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -137,12 +184,28 @@ def _parser() -> argparse.ArgumentParser:
     )
     check.set_defaults(ollama_thinking=False)
     check.add_argument("--allow-remote-ollama", action="store_true")
+    state = commands.add_parser("state", help="Inspect or reset mail state.")
+    state.add_argument("--state-db", type=Path, default=DEFAULT_STATE_DB)
+    state_commands = state.add_subparsers(dest="state_command", required=True)
+    state_commands.add_parser("summary")
+    recent = state_commands.add_parser("recent")
+    recent.add_argument("--limit", type=int, default=20)
+    reset = state_commands.add_parser("reset-message")
+    reset.add_argument("--provider", required=True)
+    reset.add_argument("--message-id", required=True)
     return parser
 
 
 def main() -> None:
+    try:
+        _load_dotenv()
+    except ValueError as exc:
+        argparse.ArgumentParser(prog="mail-calendar-orchestrator").error(
+            str(exc)
+        )
     parser = _parser()
     args = parser.parse_args()
+    state_store = None
     try:
         if args.command == "check-llm":
             client = OllamaClient(
@@ -162,6 +225,29 @@ def main() -> None:
             print(f"Structured output latency: {checked.latency_ms} ms")
             if not checked.model_available:
                 parser.error(f"Ollama model is not installed: {args.ollama_model}")
+            return
+        if args.command == "state":
+            with MailStateStore(args.state_db) as store:
+                if args.state_command == "summary":
+                    summary = store.summary()
+                    counts = summary["counts"]
+                    print(f"State DB: {store.path}")
+                    print(f"Total processed messages: {summary['total']}")
+                    print(f"Processed: {counts.get('processed', 0)}")
+                    print(f"Retryable: {counts.get('retryable', 0)}")
+                    print(f"Failed: {counts.get('failed', 0)}")
+                    print(f"Last successful run: {summary['last_successful_run'] or 'none'}")
+                    print(f"Last run duration: {summary['last_run_duration_ms'] or 0} ms")
+                    print(f"Last processed message time: {summary['last_processed_message_time'] or 'none'}")
+                elif args.state_command == "recent":
+                    print(f"State DB: {store.path}")
+                    for row in store.recent(max(1, args.limit)):
+                        print("\t".join(str(row[key] or "-") for key in row.keys()))
+                else:
+                    removed = store.reset_message(args.provider, args.message_id)
+                    if not removed:
+                        raise ValueError("message state not found")
+                    print(f"Reset: {args.provider}/{args.message_id}")
             return
         analyzer = None
         if args.analysis_mode != "rule-only":
@@ -189,10 +275,11 @@ def main() -> None:
                 timezone=args.timezone,
                 mode="rule-only",
             )
+        state_store = None if args.no_state else MailStateStore(args.state_db)
         orchestrator = MailCalendarOrchestrator(
-            base_year=args.base_year,
-            timezone=args.timezone,
-            analyzer=analyzer,
+            base_year=args.base_year, timezone=args.timezone, analyzer=analyzer,
+            state_store=state_store, analysis_mode=args.analysis_mode,
+            model_name=args.ollama_model if args.analysis_mode != "rule-only" else None,
         )
         provider = None
         if args.command == "process":
@@ -201,6 +288,8 @@ def main() -> None:
                 args.output,
                 requires_approval=args.requires_approval,
                 analysis_only=args.analysis_only,
+                reprocess=args.reprocess,
+                retry_failed=args.retry_failed,
             )
         else:
             client_id = args.client_id or os.environ.get(
@@ -210,6 +299,11 @@ def main() -> None:
                 raise ValueError(
                     "Microsoft client ID is required via --client-id or "
                     "AGENTLEDGER_MICROSOFT_CLIENT_ID"
+                )
+            if client_id.startswith("<") and client_id.endswith(">"):
+                raise ValueError(
+                    "replace the AGENTLEDGER_MICROSOFT_CLIENT_ID placeholder "
+                    "in .env with the registered Application Client ID"
                 )
             received_after = (
                 datetime.fromisoformat(args.received_after)
@@ -244,8 +338,12 @@ def main() -> None:
                 args.output,
                 requires_approval=args.requires_approval,
                 analysis_only=args.analysis_only,
+                reprocess=args.reprocess,
+                retry_failed=args.retry_failed,
             )
     except (OSError, RuntimeError, ValueError, OllamaError) as exc:
+        if state_store is not None:
+            state_store.close()
         parser.error(str(exc))
     if provider is not None:
         print(
@@ -253,9 +351,13 @@ def main() -> None:
             "No mailbox or calendar changes will be made.\n"
             f"Authenticated account: "
             f"{mask_account(provider.authenticated_account)}\n"
-            f"Fetched messages: {result.processed_messages}"
+            f"Fetched messages: {result.fetched_messages}"
         )
+    if result.new_messages == 0:
+        print("No new messages to process.")
     print(
+        f"New messages: {result.new_messages}\n"
+        f"Skipped already processed: {result.skipped_messages}\n"
         f"Processed messages: {result.processed_messages}\n"
         f"Important messages: {result.important_messages}\n"
         f"Ignored messages: {result.ignored_messages}\n"
@@ -274,9 +376,15 @@ def main() -> None:
         f"Promotions: {result.promotion_messages}\n"
         f"Security notifications: {result.security_notifications}\n"
         f"Invalid: {result.invalid_messages}\n"
+        f"Retryable failures: {result.retryable_failures}\n"
+        f"Permanent failures: {result.permanent_failures}\n"
+        f"Run ID: {result.run_id or '-'}\n"
+        f"State DB: {result.state_db or 'disabled'}\n"
         f"Mode: {'analysis only' if result.analysis_only else args.analysis_mode}\n"
         f"Output: {result.output_path}"
     )
+    if state_store is not None:
+        state_store.close()
 
 
 if __name__ == "__main__":

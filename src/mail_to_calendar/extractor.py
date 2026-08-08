@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from calendar_agent.models import CalendarRequest
 
 from .models import CalendarCandidate, EmailMessage, ImportanceResult
+from .time_normalization import normalize_calendar_datetime
 
 
 class RuleBasedCalendarExtractor:
@@ -35,8 +36,41 @@ class RuleBasedCalendarExtractor:
                 "ambiguous date expression requires clarification: "
                 + ", ".join(ambiguous)
             )
-        date = None if ambiguous else self._extract_date(text)
-        start = None if ambiguous else self._extract_time(text)
+        date = None
+        start = None
+        original_time_expression = None
+        normalized_time = None
+        date_rollover_days = 0
+        invalid_temporal = False
+        if not ambiguous:
+            try:
+                date = self._extract_date(text)
+            except ValueError as exc:
+                notes.append(str(exc))
+                invalid_temporal = True
+            start, original_time_expression = self._extract_time_with_expression(
+                text
+            )
+            if start is not None:
+                try:
+                    normalized = normalize_calendar_datetime(
+                        date,
+                        start,
+                        original_time_expression=original_time_expression,
+                    )
+                except ValueError as exc:
+                    notes.append(str(exc))
+                    start = None
+                    invalid_temporal = True
+                else:
+                    date = normalized.date
+                    start = normalized.time
+                    normalized_time = normalized.normalized_time
+                    date_rollover_days = normalized.date_rollover_days
+                    if normalized.date_rollover_days:
+                        notes.append(
+                            "end-of-day time normalized with next-day rollover"
+                        )
         if date is None and not ambiguous:
             notes.append("date was not found")
         if start is None and importance.category != "deadline":
@@ -47,7 +81,7 @@ class RuleBasedCalendarExtractor:
             "deadline": "deadline",
             "task": "task",
         }.get(importance.category, "event")
-        clarification = bool(ambiguous) or date is None
+        clarification = bool(ambiguous) or date is None or invalid_temporal
         if candidate_type != "deadline" and start is None:
             clarification = True
         duration = 60 if candidate_type == "event" and start else None
@@ -74,6 +108,11 @@ class RuleBasedCalendarExtractor:
             clarification_required=clarification,
             extraction_notes=notes,
             source_subject=message.subject,
+            original_time_expression=(
+                original_time_expression if date_rollover_days else None
+            ),
+            normalized_time=normalized_time,
+            date_rollover_days=date_rollover_days,
         )
 
     def _extract_date(self, text: str) -> str | None:
@@ -100,23 +139,35 @@ class RuleBasedCalendarExtractor:
 
     @staticmethod
     def _extract_time(text: str) -> str | None:
+        return RuleBasedCalendarExtractor._extract_time_with_expression(text)[0]
+
+    @staticmethod
+    def _extract_time_with_expression(
+        text: str,
+    ) -> tuple[str | None, str | None]:
         match = re.search(r"午後\s*(\d{1,2})時(?:\s*(\d{1,2})分)?", text)
         if match:
             hour = int(match.group(1)) % 12 + 12
             minute = int(match.group(2) or 0)
-            return f"{hour:02d}:{minute:02d}"
+            return f"{hour:02d}:{minute:02d}", match.group(0)
         match = re.search(r"午前\s*(\d{1,2})時(?:\s*(\d{1,2})分)?", text)
         if match:
             hour = int(match.group(1)) % 12
             minute = int(match.group(2) or 0)
-            return f"{hour:02d}:{minute:02d}"
+            return f"{hour:02d}:{minute:02d}", match.group(0)
         match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", text)
         if match:
-            return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+            return (
+                f"{int(match.group(1)):02d}:{int(match.group(2)):02d}",
+                match.group(0),
+            )
         match = re.search(r"(?<!\d)(\d{1,2})時(?:\s*(\d{1,2})分)?", text)
         if match:
-            return f"{int(match.group(1)):02d}:{int(match.group(2) or 0):02d}"
-        return None
+            return (
+                f"{int(match.group(1)):02d}:{int(match.group(2) or 0):02d}",
+                match.group(0),
+            )
+        return None, None
 
     @staticmethod
     def _end_time(start: str | None, duration: int | None) -> str | None:

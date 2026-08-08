@@ -335,6 +335,21 @@ The first CLI run prints Microsoft's verification URL and device code. Complete
 sign-in with the personal Microsoft account whose mail should be read. Later
 runs first attempt silent acquisition from the local MSAL cache.
 
+The CLI automatically reads `AGENTLEDGER_*` settings from a `.env` file in the
+current working directory. It parses the file as data without executing shell
+commands and never overwrites variables already exported by the shell. For
+example:
+
+```dotenv
+AGENTLEDGER_MICROSOFT_CLIENT_ID=<APPLICATION_CLIENT_ID>
+AGENTLEDGER_OLLAMA_BASE_URL=http://localhost:11434
+AGENTLEDGER_OLLAMA_MODEL=qwen3:8b
+```
+
+`.env` is Git-ignored and should have mode `0600`. Replace placeholders before
+running the Outlook command; the CLI reports an explicit error for an unchanged
+Client ID placeholder.
+
 The default cache is
 `~/.config/agentledger/microsoft_token_cache.json`. It is written atomically
 with mode `0600` where supported. The cache contains sensitive authentication
@@ -445,6 +460,45 @@ uv run agentledger build \
 After reviewing the rule/LLM decisions in Explorer, omit `--analysis-only` and
 keep `--requires-approval` to create pending local proposals. Nothing writes to
 an actual calendar.
+
+### Processed-mail state
+
+The orchestrator uses a local SQLite database by default so repeated batch
+runs do not analyze the same unchanged message or propose its calendar
+candidate twice. The default path is
+`~/.local/share/agentledger/mail_state.sqlite3`; override it with
+`--state-db PATH`. Use `--reprocess` for deliberate evaluation reruns,
+`--retry-failed` for permanently failed rows, or `--no-state` for isolated
+debugging. `retryable` rows and `processing` rows older than 30 minutes are
+retried automatically.
+
+```bash
+uv run mail-calendar-orchestrator outlook \
+  --max-messages 20 --unread-only \
+  --analysis-mode llm-first --analysis-only \
+  --output /tmp/outlook-analysis.jsonl
+
+uv run mail-calendar-orchestrator state summary
+uv run mail-calendar-orchestrator state recent --limit 20
+uv run mail-calendar-orchestrator state reset-message \
+  --provider outlook --message-id MESSAGE_ID
+```
+
+SQLite is operational state; AgentLedger JSONL remains the decision audit log.
+The database stores identifiers, hashes, classifications, action links,
+versions, timestamps, and bounded errors. It does not store message bodies,
+subjects, prompts, raw LLM/Graph responses, attachments, or tokens. Its parent
+directory and file are created with permissions `0700` and `0600` where the
+platform supports them. The database file and SQLite sidecar files are ignored
+by Git.
+
+Each fetched batch is recorded in `runs`. Messages are marked `processing`
+before analysis, but become `processed` only after the JSONL atomic rename has
+succeeded; temporary LLM failures remain `retryable`. State changes use SQLite
+transactions per message. If there are no new messages, the command prints
+`No new messages to process.`, records a completed run, and does not create or
+replace the requested JSONL file. Scheduling with systemd or cron is deliberately
+left for a later step.
 
 Only one email is analyzed per Ollama request. The input contains sender,
 subject, received time, bounded body text (6000 characters by default, maximum

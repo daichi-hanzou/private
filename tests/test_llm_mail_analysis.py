@@ -207,6 +207,52 @@ def test_validator_accepts_grounded_normalization_and_rejects_hallucination():
     assert not invalid.result.clarification_required
 
 
+def test_llm_end_of_day_time_is_normalized_and_audited():
+    message = _message(
+        subject="Project meeting",
+        body="8月10日24:00から60分の会議です。",
+    )
+    raw = _raw(
+        date="2026-08-10",
+        start="24:00",
+        evidence=["8月10日", "24:00", "60分"],
+    )
+    result = _llm_first_result(message, raw)
+    analysis = result.analysis_results[0]
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate.date == "2026-08-11"
+    assert analysis.final_candidate.start == "00:00"
+    assert analysis.time_normalization == {
+        "original_time_expression": "24:00",
+        "normalized_time": "00:00",
+        "date_rollover_days": 1,
+    }
+    serialized = json.dumps(result.events, ensure_ascii=False)
+    assert '"original_time_expression": "24:00"' in serialized
+    assert '"normalized_time": "00:00"' in serialized
+    assert '"date_rollover_days": 1' in serialized
+
+
+@pytest.mark.parametrize("invalid_time", ["24:01", "24:30", "25:00"])
+def test_invalid_llm_end_of_day_time_isolated_to_message(
+    invalid_time: str,
+) -> None:
+    message = _message(
+        subject="Project meeting",
+        body=f"8月10日{invalid_time}から60分の会議です。",
+    )
+    raw = _raw(
+        date="2026-08-10",
+        start=invalid_time,
+        evidence=["8月10日", invalid_time, "60分"],
+    )
+    result = _llm_first_result(message, raw)
+    analysis = result.analysis_results[0]
+    assert analysis.final_classification == "invalid"
+    assert analysis.final_candidate is None
+    assert "invalid_start" in analysis.validation_issues
+
+
 def test_validator_rejects_relative_date_and_inferred_deadline_time():
     result = LLMAnalysisResult.from_dict(
         _raw(candidate_type="deadline", date="2026-08-12", start="15:00")
@@ -476,9 +522,66 @@ def test_post_processing_corrects_false_security_classification(
         f"final_classification:security_notification->{expected}"
         in analysis.classification_corrections
     )
-    assert "security_notification_type:sentinel->null" in (
+    assert "security_notification_type:none->null" in (
         analysis.classification_corrections
     )
+
+
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        "ignored", " Ignored ", "Ignore", "", "N/A", "n/a",
+        "not_applicable", "not applicable", "not-applicable",
+        "unknown", "null", "marketing_email",
+    ],
+)
+def test_security_type_sentinels_do_not_override_generic_seminar(
+    sentinel: str,
+) -> None:
+    message = _message(
+        subject="資格取得を目指す方向け無料オンラインセミナー",
+        body="8月30日19時開催の一般向けセミナーです。参加者募集中です。",
+    )
+    raw = _noncandidate(
+        "security_notification",
+        category="promotion",
+        generic_event_advertisement=True,
+        security_notification_type=sentinel,
+        evidence=["参加者募集中"],
+    )
+    analysis = _llm_first_result(message, raw).analysis_results[0]
+    assert analysis.final_classification == "promotion"
+    assert analysis.llm_result.security_notification_type is None
+    assert analysis.final_candidate is None
+    assert not analysis.llm_result.should_create_calendar_candidate
+    assert analysis.final_classification != "clarification_required"
+    if sentinel.strip().casefold() == "ignored":
+        assert "security_notification_type:ignored->null" in (
+            analysis.classification_corrections
+        )
+
+
+@pytest.mark.parametrize(
+    ("security_type", "expected"),
+    [
+        ("ACCOUNT_ACTIVITY", "account_activity"),
+        ("account_connection", "account_connection"),
+    ],
+)
+def test_allowed_security_types_remain_valid(
+    security_type: str, expected: str
+) -> None:
+    raw = _noncandidate(
+        "security_notification",
+        category="informational",
+        security_notification_type=security_type,
+    )
+    analysis = _llm_first_result(
+        _message(subject="アカウント通知", body="アカウントに関する通知です。"),
+        raw,
+    ).analysis_results[0]
+    assert analysis.final_classification == "security_notification"
+    assert analysis.llm_result.security_notification_type == expected
 
 
 @pytest.mark.parametrize(
@@ -578,13 +681,21 @@ def test_anonymized_llm_first_fixture_has_expected_types():
         / "examples/mail_to_calendar/llm_first_messages.jsonl"
     )
     messages = LocalMailProvider(fixture).list_messages()
-    assert len(messages) == 9
+    assert len(messages) == 10
     assert {message.message_id for message in messages} == {
         "fixture-seminar", "fixture-beauty-ad", "fixture-sign-in",
         "fixture-app-connection", "fixture-personal-meeting",
         "fixture-reservation", "fixture-deadline",
         "fixture-ambiguous-meeting", "fixture-newsletter",
+        "fixture-professional-seminar",
     }
+    seminar = next(
+        message
+        for message in messages
+        if message.message_id == "fixture-professional-seminar"
+    )
+    assert seminar.subject == "明日開催 無料オンラインセミナーのお知らせ"
+    assert "どなたでも参加できます" in seminar.body_text
 
 
 def test_orchestrator_passes_only_llm_first_calendar_candidate(tmp_path):

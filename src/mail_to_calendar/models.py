@@ -50,3 +50,6 @@ class CalendarCandidate:
     clarification_required: bool
     extraction_notes: list[str]
     source_subject: str
+    original_time_expression: str | None = None
+    normalized_time: str | None = None
+    date_rollover_days: int = 0

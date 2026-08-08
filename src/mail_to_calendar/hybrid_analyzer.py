@@ -106,10 +106,15 @@ class HybridMailAnalyzer:
             issues.append("rule_llm_conflict")
             rejection_reason = "rule_llm_conflict"
         if classification == "calendar_candidate" and checked.candidate_allowed:
-            candidate = self._candidate(message, checked.result)
+            candidate = self._candidate(
+                message, checked.result, checked.time_normalization
+            )
         elif classification == "clarification_required":
             candidate = self._clarification_candidate(
-                message, rule_candidate, checked.result
+                message,
+                rule_candidate,
+                checked.result,
+                checked.time_normalization,
             )
         importance = ImportanceResult(
             checked.result.is_important,
@@ -136,6 +141,7 @@ class HybridMailAnalyzer:
             rejection_reason,
             llm.final_classification,
             checked.classification_corrections,
+            checked.time_normalization,
         )
 
     def _should_use_llm(self, importance: ImportanceResult, candidate: CalendarCandidate | None) -> bool:
@@ -169,7 +175,12 @@ class HybridMailAnalyzer:
             return True
         return False
 
-    def _candidate(self, message: EmailMessage, llm) -> CalendarCandidate:
+    def _candidate(
+        self,
+        message: EmailMessage,
+        llm,
+        time_normalization: dict[str, str | int] | None = None,
+    ) -> CalendarCandidate:
         digest = hashlib.sha256(f"{message.provider}:{message.message_id}".encode()).hexdigest()[:12]
         return CalendarCandidate(
             candidate_id=f"calendar-candidate-{digest}", source_provider=message.provider,
@@ -181,10 +192,33 @@ class HybridMailAnalyzer:
             importance_score=llm.importance_score, importance_reasons=list(llm.reasons),
             requires_approval=True, clarification_required=llm.clarification_required,
             extraction_notes=list(llm.clarification_questions), source_subject=message.subject,
+            original_time_expression=(
+                str(time_normalization["original_time_expression"])
+                if time_normalization
+                else None
+            ),
+            normalized_time=(
+                str(time_normalization["normalized_time"])
+                if time_normalization
+                else None
+            ),
+            date_rollover_days=(
+                int(time_normalization["date_rollover_days"])
+                if time_normalization
+                else 0
+            ),
         )
 
-    def _clarification_candidate(self, message: EmailMessage, rule_candidate, llm):
-        candidate = rule_candidate or self._candidate(message, llm)
+    def _clarification_candidate(
+        self,
+        message: EmailMessage,
+        rule_candidate,
+        llm,
+        time_normalization: dict[str, str | int] | None = None,
+    ):
+        candidate = rule_candidate or self._candidate(
+            message, llm, time_normalization
+        )
         return CalendarCandidate(**{
             **candidate.__dict__, "clarification_required": True,
             "extraction_notes": [*candidate.extraction_notes, "rule and LLM analysis require clarification"],

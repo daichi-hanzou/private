@@ -28,3 +28,10 @@ class OrchestrationResult:
     security_notifications: int = 0
     invalid_messages: int = 0
     calendar_candidate_messages: int = 0
+    fetched_messages: int = 0
+    new_messages: int = 0
+    skipped_messages: int = 0
+    retryable_failures: int = 0
+    permanent_failures: int = 0
+    run_id: str | None = None
+    state_db: Path | None = None

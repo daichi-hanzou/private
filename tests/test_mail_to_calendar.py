@@ -19,6 +19,7 @@ from mail_to_calendar.extractor import (
 from mail_to_calendar.local_provider import LocalMailProvider
 from mail_to_calendar.models import EmailMessage
 from mail_to_calendar.service import MailToCalendarService
+from mail_to_calendar.time_normalization import normalize_calendar_datetime
 
 
 SAMPLE = (
@@ -120,6 +121,93 @@ def test_rule_based_japanese_datetime_extraction(
     assert candidate is not None
     assert candidate.date == expected_date
     assert candidate.start == expected_start
+
+
+@pytest.mark.parametrize(
+    ("date_value", "expected_date"),
+    [
+        ("2026-08-10", "2026-08-11"),
+        ("2026-08-31", "2026-09-01"),
+        ("2026-12-31", "2027-01-01"),
+        ("2024-02-28", "2024-02-29"),
+        ("2024-02-29", "2024-03-01"),
+    ],
+)
+def test_end_of_day_time_rolls_date_forward(
+    date_value: str, expected_date: str
+) -> None:
+    normalized = normalize_calendar_datetime(date_value, "24:00")
+    assert normalized.date == expected_date
+    assert normalized.time == "00:00"
+    assert normalized.date_rollover_days == 1
+    assert normalized.audit_data() == {
+        "original_time_expression": "24:00",
+        "normalized_time": "00:00",
+        "date_rollover_days": 1,
+    }
+
+
+@pytest.mark.parametrize("value", ["24:01", "24:30", "25:00", "25:01"])
+def test_invalid_end_of_day_times_are_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="calendar time|only permits"):
+        normalize_calendar_datetime("2026-08-10", value)
+
+
+@pytest.mark.parametrize("expression", ["24:00", "24時", "24時00分"])
+def test_rule_extractor_normalizes_japanese_end_of_day(
+    expression: str,
+) -> None:
+    _, candidate = _classify_extract(
+        _message(subject=f"8月10日{expression} 定例会議")
+    )
+    assert candidate is not None
+    assert candidate.date == "2026-08-11"
+    assert candidate.start == "00:00"
+    assert candidate.original_time_expression == expression
+    assert candidate.normalized_time == "00:00"
+    assert candidate.date_rollover_days == 1
+
+
+def test_deadline_end_of_day_keeps_original_and_normalized_audit_data() -> None:
+    _, candidate = _classify_extract(
+        _message(subject="8月10日24:00までに書類をご提出ください")
+    )
+    assert candidate is not None
+    assert candidate.candidate_type == "deadline"
+    assert candidate.date == "2026-08-11"
+    assert candidate.start == "00:00"
+    assert candidate.duration_minutes is None
+    assert candidate.original_time_expression == "24:00"
+    assert candidate.normalized_time == "00:00"
+    assert candidate.date_rollover_days == 1
+
+
+def test_invalid_time_does_not_stop_mail_batch() -> None:
+    invalid = _message(
+        subject="8月10日24時30分 定例会議",
+        message_id="invalid-time",
+    )
+    valid = _message(
+        subject="8月11日15時 定例会議",
+        message_id="valid-time",
+    )
+
+    class _Provider:
+        def list_messages(self):
+            return [invalid, valid]
+
+        def get_message(self, message_id):
+            return {item.message_id: item for item in [invalid, valid]}[message_id]
+
+    result = MailToCalendarService(base_year=2026).process(_Provider())
+    assert result.processed == 2
+    by_message = {
+        candidate.source_message_id: candidate
+        for candidate in result.candidates
+    }
+    assert by_message["invalid-time"].clarification_required
+    assert by_message["invalid-time"].start is None
+    assert not by_message["valid-time"].clarification_required
 
 
 def test_deadline_without_time_does_not_invent_time() -> None:

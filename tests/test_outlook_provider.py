@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from datetime import datetime, timezone
 
@@ -12,7 +13,7 @@ from agentledger.html import render_explorer
 from agentledger.ingestion import read_jsonl
 from agentledger.normalizer import normalize_events
 from mail_calendar_orchestrator.service import MailCalendarOrchestrator
-from mail_calendar_orchestrator.cli import main
+from mail_calendar_orchestrator.cli import _load_dotenv, main
 from mail_to_calendar.microsoft_auth import (
     MicrosoftAuthError,
     MicrosoftAuthenticator,
@@ -29,6 +30,36 @@ from mail_to_calendar.service import MailToCalendarService
 
 
 TOKEN = "fake-access-token-never-log"
+
+
+def test_dotenv_loads_agentledger_values_without_overriding_environment(
+    tmp_path, monkeypatch
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "# local configuration\n"
+        "AGENTLEDGER_MICROSOFT_CLIENT_ID=dotenv-client-id\n"
+        'AGENTLEDGER_OLLAMA_MODEL="qwen3:8b"\n'
+        "UNRELATED_VALUE=ignored\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AGENTLEDGER_MICROSOFT_CLIENT_ID", raising=False)
+    monkeypatch.setenv("AGENTLEDGER_OLLAMA_MODEL", "existing-model")
+    monkeypatch.delenv("UNRELATED_VALUE", raising=False)
+
+    loaded = _load_dotenv(dotenv)
+
+    assert loaded == ["AGENTLEDGER_MICROSOFT_CLIENT_ID"]
+    assert os.environ["AGENTLEDGER_MICROSOFT_CLIENT_ID"] == "dotenv-client-id"
+    assert os.environ["AGENTLEDGER_OLLAMA_MODEL"] == "existing-model"
+    assert "UNRELATED_VALUE" not in os.environ
+
+
+def test_dotenv_rejects_malformed_entries(tmp_path) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("AGENTLEDGER_BROKEN\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="line 1"):
+        _load_dotenv(dotenv)
 
 
 class _Cache:
@@ -561,6 +592,7 @@ def test_outlook_cli_is_read_only_masked_and_private(
             "--analysis-mode",
             "rule-only",
             "--requires-approval",
+            "--no-state",
         ],
     )
 

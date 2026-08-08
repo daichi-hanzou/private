@@ -232,3 +232,4 @@ class HybridAnalysisResult:
     calendar_candidate_rejected_reason: str | None = None
     llm_proposed_classification: FinalClassification | None = None
     classification_corrections: list[str] = field(default_factory=list)
+    time_normalization: dict[str, str | int] | None = None

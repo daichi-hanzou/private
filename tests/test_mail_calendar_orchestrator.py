@@ -267,6 +267,7 @@ def test_cli_prints_non_overlapping_summary(
             "--analysis-mode",
             "rule-only",
             "--requires-approval",
+            "--no-state",
         ],
     )
 
