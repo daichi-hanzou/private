@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from calendar_execution.google_auth import DEFAULT_TOKEN as CALENDAR_TOKEN
-from mail_calendar_orchestrator.cli import _parser, main
+from mail_calendar_orchestrator.cli import _parser, _print_gmail_debug_body, main
 from mail_to_calendar.gmail_auth import (
     DEFAULT_GMAIL_CREDENTIALS,
     DEFAULT_GMAIL_TOKEN,
@@ -219,6 +219,30 @@ def test_gmail_cli_commands_parse_with_separate_token_default():
     assert analyze.gmail_command == "analyze"
     assert analyze.message_id == "abc123"
     assert analyze.ollama_model == "qwen3:8b"
+    assert analyze.debug_body is False
+    assert parser.parse_args(
+        ["gmail", "analyze", "abc123", "--debug-body"]
+    ).debug_body is True
+
+
+def test_gmail_debug_body_is_explicit_terminal_only_output(capsys):
+    from mail_to_calendar.models import EmailMessage
+
+    message = EmailMessage(
+        provider="gmail", message_id="gmail:debug", sender="sender@example.com",
+        recipients=[], subject="Safe subject",
+        received_at="2026-08-10T00:00:00+09:00",
+        body_text="PRIVATE CANONICAL BODY 8月10日",
+        metadata={"gmail_mime": {"selected_part_type": "text/html"}},
+    )
+    _print_gmail_debug_body(message)
+    output = capsys.readouterr().out
+    assert "DEBUG ONLY" in output
+    assert "Selected MIME part type: text/html" in output
+    assert f"Canonical body length: {len(message.body_text)}" in output
+    assert message.body_text in output
+    assert "OAuth" not in output
+    assert "raw response" not in output
 
 
 def test_gmail_read_only_client_lists_metadata_without_body():
@@ -336,6 +360,93 @@ def _encoded(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
 
+def _encoded_charset(value: str, charset: str) -> str:
+    return base64.urlsafe_b64encode(value.encode(charset)).decode().rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "declared,codec,expected_charset,mime_type",
+    [
+        ("utf-8", "utf-8", "utf-8", "text/plain"),
+        ("iso-2022-jp", "iso-2022-jp", "iso2022_jp", "text/plain"),
+        ("shift_jis", "shift_jis", "shift_jis", "text/plain"),
+        ("cp932", "cp932", "cp932", "text/plain"),
+        ("euc-jp", "euc-jp", "euc_jp", "text/html"),
+    ],
+)
+def test_gmail_mime_charset_decodes_japanese_without_replacement(
+    declared, codec, expected_charset, mime_type
+):
+    body = "8月10日 17:00から18:00まで、02会議室で打ち合わせです。"
+    encoded_body = f"<p>{body}</p>" if mime_type == "text/html" else body
+    message = GmailReadOnlyClient._message({
+        "id": "charset-test",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": mime_type,
+            "headers": [{
+                "name": "Content-Type",
+                "value": f"{mime_type}; charset={declared}",
+            }],
+            "body": {"data": _encoded_charset(encoded_body, codec)},
+        },
+    }, expected_id="charset-test")
+    assert message.body_text == body
+    assert "�" not in message.body_text
+    assert GmailReadOnlyClient._contains_date(message.body_text)
+    mime = message.metadata["gmail_mime"]
+    assert mime["selected_charset"] == expected_charset
+    assert mime["charset_source"] == "MIME"
+    assert mime["decode_errors"] is False
+
+
+def test_gmail_missing_charset_uses_strict_limited_fallback():
+    body = "8月10日 17:00から18:00"
+    message = GmailReadOnlyClient._message({
+        "id": "fallback-charset",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [{"name": "Content-Type", "value": "text/plain"}],
+            "body": {"data": _encoded_charset(body, "iso-2022-jp")},
+        },
+    }, expected_id="fallback-charset")
+    assert message.body_text == body
+    assert message.metadata["gmail_mime"]["selected_charset"] == "iso2022_jp"
+    assert message.metadata["gmail_mime"]["charset_source"] == "fallback"
+    assert message.metadata["gmail_mime"]["decode_errors"] is False
+
+
+def test_gmail_declared_charset_error_tries_fallback_before_replacement():
+    body = "8月10日 17:00から18:00"
+    message = GmailReadOnlyClient._message({
+        "id": "wrong-declared-charset",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [{
+                "name": "Content-Type", "value": "text/plain; charset=utf-8"
+            }],
+            "body": {"data": _encoded_charset(body, "cp932")},
+        },
+    }, expected_id="wrong-declared-charset")
+    assert message.body_text == body
+    assert "�" not in message.body_text
+    assert message.metadata["gmail_mime"]["selected_charset"] == "cp932"
+    assert message.metadata["gmail_mime"]["charset_source"] == "fallback"
+    assert message.metadata["gmail_mime"]["decode_errors"] is True
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["8月10日", "8月 10日", "8月　10日", "８月１０日", "8 月 10 日"],
+)
+def test_gmail_date_detection_normalizes_unicode_and_date_whitespace(expression):
+    assert GmailReadOnlyClient._contains_date(
+        f"予定は{expression} 17:00からです"
+    )
+
+
 def test_gmail_get_message_prefers_plain_and_skips_mixed_attachments():
     calls = []
     value = {
@@ -401,6 +512,20 @@ def test_gmail_get_message_prefers_plain_and_skips_mixed_attachments():
     assert message.recipients == ["one@example.com", "two@example.com"]
     assert message.has_attachments
     assert message.importance_hint == "important"
+    mime = message.metadata["gmail_mime"]
+    assert mime["mime_type"] == "multipart/mixed"
+    assert mime["plain_text_parts"] == 1
+    assert mime["html_parts"] == 1
+    assert mime["plain_parts_with_data"] == 1
+    assert mime["html_parts_with_data"] == 1
+    assert mime["attachment_id_only_parts"] == 0
+    assert mime["selected_part_type"] == "text/plain"
+    assert mime["selected_body_length"] == len(message.body_text)
+    assert mime["plain_contains_date"] is True
+    assert mime["html_contains_date"] is False
+    assert mime["plain_contains_time"] is True
+    assert mime["html_contains_time"] is False
+    assert mime["selection_reason"] == "plain_preferred_valid_alternative"
 
 
 def test_gmail_get_message_html_fallback_removes_markup_and_hidden_text():
@@ -435,6 +560,206 @@ def test_gmail_get_message_html_fallback_removes_markup_and_hidden_text():
     assert "PRIVATE STYLE" not in message.body_text
     assert "PRIVATE SCRIPT" not in message.body_text
     assert "<p>" not in message.body_text
+
+
+def test_alternative_falls_back_to_html_when_plain_is_effectively_empty():
+    value = {
+        "id": "empty-plain",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": "multipart/alternative",
+            "headers": [],
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "body": {"data": _encoded(" \n\t　")},
+                },
+                {
+                    "mimeType": "text/html",
+                    "body": {"data": _encoded("<p>Visible mail body</p>")},
+                },
+            ],
+        },
+    }
+
+    class Service:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **_kwargs):
+            return SimpleNamespace(execute=lambda: value)
+
+    message = GmailReadOnlyClient(Service()).get_message("empty-plain")
+    assert message.body_text == "Visible mail body"
+    assert message.metadata["gmail_mime"]["selected_part_type"] == "text/html"
+    assert message.metadata["gmail_mime"]["selection_reason"] == (
+        "html_fallback_plain_empty"
+    )
+
+
+def test_outlook_to_gmail_nested_alternative_selects_substantive_html():
+    actual_body = (
+        "8月10日 17:00から18:00まで、02会議室で"
+        "LLMの打ち合わせに参加します。"
+    )
+    value = {
+        "id": "outlook-mail",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": "multipart/mixed",
+            "headers": [{"name": "Subject", "value": "LLM meeting"}],
+            "parts": [
+                {
+                    "mimeType": "multipart/related",
+                    "parts": [{
+                        "mimeType": "multipart/alternative",
+                        "parts": [
+                            {
+                                "mimeType": "text/plain",
+                                "body": {"data": _encoded("このメールは自動送信です")},
+                            },
+                            {
+                                "mimeType": "text/html",
+                                "body": {"data": _encoded(
+                                    f"<html><body><p>{actual_body}</p></body></html>"
+                                )},
+                            },
+                        ],
+                    }],
+                },
+                {
+                    "mimeType": "application/octet-stream",
+                    "body": {"attachmentId": "do-not-fetch"},
+                },
+            ],
+        },
+    }
+
+    class Service:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **_kwargs):
+            return SimpleNamespace(execute=lambda: value)
+
+    message = GmailReadOnlyClient(Service()).get_message("outlook-mail")
+    assert message.body_text == actual_body
+    assert "自動送信" not in message.body_text
+    assert "do-not-fetch" not in message.body_text
+    assert message.has_attachments
+    mime = message.metadata["gmail_mime"]
+    assert mime["mime_type"] == "multipart/mixed"
+    assert mime["plain_text_parts"] == 1
+    assert mime["html_parts"] == 1
+    assert mime["plain_parts_with_data"] == 1
+    assert mime["html_parts_with_data"] == 1
+    assert mime["attachment_id_only_parts"] == 1
+    assert mime["selected_part_type"] == "text/html"
+    assert mime["selected_body_length"] == len(actual_body)
+    assert mime["plain_contains_date"] is False
+    assert mime["html_contains_date"] is True
+    assert mime["plain_contains_time"] is False
+    assert mime["html_contains_time"] is True
+    assert mime["selection_reason"] == "html_fallback_plain_footer_only"
+
+
+def test_alternative_keeps_valid_plain_when_html_has_calendar_only_details():
+    plain = (
+        "会議に関するご案内です。17:00から18:00まで実施します。"
+        "詳細をご確認のうえ参加してください。補足情報があります。"
+    )
+    html_text = (
+        "8月10日 17:00から18:00まで、02会議室で"
+        "LLMの打ち合わせに参加します。"
+    )
+    value = {
+        "id": "missing-date-in-plain",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": "multipart/alternative",
+            "headers": [{"name": "Subject", "value": "LLM meeting"}],
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "body": {"data": _encoded(plain)},
+                },
+                {
+                    "mimeType": "text/html",
+                    "body": {"data": _encoded(f"<p>{html_text}</p>")},
+                },
+            ],
+        },
+    }
+
+    class Service:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **_kwargs):
+            return SimpleNamespace(execute=lambda: value)
+
+    message = GmailReadOnlyClient(Service()).get_message(
+        "missing-date-in-plain"
+    )
+    assert message.body_text == plain
+    mime = message.metadata["gmail_mime"]
+    assert mime["plain_visible_length"] == len(plain)
+    assert mime["html_visible_length"] == len(html_text)
+    assert mime["plain_contains_date"] is False
+    assert mime["html_contains_date"] is True
+    assert mime["plain_contains_time"] is True
+    assert mime["html_contains_time"] is True
+    assert mime["selected_part_type"] == "text/plain"
+    assert mime["selection_reason"] == "plain_preferred_valid_alternative"
+
+
+def test_alternative_keeps_plain_when_html_increment_is_footer_and_link_only():
+    plain = "8月10日17:00から会議に参加します。"
+    value = {
+        "id": "footer-only-html-growth",
+        "internalDate": "1786248000000",
+        "payload": {
+            "mimeType": "multipart/alternative",
+            "headers": [],
+            "parts": [
+                {"mimeType": "text/plain", "body": {"data": _encoded(plain)}},
+                {
+                    "mimeType": "text/html",
+                    "body": {"data": _encoded(
+                        f"<p>{plain}</p><p>配信停止 https://example.test/unsubscribe</p>"
+                    )},
+                },
+            ],
+        },
+    }
+
+    class Service:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **_kwargs):
+            return SimpleNamespace(execute=lambda: value)
+
+    message = GmailReadOnlyClient(Service()).get_message(
+        "footer-only-html-growth"
+    )
+    assert message.body_text == plain
+    assert message.metadata["gmail_mime"]["selected_part_type"] == "text/plain"
+    assert message.metadata["gmail_mime"]["selection_reason"] == (
+        "plain_preferred_valid_alternative"
+    )
 
 
 def test_gmail_get_message_rejects_prefixed_id_without_api_call():
@@ -474,6 +799,36 @@ def test_gmail_analyze_cli_is_analysis_only_and_does_not_print_body_or_raw(
     class Analyzer:
         def __init__(self, _classifier, **kwargs):
             captured.update(kwargs)
+        def date_grounding_debug(self, *_args):
+            return {
+                    "received_at": "2026-08-09T15:14:13+00:00",
+                    "timezone": "Asia/Tokyo",
+                    "local_received_at": "2026-08-10T00:14:13+09:00",
+                    "proposed_date": "2026-08-10",
+                    "expressions": [{
+                        "expression": "明日", "resolved_date": "2026-08-11"
+                    }],
+                    "grounded": False,
+                    "reason": "relative_date_mismatch",
+                    "date_like_tokens": ["明日の", "月曜日"],
+                    "llm_body_length": 184,
+                    "validator_body_length": 184,
+                    "llm_body_hash": "a" * 64,
+                    "validator_body_hash": "a" * 64,
+                    "same_body": True,
+                    "groundable_fields": [
+                        "subject", "body_text", "received_at"
+                    ],
+                    "subject_has_date_like_expression": True,
+                    "subject_expressions": [{
+                        "expression": "8月10日",
+                        "resolved_date": "2026-08-10",
+                    }],
+                    "contains_explicit_japanese_date": True,
+                    "contains_time_expression": True,
+                    "nfkc_date_detection": True,
+                    "whitespace_normalized_date_detection": True,
+                }
 
         def analyze(self, message, _importance, _candidate):
             captured["message"] = message
@@ -488,6 +843,7 @@ def test_gmail_analyze_cli_is_analysis_only_and_does_not_print_body_or_raw(
                 confidence=0.95,
                 validation_issues=[],
                 raw_response=raw_response,
+                llm_result_summary={"date": "2026-08-10"},
             )
 
     monkeypatch.setattr("mail_calendar_orchestrator.cli.GmailReadOnlyAuth", Auth)
@@ -495,7 +851,7 @@ def test_gmail_analyze_cli_is_analysis_only_and_does_not_print_body_or_raw(
     monkeypatch.setattr("mail_calendar_orchestrator.cli.HybridMailAnalyzer", Analyzer)
     monkeypatch.setattr("sys.argv", [
         "mail-calendar-orchestrator", "gmail", "analyze", "abc123",
-        "--base-year", "2026",
+        "--base-year", "2026", "--debug-grounding",
     ])
     main()
     output = capsys.readouterr().out
@@ -508,6 +864,48 @@ def test_gmail_analyze_cli_is_analysis_only_and_does_not_print_body_or_raw(
     assert "Safe title" in output
     assert private_body not in output
     assert raw_response not in output
+    assert "Local received at: 2026-08-10T00:14:13+09:00" in output
+    assert "Detected date expression: 明日" in output
+    assert "Resolved date: 2026-08-11" in output
+    assert "Grounded: no" in output
+    assert "Reason: relative_date_mismatch" in output
+    assert "Date-like tokens:" in output
+    assert '- "明日の"' in output
+    assert '- "月曜日"' in output
+    assert "LLM body length: 184" in output
+    assert "Validator body length: 184" in output
+    assert f"LLM body hash: {'a' * 64}" in output
+    assert f"Validator body hash: {'a' * 64}" in output
+    assert "Same body: yes" in output
+    assert "Groundable fields used by LLM:" in output
+    assert "- subject" in output
+    assert "- body_text" in output
+    assert "- received_at" in output
+    assert "Subject has date-like expression: yes" in output
+    assert "Subject date expression: 8月10日" in output
+    assert "Subject resolved date: 2026-08-10" in output
+    assert "MIME type: unknown" in output
+    assert "Plain text parts: 0" in output
+    assert "HTML parts: 0" in output
+    assert "Selected part type: none" in output
+    assert "Selected body length: 0" in output
+    assert "Selected charset: none" in output
+    assert "Charset source: unavailable" in output
+    assert "Decode errors: no" in output
+    assert "Plain contains date: no" in output
+    assert "HTML contains date: no" in output
+    assert "Plain contains time: no" in output
+    assert "HTML contains time: no" in output
+    assert "Plain visible length: 0" in output
+    assert "HTML visible length: 0" in output
+    assert "Selection reason: unavailable" in output
+    assert "Contains explicit Japanese date: yes" in output
+    assert "Contains time expression: yes" in output
+    assert 'Plain:' in output
+    assert '- Contains "8月": no' in output
+    assert 'HTML text:' in output
+    assert "Canonical NFKC date detection: yes" in output
+    assert "Canonical whitespace-normalized date detection: yes" in output
 
 
 def test_gmail_scheduled_provider_filters_inbox_after_cursor_and_normalizes():

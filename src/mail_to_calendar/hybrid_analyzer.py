@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
+from dataclasses import replace
 from typing import Literal
 
 from .llm_classifier import LLMCalendarClassifier
@@ -11,6 +13,10 @@ from .models import (
 )
 from .ollama_client import OllamaError
 from .validator import LLMResultValidator
+from .text_normalization import (
+    contains_japanese_explicit_date, date_detection_text, nfkc_text,
+    without_transport_headers,
+)
 
 
 AnalysisMode = Literal["rule-only", "hybrid", "llm-first", "llm-all"]
@@ -64,11 +70,15 @@ class HybridMailAnalyzer:
         if self.classifier is None:
             return self._fallback(summary, rule_importance, rule_candidate, "Ollama is not configured", 0)
         started = time.monotonic()
+        clean_body = without_transport_headers(message.body_text)
+        canonical_body = self.classifier.canonical_body(clean_body)
+        source_body_truncated = len(canonical_body) < len(clean_body)
+        analysis_message = replace(message, body_text=canonical_body)
         value = LLMAnalysisInput(
             sender=message.sender,
             subject=message.subject,
             received_at=message.received_at,
-            body_text=message.body_text,
+            body_text=analysis_message.body_text,
             timezone=self.timezone,
             base_year=self.base_year,
             rule_result=summary,
@@ -83,14 +93,15 @@ class HybridMailAnalyzer:
         )
         try:
             llm = self.classifier.analyze(value)
-            checked = self.validator.validate(llm, message)
+            self.classifier.last_input_truncated = source_body_truncated
+            checked = self.validator.validate(llm, analysis_message)
         except (OllamaError, ValueError) as exc:
             latency = int((time.monotonic() - started) * 1000)
             if self.require_llm or self.mode == "llm-all":
                 raise RuntimeError(f"required LLM analysis failed: {exc}") from exc
             return self._fallback(summary, rule_importance, rule_candidate, str(exc), latency)
         latency = int((time.monotonic() - started) * 1000)
-        truncated = self.classifier.last_input_truncated
+        truncated = source_body_truncated
         conflict = self._conflicts(
             rule_importance,
             rule_candidate,
@@ -146,6 +157,49 @@ class HybridMailAnalyzer:
             checked.time_normalization,
             llm.summary(),
         )
+
+    def date_grounding_debug(
+        self, proposed_date: str | None, message: EmailMessage
+    ) -> dict[str, object]:
+        if self.classifier is None:
+            raise ValueError("LLM classifier is not configured")
+        llm_body = self.classifier.canonical_body(
+            without_transport_headers(message.body_text)
+        )
+        grounding_body = llm_body
+        grounding_message = replace(message, body_text=grounding_body)
+        debug = self.validator.date_grounding_debug(
+            proposed_date, grounding_message, self.timezone
+        )
+        llm_hash = hashlib.sha256(llm_body.encode("utf-8")).hexdigest()
+        validator_hash = hashlib.sha256(
+            grounding_body.encode("utf-8")
+        ).hexdigest()
+        return {
+            **debug,
+            "llm_body_length": len(llm_body),
+            "validator_body_length": len(grounding_body),
+            "llm_body_hash": llm_hash,
+            "validator_body_hash": validator_hash,
+            "same_body": llm_body == grounding_body,
+            "contains_explicit_japanese_date": bool(
+                contains_japanese_explicit_date(grounding_body)
+            ),
+            "contains_time_expression": bool(
+                re.search(
+                    r"(?:午前|午後)?\s*\d{1,2}(?::\d{2}|時(?:\d{1,2}分)?)",
+                    grounding_body,
+                )
+            ),
+            "nfkc_date_detection": contains_japanese_explicit_date(
+                nfkc_text(grounding_body)
+            ),
+            "whitespace_normalized_date_detection": (
+                contains_japanese_explicit_date(
+                    date_detection_text(grounding_body)
+                )
+            ),
+        }
 
     def _should_use_llm(self, importance: ImportanceResult, candidate: CalendarCandidate | None) -> bool:
         if self.mode == "rule-only":

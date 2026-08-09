@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .classifier import RuleBasedImportanceClassifier
@@ -13,6 +13,7 @@ from .llm_classifier import SCHEMA_VERSION
 from .llm_models import HybridAnalysisResult
 from .models import CalendarCandidate, EmailMessage, ImportanceResult
 from .provider import MailProvider
+from .text_normalization import without_transport_headers
 
 
 @dataclass(frozen=True)
@@ -61,11 +62,17 @@ class MailToCalendarService:
         analyses: list[HybridAnalysisResult] = []
         classification_counts: dict[str, int] = {}
         for message in messages:
-            importance = self.classifier.classify(message)
-            candidate = self.extractor.extract(message, importance)
+            analysis_message = replace(
+                message,
+                body_text=without_transport_headers(message.body_text),
+            )
+            importance = self.classifier.classify(analysis_message)
+            candidate = self.extractor.extract(analysis_message, importance)
             analysis = None
             if self.analyzer is not None:
-                analysis = self.analyzer.analyze(message, importance, candidate)
+                analysis = self.analyzer.analyze(
+                    analysis_message, importance, candidate
+                )
                 analyses.append(analysis)
                 importance = analysis.final_importance
                 candidate = analysis.final_candidate

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import pytest
 import requests
@@ -12,6 +13,8 @@ from agentledger.normalizer import normalize_events
 from mail_calendar_orchestrator.service import MailCalendarOrchestrator
 from mail_calendar_orchestrator.cli import _parser, main
 from mail_to_calendar.hybrid_analyzer import HybridMailAnalyzer
+from mail_to_calendar.classifier import RuleBasedImportanceClassifier
+from mail_to_calendar.extractor import RuleBasedCalendarExtractor
 from mail_to_calendar.llm_classifier import LLMCalendarClassifier, SYSTEM_PROMPT
 from mail_to_calendar.llm_models import (
     LLMAnalysisInput,
@@ -29,6 +32,7 @@ from mail_to_calendar.ollama_client import (
 from mail_to_calendar.service import MailToCalendarService
 from mail_to_calendar.validator import LLMResultValidator
 from mail_to_calendar.local_provider import LocalMailProvider
+from mail_to_calendar.text_normalization import without_transport_headers
 
 
 def _raw(**updates):
@@ -251,6 +255,7 @@ def test_prompt_separates_system_instructions_and_untrusted_body():
 
 
 def test_prompt_defines_personal_calendar_candidate_not_event_registration():
+    normalized_prompt = " ".join(SYSTEM_PROMPT.split())
     assert "user should add a candidate" in SYSTEM_PROMPT
     assert "own personal calendar" in SYSTEM_PROMPT
     assert "does not mean deciding whether to register" in SYSTEM_PROMPT
@@ -260,6 +265,53 @@ def test_prompt_defines_personal_calendar_candidate_not_event_registration():
     assert "grounded personal commitment" in SYSTEM_PROMPT
     assert "服部さんは8月10日15時から16時の会議に参加予定です" in SYSTEM_PROMPT
     assert "興味のある方はお申し込みください" in SYSTEM_PROMPT
+    assert "Never infer an event date solely from received_at" in normalized_prompt
+    assert "Otherwise return date=null" in normalized_prompt
+    assert "A time without a date expression must remain date=null" in normalized_prompt
+    assert "received_at is only a reference" in normalized_prompt
+    assert "Subject 「会議」 and Body 「15時から会議です」" in normalized_prompt
+    assert "Subject 「明日の会議」" in normalized_prompt
+    assert "Subject 「8月10日の会議」" in normalized_prompt
+    assert "Do not provide chain-of-thought" in normalized_prompt
+    assert "Return only JSON matching the supplied schema" in normalized_prompt
+
+
+@pytest.mark.parametrize(
+    "subject,body,raw_date,expected_date",
+    [
+        ("会議", "15時から会議です", None, None),
+        ("明日の会議", "15時から", "2026-08-02", "2026-08-02"),
+        ("8月10日の会議", "15時から", "2026-08-10", "2026-08-10"),
+    ],
+)
+def test_date_prompt_examples_remain_structured(subject, body, raw_date, expected_date):
+    raw = _raw(date=raw_date)
+    if raw_date is None:
+        raw.update(
+            final_classification="clarification_required",
+            should_create_calendar_candidate=False,
+            clarification_required=True,
+        )
+    client = FakeOllamaClient(raw)
+    result = LLMCalendarClassifier(client).analyze(LLMAnalysisInput(
+        sender="sender@example.com",
+        subject=subject,
+        received_at="2026-08-01T09:00:00+09:00",
+        body_text=body,
+        timezone="Asia/Tokyo",
+        base_year=2026,
+        rule_result={},
+        rule_datetime_candidates={},
+        importance_hint=None,
+        categories=[],
+        has_attachments=False,
+    ))
+    assert result.date == expected_date
+    messages = client.calls[0][0]
+    assert messages[0]["content"] == SYSTEM_PROMPT
+    assert f"<email_subject>{subject}</email_subject>" in messages[1]["content"]
+    assert f"<email_body_untrusted>{body}</email_body_untrusted>" in messages[1]["content"]
+    assert "Received (relative-date reference only)" in messages[1]["content"]
 
 
 def test_grounded_personal_commitment_corrects_informational_llm_output():
@@ -364,6 +416,117 @@ def test_body_is_truncated_before_llm_call():
     classifier.analyze(value)
     assert classifier.last_input_truncated
     assert "x" * 11 not in client.calls[0][0][1]["content"]
+    assert classifier.last_input_body_length == 10
+    assert len(classifier.last_input_body_hash) == 64
+
+
+def test_analyzer_uses_same_canonical_body_for_llm_and_validator(monkeypatch):
+    client = FakeOllamaClient(_raw(
+        date="2026-08-01", evidence=["8月1日", "15時", "60分"]
+    ))
+    classifier = LLMCalendarClassifier(client, max_body_chars=24)
+    analyzer = HybridMailAnalyzer(
+        classifier, base_year=2026, timezone="Asia/Tokyo", mode="llm-first"
+    )
+    message = _message(
+        body="8月1日15時から60分のProject meetingです。"
+        "TRUNCATED PRIVATE TAIL"
+    )
+    captured = {}
+    original_validate = analyzer.validator.validate
+
+    def validate(result, grounding_message):
+        captured["body"] = grounding_message.body_text
+        return original_validate(result, grounding_message)
+
+    monkeypatch.setattr(analyzer.validator, "validate", validate)
+    importance = RuleBasedImportanceClassifier().classify(message)
+    candidate = RuleBasedCalendarExtractor(
+        base_year=2026, timezone="Asia/Tokyo"
+    ).extract(message, importance)
+    analyzer.analyze(message, importance, candidate)
+    expected = message.body_text[:24]
+    assert captured["body"] == expected
+    assert classifier.last_input_body_length == len(expected)
+    assert classifier.last_input_truncated
+    assert classifier.last_input_body_hash == hashlib.sha256(
+        expected.encode("utf-8")
+    ).hexdigest()
+    debug = analyzer.date_grounding_debug("2026-08-01", message)
+    assert debug["llm_body_length"] == debug["validator_body_length"]
+    assert debug["llm_body_hash"] == debug["validator_body_hash"]
+    assert debug["same_body"] is True
+    assert debug["contains_explicit_japanese_date"] is True
+    assert debug["contains_time_expression"] is True
+    assert "TRUNCATED PRIVATE TAIL" not in str(debug)
+
+
+def test_forward_transport_headers_are_excluded_from_llm_and_grounding(monkeypatch):
+    body = (
+        "送信日時: 2026年8月10日 0:14\n"
+        "件名: 打ち合わせ予定\n\n"
+        "8月10日 17:00から18:00まで、\n"
+        "02会議室でLLMの打ち合わせに参加します。"
+    )
+    client = FakeOllamaClient(_raw(
+        title="LLMの打ち合わせ",
+        date="2026-08-10",
+        start="17:00",
+        end="18:00",
+        duration_minutes=60,
+        location="02会議室",
+        user_commitment_evidence=["参加します"],
+        evidence=["8月10日", "17:00", "18:00", "02会議室"],
+    ))
+    classifier = LLMCalendarClassifier(client)
+    analyzer = HybridMailAnalyzer(
+        classifier, base_year=2026, timezone="Asia/Tokyo", mode="llm-first"
+    )
+    message = _message(subject="Fwd: 打ち合わせ予定", body=body)
+    clean_message = EmailMessage(
+        **{**message.__dict__, "body_text": without_transport_headers(body)}
+    )
+    importance = RuleBasedImportanceClassifier().classify(clean_message)
+    candidate = RuleBasedCalendarExtractor(
+        base_year=2026, timezone="Asia/Tokyo"
+    ).extract(clean_message, importance)
+    captured = {}
+    original_validate = analyzer.validator.validate
+
+    def validate(result, grounding_message):
+        captured["body"] = grounding_message.body_text
+        return original_validate(result, grounding_message)
+
+    monkeypatch.setattr(analyzer.validator, "validate", validate)
+    result = analyzer.analyze(message, importance, candidate)
+    prompt = client.calls[0][0][1]["content"]
+    assert "送信日時: 2026年8月10日 0:14" not in prompt
+    assert "件名: 打ち合わせ予定" not in prompt
+    assert "00:14" not in captured["body"]
+    assert "8月10日 17:00から18:00まで" in captured["body"]
+    assert result.final_classification == "calendar_candidate"
+    assert result.final_candidate is not None
+    assert result.final_candidate.date == "2026-08-10"
+    assert result.final_candidate.start == "17:00"
+    assert result.final_candidate.end == "18:00"
+    assert result.final_candidate.location == "02会議室"
+
+
+def test_forward_transport_header_cleanup_handles_english_separator_blocks():
+    body = (
+        "________________________________\n"
+        "From: sender@example.com\n"
+        "Sent: Monday, August 10, 2026 12:14 AM\n"
+        "To: recipient@example.com\n"
+        "Subject: Meeting\n\n"
+        "8月10日17:00から会議です。"
+    )
+    assert without_transport_headers(body) == "\n8月10日17:00から会議です。"
+
+
+def test_lone_header_like_body_line_is_not_removed():
+    body = "件名: 次回会議について\n本文の説明です。"
+    assert without_transport_headers(body) == body
 
 
 def test_validator_accepts_grounded_normalization_and_rejects_hallucination():
@@ -777,6 +940,122 @@ def test_relative_date_mismatch_is_rejected():
     assert "relative_date_mismatch" in checked.issues
 
 
+def test_date_grounding_debug_reports_bounded_relative_resolution():
+    original = _message(body="明日15時からProject meetingに参加予定です。PRIVATE BODY")
+    message = EmailMessage(**{
+        **original.__dict__, "received_at": "2026-08-09T15:14:13+00:00"
+    })
+    debug = LLMResultValidator(base_year=2026).date_grounding_debug(
+        "2026-08-10", message, "Asia/Tokyo"
+    )
+    assert debug == {
+        "received_at": "2026-08-09T15:14:13+00:00",
+        "timezone": "Asia/Tokyo",
+        "local_received_at": "2026-08-10T00:14:13+09:00",
+        "proposed_date": "2026-08-10",
+        "expressions": [
+            {"expression": "明日", "resolved_date": "2026-08-11"}
+        ],
+        "grounded": False,
+        "reason": "relative_date_mismatch",
+        "date_like_tokens": ["明日"],
+        "groundable_fields": ["subject", "body_text", "received_at"],
+        "subject_has_date_like_expression": False,
+        "subject_expressions": [],
+    }
+    assert "PRIVATE BODY" not in str(debug)
+
+
+def test_debug_date_like_tokens_exclude_html_script_and_signature():
+    tokens = LLMResultValidator._date_like_tokens(
+        "<p>明日の予定</p><div>月曜日、10日15時です</div>"
+        "<script>8月99日 PRIVATE SCRIPT</script>\n"
+        "-- \n署名の予定は8月20日"
+    )
+    assert tokens == ["明日の", "月曜日", "10日15時"]
+    serialized = str(tokens)
+    assert "PRIVATE SCRIPT" not in serialized
+    assert "8月99日" not in serialized
+    assert "8月20日" not in serialized
+
+
+def test_subject_is_part_of_canonical_grounding_text():
+    message = _message(
+        subject="8月10日 Project meeting",
+        body="15時から60分の会議に参加予定です。",
+    )
+    result = LLMAnalysisResult.from_dict(_raw(
+        date="2026-08-10", evidence=["8月10日", "15時", "60分"]
+    ))
+    validator = LLMResultValidator(base_year=2026)
+    checked = validator.validate(result, message)
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.candidate_allowed
+    debug = validator.date_grounding_debug(
+        "2026-08-10", message, "Asia/Tokyo"
+    )
+    assert debug["subject_has_date_like_expression"] is True
+    assert debug["subject_expressions"] == [{
+        "expression": "8月10日", "resolved_date": "2026-08-10"
+    }]
+
+
+def test_relative_subject_uses_received_at_only_as_reference_time():
+    message = _message(
+        subject="明日のProject meeting",
+        body="15時から60分の会議に参加予定です。",
+    )
+    validator = LLMResultValidator(base_year=2026)
+    checked = validator.validate(
+        LLMAnalysisResult.from_dict(_raw(
+            date="2026-08-02", evidence=["明日", "15時", "60分"]
+        )),
+        message,
+    )
+    assert checked.candidate_allowed
+    debug = validator.date_grounding_debug(
+        "2026-08-02", message, "Asia/Tokyo"
+    )
+    assert debug["subject_expressions"] == [{
+        "expression": "明日の", "resolved_date": "2026-08-02"
+    }]
+
+
+def test_received_at_alone_never_grounds_llm_date():
+    message = _message(
+        subject="Project meeting",
+        body="15時から60分の会議に参加予定です。",
+    )
+    validator = LLMResultValidator(base_year=2026)
+    checked = validator.validate(
+        LLMAnalysisResult.from_dict(_raw(
+            date="2026-08-01", evidence=["15時", "60分"]
+        )),
+        message,
+    )
+    assert not checked.candidate_allowed
+    assert "date_not_grounded" in checked.issues
+    debug = validator.date_grounding_debug(
+        "2026-08-01", message, "Asia/Tokyo"
+    )
+    assert debug["subject_has_date_like_expression"] is False
+    assert debug["expressions"] == []
+    assert debug["grounded"] is False
+    assert debug["reason"] == "date_expression_not_found"
+
+
+def test_subject_date_like_but_unresolved_token_is_visible_without_subject():
+    message = _message(subject="月曜日のProject meeting", body="予定のご案内")
+    debug = LLMResultValidator(base_year=2026).date_grounding_debug(
+        "2026-08-03", message, "Asia/Tokyo"
+    )
+    assert debug["subject_has_date_like_expression"] is True
+    assert debug["subject_expressions"] == [
+        {"expression": "月曜日", "resolved_date": None}
+    ]
+    assert "月曜日のProject meeting" not in str(debug)
+
+
 @pytest.mark.parametrize("expression", ["8/10", "8月10日"])
 def test_explicit_month_day_date_grounding_remains_supported(expression):
     checked = LLMResultValidator(base_year=2026).validate(
@@ -789,6 +1068,24 @@ def test_explicit_month_day_date_grounding_remains_supported(expression):
     )
     assert checked.final_classification == "calendar_candidate"
     assert checked.candidate_allowed
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ["8月10日", "8月 10日", "8月　10日", "８月１０日", "8 月 10 日"],
+)
+def test_validator_grounds_nfkc_and_whitespace_japanese_dates(expression):
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            date="2026-08-10", evidence=[expression, "15時", "60分"]
+        )),
+        _message(
+            body=f"{expression} 15時から60分のProject meetingに参加予定です。"
+        ),
+    )
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.candidate_allowed
+    assert "date_not_grounded" not in checked.issues
 
 
 def _analyzer(client, *, mode="hybrid", threshold=0.75, require=False):

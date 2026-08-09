@@ -747,6 +747,8 @@ uv run mail-calendar-orchestrator gmail auth
 uv run mail-calendar-orchestrator gmail status
 uv run mail-calendar-orchestrator gmail list --limit 5
 uv run mail-calendar-orchestrator gmail analyze 19fe4ddfaee15750
+uv run mail-calendar-orchestrator gmail analyze 19fe4ddfaee15750 --debug-grounding
+uv run mail-calendar-orchestrator gmail analyze 19fe4ddfaee15750 --debug-body
 ```
 
 The access check calls `users.messages.list` with `userId=me` and
@@ -772,6 +774,75 @@ candidate fields, confidence, and validation issue names. It does not create an
 Approval, send LINE messages, write Calendar events, update scheduled-run state,
 or write AgentLedger JSONL. Full mail content, attachments, raw model output,
 OAuth tokens, and client secrets are not printed or saved by this command.
+Add `--debug-grounding` to print only the raw/local received timestamp,
+timezone, LLM-proposed date, matched date-expression tokens, deterministic
+resolutions, grounded result, and a bounded failure-reason code. The diagnostic
+never prints the full body, surrounding evidence text, OAuth data, prompt, or
+raw model response. It also prints up to 20 short date-like tokens (maximum 32
+characters each), such as `明日の`, `月曜日`, or `10日15時`, to diagnose a
+resolver miss. HTML/script/style content, common reply headers, and signature
+content after a delimiter are excluded. These wider diagnostic tokens never
+participate in candidate grounding or execution decisions.
+The same diagnostic also prints the character length and SHA-256 hash of the
+actual Qwen body and Validator grounding body plus `Same body: yes/no`. Both
+paths use the same bounded canonical body derived once from normalized
+`EmailMessage.body_text`; hashes are diagnostic metadata only and the body or
+body fragments are not printed with them.
+Subject and normalized body are the canonical semantic-grounding text. Debug
+output reports whether the Subject contains a date-like token, the bounded token
+itself, and its deterministic resolution without printing the full Subject. It
+also lists only the grounding field names: `subject`, `body_text`, and
+`received_at`. The received timestamp is a reference clock for expressions such
+as `今日` and `明日`; it is never by itself evidence for a proposed calendar
+date. If neither Subject nor body contains a supported date expression, an ISO
+date generated from received time remains ungrounded.
+For Gmail, debug output also reports the top-level MIME type, non-attachment
+plain/HTML candidate counts, selected MIME type, selected canonical-body length,
+and boolean presence of Japanese explicit-date/time character classes. Nested
+`multipart/mixed`, `multipart/related`, and `multipart/alternative` structures
+are traversed without loading attachment bodies. A substantive plain alternative
+remains preferred even when HTML contains additional calendar-related facts.
+Only when the plain alternative is empty, effectively whitespace-only, or an
+automatic-footer-only representation is the safely text-converted HTML
+alternative selected. This
+selection changes only which MIME alternative is canonical—it does not infer or
+rewrite mail facts.
+Each textual MIME part is base64url-decoded to bytes and then decoded using its
+declared `Content-Type` charset. Python codec aliases are normalized, including
+UTF-8, ISO-2022-JP, Shift_JIS, CP932, and EUC-JP. If the charset is absent or
+invalid, a bounded set of those codecs is tried strictly before a final
+replacement fallback. `--debug-grounding` reports the selected charset, whether
+it came from MIME or fallback detection, and whether a decode error occurred;
+it does not print the body.
+Before calendar semantics are evaluated, deterministic analysis-only cleanup
+removes forwarded/replied transport-header blocks such as `差出人`, `送信日時`,
+`宛先`, `件名`, `From`, `Sent`, `To`, `Cc`, and `Subject`. A block requires
+multiple adjacent transport fields or a recognized forward separator, so a lone
+header-like sentence is preserved. The forwarded message body remains intact,
+the canonical MIME body is not mutated, and the LLM, rule extraction, and
+Validator all receive the same cleaned analysis text.
+MIME representation selection never uses dates, times, locations, meeting/event
+context, or calendar-oriented token scoring. Those booleans and visible lengths
+remain debug observations only. A bounded structural selection reason such as
+`plain_preferred_valid_alternative`, `html_fallback_plain_empty`, or
+`html_fallback_plain_footer_only` is printed; neither alternative body is shown
+unless the explicit `--debug-body` escape hatch is used.
+Japanese date detection uses a shared diagnostic projection with Unicode NFKC,
+full-width digit conversion, newline-as-whitespace handling, and optional
+normal/full-width whitespace around `月` and `日`. Thus `8月10日`, `8月 10日`,
+`8月　10日`, `８月１０日`, and `8 月 10 日` resolve identically. The canonical
+mail body itself is not rewritten. Gmail debug output separately reports raw
+plain/HTML containment for `8月`, `10日`, and exact `8月10日`, NFKC exact-match
+results, and canonical NFKC/whitespace-normalized detector booleans without
+printing either MIME alternative.
+
+`--debug-body` is a temporary, explicit local debugging escape hatch. Unlike
+the default and `--debug-grounding` modes, it prints the selected MIME type,
+canonical extracted-body length, and the complete canonical body to stdout
+between prominent `DEBUG ONLY` markers. This can expose sensitive mail content;
+use it only in a private terminal. It does not add the body to AgentLedger
+JSONL, SQLite, prompt diagnostics, raw model output, or OAuth diagnostics, and
+the default remains body-hidden.
 
 After manual verification, scheduled Gmail ingestion can be enabled explicitly:
 

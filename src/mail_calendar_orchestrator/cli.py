@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +31,7 @@ from mail_to_calendar.gmail_client import (
 )
 from mail_to_calendar.classifier import RuleBasedImportanceClassifier
 from mail_to_calendar.extractor import RuleBasedCalendarExtractor
+from mail_to_calendar.text_normalization import without_transport_headers
 
 from .service import MailCalendarOrchestrator
 from .scheduler import (
@@ -63,6 +65,19 @@ def _env_enabled(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _print_gmail_debug_body(message: object) -> None:
+    """Explicit terminal-only escape hatch for inspecting MIME extraction."""
+    metadata = getattr(message, "metadata", {})
+    mime = metadata.get("gmail_mime", {}) if isinstance(metadata, dict) else {}
+    body = str(getattr(message, "body_text", ""))
+    print("DEBUG ONLY: canonical Gmail body may contain sensitive email content.")
+    print(f"Selected MIME part type: {mime.get('selected_part_type', 'none')}")
+    print(f"Canonical body length: {len(body)}")
+    print("--- BEGIN DEBUG CANONICAL BODY ---")
+    print(body)
+    print("--- END DEBUG CANONICAL BODY ---")
 
 
 def _load_dotenv(path: Path = Path(".env")) -> list[str]:
@@ -406,6 +421,12 @@ def _parser() -> argparse.ArgumentParser:
     gmail_analyze.add_argument("--llm-confidence-threshold", type=float, default=0.75)
     gmail_analyze.add_argument("--llm-body-max-chars", type=int, default=6000)
     gmail_analyze.add_argument("--allow-remote-ollama", action="store_true")
+    gmail_analyze.add_argument("--debug-grounding", action="store_true")
+    gmail_analyze.add_argument(
+        "--debug-body",
+        action="store_true",
+        help="DEBUG ONLY: print the extracted canonical email body to stdout.",
+    )
     line = commands.add_parser("line", help="Manage LINE approval notifications.")
     line.add_argument("--config", type=Path, default=DEFAULT_LINE_ENV)
     line.add_argument(
@@ -877,11 +898,19 @@ def main() -> None:
                     confidence_threshold=args.llm_confidence_threshold,
                     require_llm=True,
                 )
-                importance = RuleBasedImportanceClassifier().classify(message)
+                analysis_message = replace(
+                    message,
+                    body_text=without_transport_headers(message.body_text),
+                )
+                importance = RuleBasedImportanceClassifier().classify(
+                    analysis_message
+                )
                 candidate = RuleBasedCalendarExtractor(
                     base_year=args.base_year, timezone=args.timezone
-                ).extract(message, importance)
-                analysis = analyzer.analyze(message, importance, candidate)
+                ).extract(analysis_message, importance)
+                analysis = analyzer.analyze(
+                    analysis_message, importance, candidate
+                )
                 normalized = analysis.final_candidate
                 print(f"Message ID: {message.message_id}")
                 print(f"Final classification: {analysis.final_classification}")
@@ -907,6 +936,218 @@ def main() -> None:
                     "Validation issues: "
                     + (", ".join(analysis.validation_issues) or "none")
                 )
+                if args.debug_body:
+                    _print_gmail_debug_body(message)
+                if args.debug_grounding:
+                    proposed_date = (
+                        analysis.llm_result_summary or {}
+                    ).get("date")
+                    debug = analyzer.date_grounding_debug(
+                        proposed_date, message
+                    )
+                    print(f"Received at: {debug['received_at']}")
+                    print(f"Timezone: {debug['timezone']}")
+                    print(
+                        "Local received at: "
+                        f"{debug['local_received_at'] or 'unavailable'}"
+                    )
+                    print(
+                        "LLM proposed date: "
+                        f"{debug['proposed_date'] or 'not recorded'}"
+                    )
+                    print(f"LLM body length: {debug['llm_body_length']}")
+                    print(
+                        "Validator body length: "
+                        f"{debug['validator_body_length']}"
+                    )
+                    print(f"LLM body hash: {debug['llm_body_hash']}")
+                    print(
+                        "Validator body hash: "
+                        f"{debug['validator_body_hash']}"
+                    )
+                    print(
+                        f"Same body: {'yes' if debug['same_body'] else 'no'}"
+                    )
+                    mime = message.metadata.get("gmail_mime", {})
+                    print(f"MIME type: {mime.get('mime_type', 'unknown')}")
+                    print(
+                        "Plain text parts: "
+                        f"{mime.get('plain_text_parts', 0)}"
+                    )
+                    print(f"HTML parts: {mime.get('html_parts', 0)}")
+                    print(
+                        "Selected part type: "
+                        f"{mime.get('selected_part_type', 'none')}"
+                    )
+                    print(
+                        "Selected body length: "
+                        f"{mime.get('selected_body_length', 0)}"
+                    )
+                    print(
+                        "Selected charset: "
+                        f"{mime.get('selected_charset', 'none')}"
+                    )
+                    print(
+                        "Charset source: "
+                        f"{mime.get('charset_source', 'unavailable')}"
+                    )
+                    print(
+                        "Decode errors: "
+                        + ("yes" if mime.get("decode_errors") else "no")
+                    )
+                    print(
+                        "Plain contains date: "
+                        + ("yes" if mime.get("plain_contains_date") else "no")
+                    )
+                    print(
+                        "HTML contains date: "
+                        + ("yes" if mime.get("html_contains_date") else "no")
+                    )
+                    print(
+                        "Plain contains time: "
+                        + ("yes" if mime.get("plain_contains_time") else "no")
+                    )
+                    print(
+                        "HTML contains time: "
+                        + ("yes" if mime.get("html_contains_time") else "no")
+                    )
+                    print(
+                        "Plain visible length: "
+                        f"{mime.get('plain_visible_length', 0)}"
+                    )
+                    print(
+                        "HTML visible length: "
+                        f"{mime.get('html_visible_length', 0)}"
+                    )
+                    print(
+                        "Selection reason: "
+                        f"{mime.get('selection_reason', 'unavailable')}"
+                    )
+                    print("Plain:")
+                    print(
+                        '- Contains "8月": '
+                        + ("yes" if mime.get("plain_contains_8_month") else "no")
+                    )
+                    print(
+                        '- Contains "10日": '
+                        + ("yes" if mime.get("plain_contains_10_day") else "no")
+                    )
+                    print(
+                        '- Contains exact "8月10日": '
+                        + (
+                            "yes"
+                            if mime.get("plain_contains_exact_august_10") else "no"
+                        )
+                    )
+                    print(
+                        '- NFKC normalized contains "8月10日": '
+                        + (
+                            "yes"
+                            if mime.get("plain_nfkc_contains_exact_august_10")
+                            else "no"
+                        )
+                    )
+                    print("HTML text:")
+                    print(
+                        '- Contains "8月": '
+                        + ("yes" if mime.get("html_contains_8_month") else "no")
+                    )
+                    print(
+                        '- Contains "10日": '
+                        + ("yes" if mime.get("html_contains_10_day") else "no")
+                    )
+                    print(
+                        '- Contains exact "8月10日": '
+                        + (
+                            "yes"
+                            if mime.get("html_contains_exact_august_10") else "no"
+                        )
+                    )
+                    print(
+                        '- NFKC normalized contains "8月10日": '
+                        + (
+                            "yes"
+                            if mime.get("html_nfkc_contains_exact_august_10")
+                            else "no"
+                        )
+                    )
+                    print(
+                        "Canonical NFKC date detection: "
+                        + ("yes" if debug["nfkc_date_detection"] else "no")
+                    )
+                    print(
+                        "Canonical whitespace-normalized date detection: "
+                        + (
+                            "yes"
+                            if debug["whitespace_normalized_date_detection"]
+                            else "no"
+                        )
+                    )
+                    print(
+                        "Contains explicit Japanese date: "
+                        + (
+                            "yes"
+                            if debug["contains_explicit_japanese_date"]
+                            else "no"
+                        )
+                    )
+                    print(
+                        "Contains time expression: "
+                        + (
+                            "yes"
+                            if debug["contains_time_expression"] else "no"
+                        )
+                    )
+                    print("Groundable fields used by LLM:")
+                    for field_name in debug["groundable_fields"]:
+                        print(f"- {field_name}")
+                    print(
+                        "Subject has date-like expression: "
+                        + (
+                            "yes"
+                            if debug["subject_has_date_like_expression"]
+                            else "no"
+                        )
+                    )
+                    subject_expressions = debug["subject_expressions"]
+                    if subject_expressions:
+                        for item in subject_expressions:
+                            print(
+                                "Subject date expression: "
+                                f"{item['expression']}"
+                            )
+                            print(
+                                "Subject resolved date: "
+                                f"{item['resolved_date'] or 'unresolved'}"
+                            )
+                    else:
+                        print("Subject date expression: none")
+                        print("Subject resolved date: unresolved")
+                    expressions = debug["expressions"]
+                    if expressions:
+                        for item in expressions:
+                            print(
+                                "Detected date expression: "
+                                f"{item['expression']}"
+                            )
+                            print(
+                                "Resolved date: "
+                                f"{item['resolved_date'] or 'unresolved'}"
+                            )
+                    else:
+                        print("Detected date expression: none")
+                        print("Resolved date: unresolved")
+                    tokens = debug.get("date_like_tokens", [])
+                    print("Date-like tokens:")
+                    if tokens:
+                        for token in tokens:
+                            print(f'- "{token}"')
+                    else:
+                        print("- none")
+                    print(
+                        f"Grounded: {'yes' if debug['grounded'] else 'no'}"
+                    )
+                    print(f"Reason: {debug['reason'] or 'none'}")
             return
         if args.command == "run-scheduled":
             if not 1 <= args.max_messages <= 100:

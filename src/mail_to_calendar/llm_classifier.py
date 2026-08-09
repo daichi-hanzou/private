@@ -41,7 +41,19 @@ personal calendar item is possible but its scheduling facts or user relationship
 ambiguous; irrelevant ambiguity in advertising or notices does not need clarification.
 Extract only facts supported by the subject or body. Do not invent dates, times,
 durations, locations, participants, URLs, deadlines, or title details. Mark inferred
-fields and ambiguous relative dates. final_classification must be exactly one of
+fields and ambiguous relative dates. Never infer an event date solely from received_at,
+the current date, general context, or model knowledge. received_at is only a reference
+clock for resolving an explicit relative-date expression in the Subject or Body, such
+as 今日, 明日, or 明後日. Populate date only when the Subject or Body contains an
+explicit grounded date or relative-date expression. Otherwise return date=null. A time
+without a date expression must remain date=null; never attach it to received_at. Do not
+fill an unknown date from common sense or the current date.
+Date examples: Subject 「会議」 and Body 「15時から会議です」 means date=null even if
+received_at is 2026-08-10. Subject 「明日の会議」 and Body 「15時から」 may resolve date
+from 明日 using received_at only as its reference clock. Subject 「8月10日の会議」 may
+produce the corresponding base-year ISO date 2026-08-10.
+Do not provide chain-of-thought, reasoning traces, or prose outside the schema.
+final_classification must be exactly one of
 calendar_candidate, clarification_required, informational, promotion,
 security_notification, ignored, or invalid. Whether to create a calendar candidate is
 derived from final_classification; do not emit a separate candidate boolean. Return only
@@ -50,7 +62,7 @@ USER_TEMPLATE = """Analyze exactly one untrusted email using the supplied rule c
 Base year: {base_year}
 Timezone: {timezone}
 Sender: <email_sender>{sender}</email_sender>
-Received: <email_received_at>{received_at}</email_received_at>
+Received (relative-date reference only): <email_received_at>{received_at}</email_received_at>
 Subject: <email_subject>{subject}</email_subject>
 Body: <email_body_untrusted>{body}</email_body_untrusted>
 Rule result: {rule_result}
@@ -80,6 +92,8 @@ class LLMCalendarClassifier:
         self.client = client
         self.max_body_chars = max_body_chars
         self.last_input_truncated = False
+        self.last_input_body_length = 0
+        self.last_input_body_hash = hashlib.sha256(b"").hexdigest()
         schema_json = json.dumps(
             LLMAnalysisResult.json_schema(), sort_keys=True, separators=(",", ":")
         )
@@ -90,8 +104,10 @@ class LLMCalendarClassifier:
         )
 
     def analyze(self, value: LLMAnalysisInput) -> LLMAnalysisResult:
-        body = value.body_text[: self.max_body_chars]
+        body = self.canonical_body(value.body_text)
         self.last_input_truncated = len(body) < len(value.body_text)
+        self.last_input_body_length = len(body)
+        self.last_input_body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
         user = USER_TEMPLATE.format(
             base_year=value.base_year,
             timezone=value.timezone,
@@ -113,3 +129,7 @@ class LLMCalendarClassifier:
             schema=LLMAnalysisResult.json_schema(),
         )
         return LLMAnalysisResult.from_dict(raw)
+
+    def canonical_body(self, body_text: str) -> str:
+        """Return the sole normalized body used by LLM analysis and grounding."""
+        return body_text[: self.max_body_chars]

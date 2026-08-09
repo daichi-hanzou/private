@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .llm_models import FinalClassification, LLMAnalysisResult
 from .models import EmailMessage
 from .time_normalization import normalize_calendar_datetime, normalize_calendar_time
+from .text_normalization import date_detection_text
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,16 @@ class LLMResultValidator:
         "月": 0, "火": 1, "水": 2, "木": 3,
         "金": 4, "土": 5, "日": 6,
     }
+    _date_like_pattern = re.compile(
+        r"(?<!\d)\d{4}(?:年|[-/])\d{1,2}(?:月|[-/])\d{1,2}日?"
+        r"|(?<!\d)\d{1,2}月\d{1,2}日"
+        r"|(?<![\d/])\d{1,2}/\d{1,2}(?![\d/])"
+        r"|(?<!\d)\d{1,2}日\s*(?:午前|午後)?\s*\d{1,2}(?::\d{2}|時(?:\d{1,2}分)?)"
+        r"|(?:今日|本日|明日|明後日|今週|来週|来月)(?:の)?"
+        r"|[月火水木金土日]曜(?:日)?"
+        r"|\b(?:today|tomorrow|this week|next week|next month)\b",
+        re.I,
+    )
     _security_patterns = {
         "new_sign_in": ("新規サインイン", "新しいサインイン", "new sign-in", "unusual sign-in"),
         "new_app_connection": ("新しいアプリ", "アプリへの接続", "new app", "app connected"),
@@ -390,6 +401,139 @@ class LLMResultValidator:
             time_normalization,
         )
 
+    def date_grounding_debug(
+        self,
+        proposed_date: str | None,
+        message: EmailMessage,
+        timezone_name: str,
+    ) -> dict[str, object]:
+        """Return privacy-bounded diagnostics from the production date resolver."""
+        local_received = self._local_received_at(message, timezone_name)
+        grounding_text = f"{message.subject}\n{message.body_text}"
+        expressions = self._resolved_date_expressions(
+            grounding_text,
+            message,
+            timezone_name,
+        )
+        unresolved = self._unresolved_relative_expressions(
+            grounding_text
+        )
+        subject_expressions = self._resolved_date_expressions(
+            message.subject, message, timezone_name
+        )
+        subject_unresolved = self._unresolved_relative_expressions(
+            message.subject
+        )
+        subject_tokens = self._date_like_tokens(message.subject)
+        subject_known = {
+            expression for expression, _resolved, _kind in subject_expressions
+        } | set(subject_unresolved)
+        subject_token_fallbacks = [
+            token for token in subject_tokens if token not in subject_known
+        ]
+        target = None
+        if proposed_date:
+            try:
+                target = date.fromisoformat(proposed_date)
+            except ValueError:
+                pass
+        relative_values = {
+            resolved
+            for _expression, resolved, kind in expressions
+            if kind == "relative" and resolved is not None
+        }
+        all_values = {
+            resolved
+            for _expression, resolved, _kind in expressions
+            if resolved is not None
+        }
+        grounded = target is not None and target in all_values and not unresolved
+        if target is None:
+            reason = "invalid_date" if proposed_date else "candidate_date_missing"
+        elif unresolved:
+            reason = "relative_date_requires_clarification"
+        elif relative_values and target not in relative_values:
+            reason = "relative_date_mismatch"
+            grounded = False
+        elif not expressions:
+            reason = (
+                "received_at_or_timezone_invalid"
+                if local_received is None else "date_expression_not_found"
+            )
+        elif not grounded:
+            reason = "date_not_grounded"
+        else:
+            reason = None
+        return {
+            "received_at": message.received_at,
+            "timezone": timezone_name,
+            "local_received_at": (
+                local_received.isoformat() if local_received else None
+            ),
+            "proposed_date": proposed_date,
+            "expressions": [
+                {"expression": expression, "resolved_date": (
+                    resolved.isoformat() if resolved else None
+                )}
+                for expression, resolved, _kind in expressions
+            ] + [
+                {"expression": expression, "resolved_date": None}
+                for expression in unresolved
+            ],
+            "grounded": grounded,
+            "reason": reason,
+            "date_like_tokens": self._date_like_tokens(
+                grounding_text
+            ),
+            "groundable_fields": ["subject", "body_text", "received_at"],
+            "subject_has_date_like_expression": bool(
+                subject_expressions or subject_unresolved
+                or subject_tokens
+            ),
+            "subject_expressions": [
+                {"expression": expression, "resolved_date": (
+                    resolved.isoformat() if resolved else None
+                )}
+                for expression, resolved, _kind in subject_expressions
+            ] + [
+                {"expression": expression, "resolved_date": None}
+                for expression in subject_unresolved
+            ] + [
+                {"expression": expression, "resolved_date": None}
+                for expression in subject_token_fallbacks
+            ],
+        }
+
+    @classmethod
+    def _date_like_tokens(cls, text: str) -> list[str]:
+        # This is diagnostic-only and must never make a candidate executable.
+        cleaned = re.sub(
+            r"<(script|style)\b[^>]*>.*?</\1\s*>", " ", text,
+            flags=re.I | re.S,
+        )
+        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+        retained: list[str] = []
+        for line in cleaned.splitlines():
+            if re.match(
+                r"^\s*(?:--\s*$|_{3,}|-{5,}|From:|Sent:|差出人:|送信元:|"
+                r"On\s+.+\swrote:\s*$)",
+                line,
+                re.I,
+            ):
+                break
+            retained.append(line)
+        visible = date_detection_text("\n".join(retained))
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for match in cls._date_like_pattern.finditer(visible):
+            token = " ".join(match.group().split())[:32]
+            if token and token not in seen:
+                seen.add(token)
+                tokens.append(token)
+            if len(tokens) >= 20:
+                break
+        return tokens
+
     @classmethod
     def _normalize_security_type(cls, value: str | None) -> str | None:
         if value is None:
@@ -440,6 +584,7 @@ class LLMResultValidator:
         timezone_name: str | None = None,
     ) -> bool:
         parsed = date.fromisoformat(value)
+        text = date_detection_text(text)
         variants = {
             value,
             f"{parsed.year}年{parsed.month}月{parsed.day}日",
@@ -458,15 +603,10 @@ class LLMResultValidator:
     def _relative_dates(
         cls, text: str, message: EmailMessage, timezone_name: str
     ) -> set[date]:
-        try:
-            received = datetime.fromisoformat(
-                message.received_at.replace("Z", "+00:00")
-            )
-            if received.tzinfo is None:
-                return set()
-            local_date = received.astimezone(ZoneInfo(timezone_name)).date()
-        except (ValueError, ZoneInfoNotFoundError):
+        local_received = cls._local_received_at(message, timezone_name)
+        if local_received is None:
             return set()
+        local_date = local_received.date()
         resolved: set[date] = set()
         if "今日" in text or "本日" in text or re.search(r"\btoday\b", text, re.I):
             resolved.add(local_date)
@@ -501,8 +641,88 @@ class LLMResultValidator:
             )
         return resolved
 
+    @staticmethod
+    def _local_received_at(
+        message: EmailMessage, timezone_name: str
+    ) -> datetime | None:
+        try:
+            received = datetime.fromisoformat(
+                message.received_at.replace("Z", "+00:00")
+            )
+            if received.tzinfo is None:
+                return None
+            return received.astimezone(ZoneInfo(timezone_name))
+        except (ValueError, ZoneInfoNotFoundError):
+            return None
+
+    def _resolved_date_expressions(
+        self, text: str, message: EmailMessage, timezone_name: str
+    ) -> list[tuple[str, date | None, str]]:
+        text = date_detection_text(text)
+        found: list[tuple[str, date | None, str]] = []
+        seen: set[str] = set()
+
+        def add(expression: str, resolved: date | None, kind: str) -> None:
+            if expression not in seen:
+                seen.add(expression)
+                found.append((expression, resolved, kind))
+
+        for match in re.finditer(r"(?<!\d)\d{4}-\d{1,2}-\d{1,2}(?!\d)", text):
+            try:
+                resolved = date.fromisoformat(match.group())
+            except ValueError:
+                resolved = None
+            add(match.group(), resolved, "explicit")
+        for match in re.finditer(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text):
+            try:
+                resolved = date(*map(int, match.groups()))
+            except ValueError:
+                resolved = None
+            add(match.group(), resolved, "explicit")
+        for match in re.finditer(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?![\d/])", text):
+            try:
+                resolved = date(self.base_year, int(match[1]), int(match[2]))
+            except ValueError:
+                resolved = None
+            add(match.group(), resolved, "explicit")
+        for match in re.finditer(r"(?<!\d)(\d{1,2})月(\d{1,2})日", text):
+            # A four-digit year immediately before the match is handled above.
+            if match.start() >= 5 and re.search(r"\d{4}年$", text[:match.start()]):
+                continue
+            try:
+                resolved = date(self.base_year, int(match[1]), int(match[2]))
+            except ValueError:
+                resolved = None
+            add(match.group(), resolved, "explicit")
+        relative_values = self._relative_dates(text, message, timezone_name)
+        local_received = self._local_received_at(message, timezone_name)
+        if local_received:
+            local_date = local_received.date()
+            relative_patterns = [
+                (r"(?:今日|本日)(?:の)?|\btoday\b", local_date),
+                (r"明日(?:の)?|\btomorrow\b", local_date + timedelta(days=1)),
+                (r"明後日(?:の)?", local_date + timedelta(days=2)),
+            ]
+            for pattern, resolved in relative_patterns:
+                for match in re.finditer(pattern, text, re.I):
+                    add(match.group(), resolved, "relative")
+            monday = local_date - timedelta(days=local_date.weekday())
+            for match in re.finditer(
+                r"(今週|来週)(?:の)?([月火水木金土日])曜(?:日)?", text
+            ):
+                resolved = monday + timedelta(
+                    days=(7 if match[1] == "来週" else 0)
+                    + self._weekday_offsets[match[2]]
+                )
+                add(match.group(), resolved, "relative")
+        # Keep the resolver and diagnostics tied even if new relative syntax is added.
+        if relative_values and not any(kind == "relative" for _, _, kind in found):
+            for resolved in sorted(relative_values):
+                add("relative date", resolved, "relative")
+        return found
+
     @classmethod
-    def _has_unresolved_relative(cls, text: str) -> bool:
+    def _unresolved_relative_expressions(cls, text: str) -> list[str]:
         scrubbed = re.sub(
             r"(?:今週|来週)(?:の)?[月火水木金土日]曜(?:日)?", "", text
         )
@@ -510,10 +730,15 @@ class LLMResultValidator:
             r"\b(?:this|next)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
             "", scrubbed, flags=re.I,
         )
-        return any(
-            value.casefold() in scrubbed.casefold()
+        return [
+            match.group()
             for value in cls._unresolved_relative
-        )
+            for match in re.finditer(re.escape(value), scrubbed, re.I)
+        ]
+
+    @classmethod
+    def _has_unresolved_relative(cls, text: str) -> bool:
+        return bool(cls._unresolved_relative_expressions(text))
 
     def _personal_datetime_grounded(
         self, result: LLMAnalysisResult, message: EmailMessage, text: str
