@@ -142,6 +142,92 @@ def test_schema_is_strict_and_bounded():
     assert schema["additionalProperties"] is False
     assert schema["properties"]["confidence"]["maximum"] == 1
     assert schema["properties"]["evidence"]["maxItems"] == 5
+    assert "should_create_calendar_candidate" not in schema["properties"]
+    assert "should_create_calendar_candidate" not in schema["required"]
+
+
+def test_structured_result_derives_candidate_boolean_from_classification():
+    current = _raw()
+    del current["should_create_calendar_candidate"]
+    candidate = LLMAnalysisResult.from_dict(current)
+    assert candidate.should_create_calendar_candidate
+    assert candidate.reported_should_create_calendar_candidate is None
+
+    informational = LLMAnalysisResult.from_dict(
+        _noncandidate(
+            "informational", should_create_calendar_candidate=True
+        )
+    )
+    assert not informational.should_create_calendar_candidate
+    assert informational.reported_should_create_calendar_candidate is True
+
+
+def test_legacy_false_candidate_boolean_is_corrected_not_rejected():
+    result = LLMAnalysisResult.from_dict(
+        _raw(should_create_calendar_candidate=False)
+    )
+    checked = LLMResultValidator(base_year=2026).validate(result, _message())
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.candidate_allowed
+    assert "candidate_classification_mismatch" not in checked.issues
+    assert (
+        "should_create_calendar_candidate:false->"
+        "true_from_final_classification"
+    ) in checked.classification_corrections
+
+
+def test_llm_result_summary_includes_structured_calendar_fields_only():
+    summary = LLMAnalysisResult.from_dict(
+        _raw(
+            title="Project meeting",
+            date="2026-08-12",
+            start="15:00",
+            end="16:00",
+            duration_minutes=60,
+            timezone="Asia/Tokyo",
+            location="Meeting room A",
+        )
+    ).summary()
+    assert summary == {
+        "is_important": True,
+        "category": "meeting",
+        "candidate_type": "event",
+        "should_create_calendar_candidate": True,
+        "title": "Project meeting",
+        "date": "2026-08-12",
+        "start": "15:00",
+        "end": "16:00",
+        "duration_minutes": 60,
+        "timezone": "Asia/Tokyo",
+        "location": "Meeting room A",
+        "clarification_required": False,
+        "final_classification": "calendar_candidate",
+        "user_commitment_detected": True,
+        "generic_event_advertisement": False,
+        "security_notification_type": None,
+        "should_notify_user": False,
+        "confidence": 0.9,
+        "suspicious_instructions_detected": False,
+    }
+    assert not {"body_text", "evidence", "prompt", "raw_response", "token"}.intersection(
+        summary
+    )
+
+
+def test_llm_result_summary_safely_preserves_null_calendar_fields():
+    summary = LLMAnalysisResult.from_dict(
+        _raw(
+            title=None,
+            date=None,
+            start=None,
+            end=None,
+            duration_minutes=None,
+            location=None,
+        )
+    ).summary()
+    for field in ("title", "date", "start", "end", "duration_minutes", "location"):
+        assert field in summary
+        assert summary[field] is None
 
 
 def test_prompt_separates_system_instructions_and_untrusted_body():
@@ -171,6 +257,99 @@ def test_prompt_defines_personal_calendar_candidate_not_event_registration():
     assert "public event advertisement" in SYSTEM_PROMPT
     assert "Security notifications" in SYSTEM_PROMPT
     assert "Do not invent dates, times" in SYSTEM_PROMPT
+    assert "grounded personal commitment" in SYSTEM_PROMPT
+    assert "服部さんは8月10日15時から16時の会議に参加予定です" in SYSTEM_PROMPT
+    assert "興味のある方はお申し込みください" in SYSTEM_PROMPT
+
+
+def test_grounded_personal_commitment_corrects_informational_llm_output():
+    title = "AgentLedger LINE Approval Test"
+    message = _message(
+        subject=f"8月10日15時 {title}",
+        body=(
+            f"あなたは8月10日15時から16時の{title}に参加予定です。"
+        ),
+    )
+    raw = _raw(
+        is_important=False,
+        category="informational",
+        should_create_calendar_candidate=False,
+        candidate_type="none",
+        title=title,
+        date="2026-08-10",
+        start="2026-08-10T15:00:00+09:00",
+        end="2026-08-10T16:00:00+09:00",
+        duration_minutes=60,
+        final_classification="informational",
+        user_commitment_detected=True,
+        user_commitment_evidence=["参加予定です"],
+        evidence=["8月10日", "15時から16時", "参加予定です"],
+    )
+    result = _llm_first_result(message, raw)
+    analysis = result.analysis_results[0]
+    assert not analysis.final_importance.is_important
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate.candidate_type == "event"
+    assert analysis.final_candidate.date == "2026-08-10"
+    assert analysis.final_candidate.start == "15:00"
+    assert analysis.final_candidate.end == "16:00"
+    assert analysis.final_candidate.duration_minutes == 60
+    assert analysis.validation_issues == []
+    assert (
+        "semantic_consistency:informational->"
+        "calendar_candidate_due_to_grounded_user_commitment"
+    ) in analysis.classification_corrections
+    assert (
+        "candidate_type:none->event_due_to_grounded_user_commitment"
+    ) in analysis.classification_corrections
+
+
+def test_personal_commitment_without_datetime_requires_clarification():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                category="informational",
+                should_create_calendar_candidate=False,
+                candidate_type="none",
+                date=None,
+                start=None,
+                end=None,
+                duration_minutes=None,
+                final_classification="informational",
+                user_commitment_evidence=["参加予定です"],
+                evidence=["参加予定です"],
+            )
+        ),
+        _message(body="Project meetingに参加予定です。日時は未定です。"),
+    )
+    assert checked.final_classification == "clarification_required"
+    assert not checked.candidate_allowed
+
+
+def test_ungrounded_personal_datetime_is_not_promoted_from_informational():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                category="informational",
+                should_create_calendar_candidate=False,
+                candidate_type="none",
+                date="2026-08-11",
+                start="10:00",
+                end="11:00",
+                duration_minutes=60,
+                final_classification="informational",
+                user_commitment_evidence=["参加予定です"],
+                evidence=["参加予定です"],
+            )
+        ),
+        _message(body="8月10日15時からProject meetingに参加予定です。"),
+    )
+    assert checked.final_classification == "informational"
+    assert not checked.candidate_allowed
+    assert not any(
+        correction.startswith("semantic_consistency:")
+        for correction in checked.classification_corrections
+    )
 
 
 def test_body_is_truncated_before_llm_call():
@@ -233,6 +412,285 @@ def test_llm_end_of_day_time_is_normalized_and_audited():
     assert '"date_rollover_days": 1' in serialized
 
 
+@pytest.mark.parametrize(
+    "start,end,body,expected_duration",
+    [
+        ("15:00:00", "16:00:00", "8月9日15時から16時まで", 60),
+        ("15:00", "16:30", "8月9日 15:00〜16:30", 90),
+        ("午後3時", "午後4時", "8月9日 午後3時から午後4時まで", 60),
+    ],
+)
+def test_validator_derives_duration_from_grounded_japanese_time_range(
+    start, end, body, expected_duration
+):
+    title = "AgentLedger Google Calendar Test"
+    message = _message(
+        subject=f"8月9日15時 {title}",
+        body=f"{body}{title}を実施します。私は参加予定です。",
+    )
+    raw = _raw(
+        title=title,
+        date="2026-08-09",
+        start=start,
+        end=end,
+        duration_minutes=expected_duration,
+        user_commitment_evidence=["私は参加予定です"],
+        evidence=["8月9日", title],
+    )
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(raw), message
+    )
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.result.date == "2026-08-09"
+    assert checked.result.start == "15:00"
+    assert checked.result.end in {"16:00", "16:30"}
+    assert checked.result.duration_minutes == expected_duration
+    assert checked.issues == []
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [
+        ("2026-08-09T15:00+09:00", "2026-08-09T16:00+09:00"),
+        ("2026-08-09T15:00:00+09:00", "2026-08-09T16:00:00+09:00"),
+        ("2026-08-09T15:00", "2026-08-09T16:00"),
+    ],
+)
+def test_validator_normalizes_grounded_iso_datetimes(start, end):
+    title = "AgentLedger Google Calendar Test"
+    message = _message(
+        subject=f"8月9日15時 {title}",
+        body=f"8月9日15時から16時まで{title}を実施します。私は参加予定です。",
+    )
+    raw = _raw(
+        category="unknown",
+        title=title,
+        date="2026-08-09",
+        start=start,
+        end=end,
+        duration_minutes=60,
+        location="",
+        user_commitment_evidence=["私は参加予定です"],
+        evidence=["8月9日", "15時から16時まで"],
+    )
+    result = _llm_first_result(message, raw)
+    analysis = result.analysis_results[0]
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate.date == "2026-08-09"
+    assert analysis.final_candidate.start == "15:00"
+    assert analysis.final_candidate.end == "16:00"
+    assert analysis.final_candidate.duration_minutes == 60
+    assert analysis.final_candidate.timezone == "Asia/Tokyo"
+    assert analysis.final_candidate.location is None
+    decision = next(
+        event for event in result.events if event["event_type"] == "decision_made"
+    )
+    audit = decision["analysis"]
+    assert audit["llm_result_summary"]["start"] == start
+    assert audit["llm_result_summary"]["end"] == end
+    assert audit["normalized_candidate"] == {
+        "date": "2026-08-09",
+        "start": "15:00",
+        "end": "16:00",
+        "duration_minutes": 60,
+        "timezone": "Asia/Tokyo",
+        "location": None,
+    }
+
+
+def test_validator_grounds_iso_datetimes_against_japanese_period_times():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                date="2026-08-09",
+                start="2026-08-09T15:00+09:00",
+                end="2026-08-09T16:00+09:00",
+                duration_minutes=60,
+                evidence=["8月9日", "午後3時から午後4時"],
+            )
+        ),
+        _message(body="8月9日午後3時から午後4時までProject meetingです。"),
+    )
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.issues == []
+
+
+def test_validator_rejects_iso_datetime_date_mismatch():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                date="2026-08-09",
+                start="2026-08-10T15:00+09:00",
+                end="2026-08-09T16:00+09:00",
+                duration_minutes=60,
+                evidence=["8月9日", "15時から16時まで"],
+            )
+        ),
+        _message(body="8月9日15時から16時までProject meetingです。"),
+    )
+    assert not checked.candidate_allowed
+    assert "invalid_start_date_mismatch" in checked.issues
+
+
+def test_validator_rejects_iso_datetime_not_grounded_in_body():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                date="2026-08-09",
+                start="2026-08-09T14:00+09:00",
+                end="2026-08-09T16:00+09:00",
+                duration_minutes=120,
+                evidence=["8月9日", "16時"],
+            )
+        ),
+        _message(body="8月9日15時から16時までProject meetingです。"),
+    )
+    assert not checked.candidate_allowed
+    assert "start_not_grounded" in checked.issues
+
+
+def test_validator_rejects_duration_mismatch_for_grounded_iso_range():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                date="2026-08-09",
+                start="2026-08-09T15:00+09:00",
+                end="2026-08-09T16:00+09:00",
+                duration_minutes=90,
+                evidence=["8月9日", "15時から16時まで"],
+            )
+        ),
+        _message(body="8月9日15時から16時までProject meetingです。"),
+    )
+    assert not checked.candidate_allowed
+    assert "duration_mismatch" in checked.issues
+
+
+def test_validator_rejects_iso_offset_inconsistent_with_timezone():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                date="2026-08-09",
+                start="2026-08-09T15:00+00:00",
+                end="2026-08-09T16:00+00:00",
+                duration_minutes=60,
+                evidence=["8月9日", "15時から16時まで"],
+            )
+        ),
+        _message(body="8月9日15時から16時までProject meetingです。"),
+    )
+    assert not checked.candidate_allowed
+    assert "invalid_start_timezone_mismatch" in checked.issues
+    assert "invalid_end_timezone_mismatch" in checked.issues
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "", "   ", "Unknown", "none", "N/A", "not specified",
+        "Not Specified", "unspecified", "not provided", "no location",
+        "なし", "未指定", "記載なし",
+    ],
+)
+def test_validator_normalizes_missing_location_sentinels(location):
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(location=location)),
+        _message(),
+    )
+    assert checked.candidate_allowed
+    assert checked.result.location is None
+    assert "location_not_grounded" not in checked.issues
+
+
+def test_validator_accepts_grounded_real_location():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(location="東京駅")),
+        _message(body="8月12日 午後3時から60分、東京駅でProject meetingです。"),
+    )
+    assert checked.candidate_allowed
+    assert checked.result.location == "東京駅"
+    assert "location_not_grounded" not in checked.issues
+
+
+def test_validator_rejects_ungrounded_real_location():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(location="東京駅")),
+        _message(),
+    )
+    assert not checked.candidate_allowed
+    assert checked.result.location == "東京駅"
+    assert "location_not_grounded" in checked.issues
+
+
+def test_validator_derives_missing_duration_only_from_grounded_range():
+    message = _message(
+        subject="8月9日15時 Project meeting",
+        body="8月9日15時から16時までProject meetingです。",
+    )
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                date="2026-08-09",
+                start="15時",
+                end="16時",
+                duration_minutes=None,
+                evidence=["8月9日", "15時から16時まで"],
+            )
+        ),
+        message,
+    )
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.result.duration_minutes == 60
+
+
+def test_validator_does_not_invent_duration_from_start_only():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(end=None, duration_minutes=None, evidence=["8月12日", "午後3時"])
+        ),
+        _message(body="8月12日 午後3時にProject meetingです。"),
+    )
+    assert checked.result.duration_minutes is None
+    assert "duration_not_grounded" not in checked.issues
+
+
+def test_validator_rejects_end_without_start():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(start=None, end="16時", duration_minutes=None, evidence=["8月12日", "16時"])
+        ),
+        _message(body="8月12日16時までにProject meetingを終了します。"),
+    )
+    assert not checked.candidate_allowed
+    assert "candidate_start_missing" in checked.issues
+
+
+def test_validator_rejects_llm_time_not_present_in_japanese_mail():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(
+                start="14:00",
+                end="16:00",
+                duration_minutes=120,
+                evidence=["8月12日", "16時"],
+            )
+        ),
+        _message(body="8月12日15時から16時までProject meetingです。"),
+    )
+    assert not checked.candidate_allowed
+    assert "start_not_grounded" in checked.issues
+
+
+def test_validator_does_not_treat_hour_prefix_as_grounded_time():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(
+            _raw(start="15:00", duration_minutes=None, evidence=["8月12日"])
+        ),
+        _message(body="8月12日15時30分にProject meetingです。"),
+    )
+    assert "start_not_grounded" in checked.issues
+
+
 @pytest.mark.parametrize("invalid_time", ["24:01", "24:30", "25:00"])
 def test_invalid_llm_end_of_day_time_isolated_to_message(
     invalid_time: str,
@@ -262,6 +720,75 @@ def test_validator_rejects_relative_date_and_inferred_deadline_time():
     assert "relative_date_requires_clarification" in checked.issues
     assert "start_not_grounded" in checked.issues
     assert "deadline_time_was_inferred" in checked.issues
+
+
+@pytest.mark.parametrize(
+    "expression,expected_date",
+    [
+        ("今日", "2026-08-01"),
+        ("本日", "2026-08-01"),
+        ("明日", "2026-08-02"),
+        ("明後日", "2026-08-03"),
+        ("今週月曜", "2026-07-27"),
+        ("来週月曜", "2026-08-03"),
+    ],
+)
+def test_validator_grounds_relative_date_from_received_at(
+    expression, expected_date
+):
+    message = _message(
+        body=f"{expression}15時から60分のProject meetingに参加予定です。"
+    )
+    result = LLMAnalysisResult.from_dict(_raw(
+        date=expected_date,
+        evidence=[expression, "15時", "60分"],
+    ))
+    checked = LLMResultValidator(base_year=2026).validate(result, message)
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.candidate_allowed
+    assert "date_not_grounded" not in checked.issues
+    assert "relative_date_requires_clarification" not in checked.issues
+
+
+def test_relative_date_uses_message_timezone_at_utc_date_boundary():
+    original = _message(body="今日15時から60分のProject meetingに参加予定です。")
+    message = EmailMessage(**{
+        **original.__dict__, "received_at": "2026-08-01T16:30:00+00:00"
+    })
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            date="2026-08-02", evidence=["今日", "15時", "60分"]
+        )),
+        message,
+    )
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.candidate_allowed
+
+
+def test_relative_date_mismatch_is_rejected():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            date="2026-08-04", evidence=["明日", "15時", "60分"]
+        )),
+        _message(body="明日15時から60分のProject meetingに参加予定です。"),
+    )
+    assert not checked.candidate_allowed
+    assert "date_not_grounded" in checked.issues
+    assert "relative_date_mismatch" in checked.issues
+
+
+@pytest.mark.parametrize("expression", ["8/10", "8月10日"])
+def test_explicit_month_day_date_grounding_remains_supported(expression):
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            date="2026-08-10", evidence=[expression, "15時", "60分"]
+        )),
+        _message(
+            body=f"{expression} 15時から60分のProject meetingに参加予定です。"
+        ),
+    )
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.candidate_allowed
 
 
 def _analyzer(client, *, mode="hybrid", threshold=0.75, require=False):
@@ -653,9 +1180,14 @@ def test_informational_non_candidate_overrides_contradictory_calendar_label():
         LLMAnalysisResult.from_dict(raw),
         _message(subject="製品ニュース", body="製品情報のお知らせです。"),
     )
-    assert checked.final_classification == "informational"
+    assert checked.final_classification == "clarification_required"
     assert not checked.candidate_allowed
-    assert "candidate_classification_mismatch" in checked.issues
+    assert "candidate_classification_mismatch" not in checked.issues
+    assert "candidate_date_missing" in checked.issues
+    assert (
+        "should_create_calendar_candidate:false->"
+        "true_from_final_classification"
+    ) in checked.classification_corrections
 
 
 def test_classification_corrections_are_audited():

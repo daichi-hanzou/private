@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 .env
+line-approval.env
 .env.*
 !.env.example
 .idea/
@@ -20,6 +21,10 @@ token.json
 *.token.json
 microsoft_token_cache.json
 *microsoft*token*.json
+google_credentials.json
+google_calendar_token.json
+*google*credentials*.json
+*google*token*.json
 private_mail/
 mail_data/
 mail_state.sqlite3

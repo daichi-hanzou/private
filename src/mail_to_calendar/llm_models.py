@@ -68,14 +68,17 @@ class LLMAnalysisResult:
     fields_inferred: list[str] = field(default_factory=list)
     suspicious_instructions_detected: bool = False
     suspicious_instruction_summary: str | None = None
+    reported_should_create_calendar_candidate: bool | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "LLMAnalysisResult":
         if not isinstance(value, dict):
             raise LLMResultValidationError("LLM result must be an object")
-        expected = set(cls.__dataclass_fields__)
+        legacy_field = "should_create_calendar_candidate"
+        internal_field = "reported_should_create_calendar_candidate"
+        expected = set(cls.__dataclass_fields__) - {legacy_field, internal_field}
         missing = expected - value.keys()
-        extra = value.keys() - expected
+        extra = value.keys() - expected - {legacy_field}
         if missing:
             raise LLMResultValidationError(
                 "missing LLM fields: " + ", ".join(sorted(missing))
@@ -86,7 +89,8 @@ class LLMAnalysisResult:
             )
         if type(value["is_important"]) is not bool:
             raise LLMResultValidationError("is_important must be boolean")
-        if type(value["should_create_calendar_candidate"]) is not bool:
+        reported_candidate = value.get(legacy_field)
+        if reported_candidate is not None and type(reported_candidate) is not bool:
             raise LLMResultValidationError(
                 "should_create_calendar_candidate must be boolean"
             )
@@ -146,13 +150,30 @@ class LLMAnalysisResult:
                 raise LLMResultValidationError(f"{key} must be a string list")
             if len(items) > count or any(len(x) > length for x in items):
                 raise LLMResultValidationError(f"{key} exceeds its size limit")
-        return cls(**value)
+        normalized = {
+            key: item for key, item in value.items() if key != legacy_field
+        }
+        normalized[legacy_field] = (
+            value["final_classification"] == "calendar_candidate"
+        )
+        normalized[internal_field] = reported_candidate
+        return cls(**normalized)
 
     def summary(self) -> dict[str, Any]:
         return {
             "is_important": self.is_important,
             "category": self.category,
             "candidate_type": self.candidate_type,
+            "should_create_calendar_candidate": (
+                self.should_create_calendar_candidate
+            ),
+            "title": self.title,
+            "date": self.date,
+            "start": self.start,
+            "end": self.end,
+            "duration_minutes": self.duration_minutes,
+            "timezone": self.timezone,
+            "location": self.location,
             "clarification_required": self.clarification_required,
             "final_classification": self.final_classification,
             "user_commitment_detected": self.user_commitment_detected,
@@ -170,7 +191,6 @@ class LLMAnalysisResult:
             "is_important": {"type": "boolean"},
             "importance_score": {"type": "number", "minimum": 0, "maximum": 1},
             "category": {"type": "string", "enum": ["meeting", "deadline", "appointment", "task", "informational", "promotion", "security_notification", "unknown"]},
-            "should_create_calendar_candidate": {"type": "boolean"},
             "candidate_type": {"type": "string", "enum": ["event", "deadline", "task", "none"]},
             "title": nullable_string,
             "date": nullable_string,
@@ -233,3 +253,4 @@ class HybridAnalysisResult:
     llm_proposed_classification: FinalClassification | None = None
     classification_corrections: list[str] = field(default_factory=list)
     time_normalization: dict[str, str | int] | None = None
+    llm_result_summary: dict[str, Any] | None = None

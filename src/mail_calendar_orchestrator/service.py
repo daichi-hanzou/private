@@ -14,6 +14,7 @@ from mail_to_calendar.provider import MailProvider
 from mail_to_calendar.service import MailToCalendarService
 
 from .audit import write_jsonl_atomic
+from .approvals import ApprovalService
 from .models import OrchestrationResult
 from .state import MailStateStore
 
@@ -55,6 +56,7 @@ class MailCalendarOrchestrator:
         analysis_only: bool = False,
         reprocess: bool = False,
         retry_failed: bool = False,
+        run_id: str | None = None,
     ) -> OrchestrationResult:
         source = Path(input_path)
         output = Path(output_path)
@@ -67,6 +69,7 @@ class MailCalendarOrchestrator:
             analysis_only=analysis_only,
             reprocess=reprocess,
             retry_failed=retry_failed,
+            run_id=run_id,
         )
 
     def process_provider(
@@ -78,6 +81,8 @@ class MailCalendarOrchestrator:
         analysis_only: bool = False,
         reprocess: bool = False,
         retry_failed: bool = False,
+        run_id: str | None = None,
+        run_provider: str | None = None,
     ) -> OrchestrationResult:
         output = Path(output_path)
         fetched = provider.list_messages()
@@ -89,7 +94,7 @@ class MailCalendarOrchestrator:
                 seen.add(key)
                 unique.append(message)
         duplicate_count = len(fetched) - len(unique)
-        run_id = f"mail-batch-{uuid4()}"
+        run_id = run_id or f"mail-batch-{uuid4()}"
         selected = unique
         skipped = duplicate_count
         decisions = {}
@@ -104,7 +109,9 @@ class MailCalendarOrchestrator:
                     selected.append(message)
                 else:
                     skipped += 1
-            provider_name = unique[0].provider if unique else "unknown"
+            provider_name = run_provider or (
+                unique[0].provider if unique else "unknown"
+            )
             self.state_store.start_run(
                 run_id, provider=provider_name,
                 analysis_mode=self.analysis_mode, model_name=self.model_name,
@@ -235,6 +242,11 @@ class MailCalendarOrchestrator:
         )
         events = [*mail_events, *calendar_events]
         written = write_jsonl_atomic(output, events)
+        approvals_created = 0
+        if self.state_store is not None and requires_approval:
+            approvals_created = len(
+                ApprovalService(self.state_store).register_pending(events, written)
+            )
         failed_analyses = {
             message.message_id: analysis
             for message, analysis in zip(
@@ -353,6 +365,7 @@ class MailCalendarOrchestrator:
             permanent_failures=permanent_count,
             run_id=run_id,
             state_db=self.state_store.path if self.state_store else None,
+            approvals_created=approvals_created,
         )
 
     @staticmethod
@@ -453,6 +466,11 @@ class MailCalendarOrchestrator:
                     "source_message_id": candidate.source_message_id,
                     "source_thread_id": candidate.source_thread_id,
                     "mail_candidate_id": candidate.candidate_id,
+                    "candidate_type": candidate.candidate_type,
+                    "candidate_date": candidate.date,
+                    "candidate_end": candidate.end,
+                    "candidate_timezone": candidate.timezone,
+                    "candidate_location": candidate.location,
                     "parent_mail_action_id": relation["action_id"],
                     "parent_mail_decision_id": relation["decision_id"],
                     "parent_mail_correlation_id": relation[

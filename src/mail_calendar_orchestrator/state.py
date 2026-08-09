@@ -8,11 +8,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 from mail_to_calendar.models import EmailMessage
 
 
 DEFAULT_STATE_DB = Path("~/.local/share/agentledger/mail_state.sqlite3")
+BOOTSTRAP_VERSION = "1"
 
 
 def _now() -> datetime:
@@ -134,7 +137,246 @@ class MailStateStore:
                     duration_ms INTEGER,
                     status TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS provider_runs (
+                    run_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    fetched_messages INTEGER NOT NULL DEFAULT 0,
+                    error_type TEXT,
+                    error_message TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, provider)
+                );
+                CREATE TABLE IF NOT EXISTS system_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS scheduled_locks (
+                    name TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS approval_id_sequence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT
+                );
+                CREATE TABLE IF NOT EXISTS approval_queue (
+                    approval_id TEXT PRIMARY KEY,
+                    calendar_action_id TEXT NOT NULL UNIQUE,
+                    calendar_decision_id TEXT,
+                    calendar_correlation_id TEXT,
+                    calendar_run_id TEXT,
+                    candidate_id TEXT,
+                    source_provider TEXT,
+                    source_message_id TEXT,
+                    source_thread_id TEXT,
+                    title TEXT NOT NULL,
+                    candidate_type TEXT NOT NULL,
+                    date TEXT,
+                    start TEXT,
+                    end TEXT,
+                    duration_minutes INTEGER,
+                    timezone TEXT NOT NULL,
+                    location TEXT,
+                    classification_summary TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    approved_at TEXT,
+                    rejected_at TEXT,
+                    expired_at TEXT,
+                    actor TEXT,
+                    reason TEXT,
+                    source_jsonl_path TEXT NOT NULL,
+                    outcome_jsonl_path TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_approval_status
+                    ON approval_queue(status, created_at);
+                CREATE TABLE IF NOT EXISTS calendar_execution (
+                    approval_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    calendar_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    external_event_id TEXT,
+                    html_link TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    last_error_type TEXT,
+                    last_error_message TEXT,
+                    result_jsonl_path TEXT,
+                    PRIMARY KEY (approval_id, provider),
+                    FOREIGN KEY (approval_id) REFERENCES approval_queue(approval_id)
+                );
+                CREATE TABLE IF NOT EXISTS line_notifications (
+                    notification_id TEXT PRIMARY KEY,
+                    approval_id TEXT NOT NULL UNIQUE,
+                    line_user_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    sent_at TEXT,
+                    response_at TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error_type TEXT,
+                    last_error_message TEXT,
+                    FOREIGN KEY (approval_id) REFERENCES approval_queue(approval_id)
+                );
+                CREATE TABLE IF NOT EXISTS approval_interaction_tokens (
+                    approval_id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    FOREIGN KEY (approval_id) REFERENCES approval_queue(approval_id)
+                );
+                CREATE TABLE IF NOT EXISTS line_webhook_events (
+                    webhook_event_id TEXT PRIMARY KEY,
+                    processed_at TEXT NOT NULL
+                );
                 """
+            )
+
+    def get_system_value(self, key: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT value FROM system_state WHERE key=?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_system_value(self, key: str, value: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                "updated_at=excluded.updated_at",
+                (key, value, _timestamp()),
+            )
+
+    def ensure_bootstrap(
+        self, *, timezone_name: str, start_from: str | None = None,
+        reset: bool = False, now: datetime | None = None,
+    ) -> datetime:
+        try:
+            zone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"unknown timezone: {timezone_name}") from exc
+        existing = self.get_system_value("processing_started_from")
+        if existing and not reset:
+            return datetime.fromisoformat(existing)
+        current = (now or _now()).astimezone(zone)
+        if start_from in {None, "today"}:
+            started = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            started = datetime.fromisoformat(start_from)
+            if started.tzinfo is None:
+                raise ValueError("start-from must include a timezone offset")
+            started = started.astimezone(zone)
+        with self.connection:
+            for key, value in (
+                ("processing_started_from", started.isoformat()),
+                ("timezone", timezone_name),
+                ("bootstrap_version", BOOTSTRAP_VERSION),
+            ):
+                self.connection.execute(
+                    "INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                    "updated_at=excluded.updated_at",
+                    (key, value, _timestamp()),
+                )
+        return started
+
+    @staticmethod
+    def _provider_state_key(base: str, provider: str) -> str:
+        return base if provider == "outlook" else f"{base}:{provider}"
+
+    def cursor(
+        self, *, overlap_minutes: int = 5, provider: str = "outlook"
+    ) -> dict[str, Any]:
+        if not 0 <= overlap_minutes <= 60:
+            raise ValueError("poll overlap must be between 0 and 60 minutes")
+        started = self.get_system_value("processing_started_from")
+        if not started:
+            raise ValueError("mail state has not been bootstrapped")
+        last = self.get_system_value(
+            self._provider_state_key("last_successful_poll_at", provider)
+        )
+        next_fetch = (
+            datetime.fromisoformat(last) - timedelta(minutes=overlap_minutes)
+            if last else datetime.fromisoformat(started)
+        )
+        return {
+            "processing_started_from": datetime.fromisoformat(started),
+            "last_successful_poll_at": (
+                datetime.fromisoformat(last) if last else None
+            ),
+            "overlap_minutes": overlap_minutes,
+            "next_fetch_from": next_fetch,
+            "timezone": self.get_system_value("timezone"),
+            "provider": provider,
+        }
+
+    def mark_successful_poll(
+        self, value: datetime | None = None, *, provider: str = "outlook"
+    ) -> datetime:
+        completed = value or _now()
+        if completed.tzinfo is None:
+            raise ValueError("successful poll timestamp must be timezone-aware")
+        self.set_system_value(
+            self._provider_state_key("last_successful_poll_at", provider),
+            completed.isoformat(),
+        )
+        return completed
+
+    def record_provider_run(
+        self, run_id: str, *, provider: str, status: str,
+        fetched_messages: int = 0, error: BaseException | None = None,
+    ) -> None:
+        error_type = type(error).__name__ if error else None
+        error_message = "provider fetch failed" if error else None
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO provider_runs(run_id,provider,status,fetched_messages,"
+                "error_type,error_message,updated_at) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id,provider) DO UPDATE SET status=excluded.status,"
+                "fetched_messages=excluded.fetched_messages,error_type=excluded.error_type,"
+                "error_message=excluded.error_message,updated_at=excluded.updated_at",
+                (run_id, provider, status, fetched_messages, error_type,
+                 error_message, _timestamp()),
+            )
+
+    def acquire_scheduled_lock(
+        self, owner: str, *, name: str = "outlook", stale_after: timedelta = timedelta(minutes=35),
+        now: datetime | None = None,
+    ) -> bool:
+        current = now or _now()
+        with self.connection:
+            row = self.connection.execute(
+                "SELECT owner,acquired_at FROM scheduled_locks WHERE name=?",
+                (name,),
+            ).fetchone()
+            if row:
+                try:
+                    stale = datetime.fromisoformat(row["acquired_at"]) <= current - stale_after
+                except ValueError:
+                    stale = True
+                if not stale:
+                    return False
+                self.connection.execute(
+                    "DELETE FROM scheduled_locks WHERE name=?", (name,)
+                )
+            try:
+                self.connection.execute(
+                    "INSERT INTO scheduled_locks(name,owner,acquired_at) VALUES(?,?,?)",
+                    (name, owner, current.isoformat()),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def release_scheduled_lock(self, owner: str, *, name: str = "outlook") -> None:
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM scheduled_locks WHERE name=? AND owner=?",
+                (name, owner),
             )
 
     def decision(
@@ -150,6 +392,23 @@ class MailStateStore:
             "SELECT * FROM processed_messages WHERE provider=? AND message_id=?",
             (message.provider, message.message_id),
         ).fetchone()
+        if row is None and message.message_id.startswith(f"{message.provider}:"):
+            legacy_id = message.message_id.removeprefix(f"{message.provider}:")
+            legacy = self.connection.execute(
+                "SELECT 1 FROM processed_messages WHERE provider=? AND message_id=?",
+                (message.provider, legacy_id),
+            ).fetchone()
+            if legacy is not None:
+                with self.connection:
+                    self.connection.execute(
+                        "UPDATE processed_messages SET message_id=?,content_hash=? "
+                        "WHERE provider=? AND message_id=?",
+                        (message.message_id, digest, message.provider, legacy_id),
+                    )
+                row = self.connection.execute(
+                    "SELECT * FROM processed_messages WHERE provider=? AND message_id=?",
+                    (message.provider, message.message_id),
+                ).fetchone()
         if row is None:
             return ProcessingDecision(True, "new", digest)
         if reprocess:
@@ -294,7 +553,8 @@ class MailStateStore:
             )
         }
         last = self.connection.execute(
-            "SELECT finished_at,duration_ms FROM runs WHERE status='completed' "
+            "SELECT run_id,finished_at,duration_ms FROM runs "
+            "WHERE status IN ('completed','completed_with_errors') "
             "ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
         processed_at = self.connection.execute(
@@ -305,6 +565,14 @@ class MailStateStore:
             "last_successful_run": last["finished_at"] if last else None,
             "last_run_duration_ms": last["duration_ms"] if last else None,
             "last_processed_message_time": processed_at,
+            "provider_results": (
+                [dict(row) for row in self.connection.execute(
+                    "SELECT provider,status,fetched_messages,error_type "
+                    "FROM provider_runs WHERE run_id=? ORDER BY provider",
+                    (last["run_id"],),
+                )]
+                if last else []
+            ),
         }
 
     def recent(self, limit: int = 20) -> list[sqlite3.Row]:
@@ -313,6 +581,19 @@ class MailStateStore:
             "final_classification,last_processed_at,retry_count,last_error_type "
             "FROM processed_messages ORDER BY first_seen_at DESC LIMIT ?", (limit,)
         ))
+
+    def retryable_message_ids(
+        self, *, provider: str = "outlook", limit: int = 50
+    ) -> list[str]:
+        return [
+            str(row["message_id"])
+            for row in self.connection.execute(
+                "SELECT message_id FROM processed_messages "
+                "WHERE provider=? AND processing_status='retryable' "
+                "ORDER BY last_processed_at ASC LIMIT ?",
+                (provider, max(0, limit)),
+            )
+        ]
 
     def reset_message(self, provider: str, message_id: str) -> bool:
         with self.connection:

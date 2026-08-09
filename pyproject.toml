@@ -5,6 +5,9 @@ description = "Decision-centric audit and exploration framework for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "google-api-python-client>=2.170,<3",
+    "google-auth-httplib2>=0.2,<1",
+    "google-auth-oauthlib>=1.2,<2",
     "msal>=1.32,<2",
     "openai>=1.0,<3",
     "pytest>=8,<10",

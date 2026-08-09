@@ -497,8 +497,309 @@ before analysis, but become `processed` only after the JSONL atomic rename has
 succeeded; temporary LLM failures remain `retryable`. State changes use SQLite
 transactions per message. If there are no new messages, the command prints
 `No new messages to process.`, records a completed run, and does not create or
-replace the requested JSONL file. Scheduling with systemd or cron is deliberately
-left for a later step.
+replace the requested JSONL file.
+
+### Scheduled Outlook polling with systemd
+
+The optional systemd **user** timer runs the read-only Outlook (and optionally
+Gmail) → local Qwen → Validator → pending Calendar Agent proposal flow at
+07:30, 12:30, and 18:30
+Asia/Tokyo. It never installs a root/system-wide service, writes to a real
+calendar, or sends LINE notifications. `Persistent=true` lets systemd run a
+missed timer after the Mini PC starts again.
+
+On first installation, SQLite deterministically bootstraps
+`processing_started_from` to 00:00 of the current day in the configured local
+timezone. Older mail is not fetched. Override the initial value once with
+`--start-from today` or an offset-bearing ISO timestamp. An existing value is
+never replaced unless `--reset-start-from` is explicitly supplied.
+
+Subsequent runs fetch from `last_successful_poll_at` minus five minutes, while
+SQLite message state—not the cursor—remains responsible for duplicate
+elimination. Change the overlap with `--poll-overlap-minutes 0..60`. The cursor
+advances only after Graph fetch, analysis, atomic JSONL output, and SQLite state
+updates succeed. Individual retryable LLM errors may produce
+`completed_with_errors` and advance the cursor because their messages remain
+`retryable`. Failed Graph/output/state operations do not advance it. When the
+50-message safety cap is reached, the cursor advances only to the newest
+returned message so later runs can drain the remainder.
+
+```bash
+uv run mail-calendar-orchestrator state cursor
+uv run mail-calendar-orchestrator run-scheduled --generate-explorer
+```
+
+Each non-empty run writes distinct JSONL (and optionally Explorer HTML) under
+`~/.local/share/agentledger/runs/`. Empty runs create no JSONL. Scheduled mode
+first performs a lightweight localhost Ollama/model check without inference.
+Defaults are LLM-first, Qwen `qwen3:8b`, thinking disabled, approval required,
+and at most 50 messages. The unit enforces a 30-minute limit. A SQLite lock
+rejects overlapping runs and recovers a stale lock. Failures return non-zero,
+preserve the cursor, and do not disable the timer.
+
+Install and manage the user units explicitly:
+
+```bash
+uv run mail-calendar-orchestrator scheduler install
+# Edit ~/.config/agentledger/mail-calendar.env, then:
+uv run mail-calendar-orchestrator scheduler enable
+uv run mail-calendar-orchestrator scheduler status
+uv run mail-calendar-orchestrator scheduler run-now
+uv run mail-calendar-orchestrator scheduler disable
+uv run mail-calendar-orchestrator scheduler uninstall
+```
+
+Installation creates `~/.config/systemd/user/agentledger-mail.service`,
+`agentledger-mail.timer`, and the mode-`0600`
+`~/.config/agentledger/mail-calendar.env`. Set
+`AGENTLEDGER_MICROSOFT_CLIENT_ID` there. Optional settings are
+`AGENTLEDGER_OLLAMA_MODEL`, `AGENTLEDGER_OLLAMA_BASE_URL`,
+`AGENTLEDGER_STATE_DB`, `AGENTLEDGER_OUTPUT_DIR`, and
+`AGENTLEDGER_TIMEZONE`. Gmail remains disabled by default. After `gmail auth`
+succeeds, enable it with `AGENTLEDGER_GMAIL_ENABLED=true` in this env file or
+pass `--enable-gmail` to `run-scheduled`. Gmail credentials and its independent
+token cache continue to use their existing defaults; `--gmail-credentials`,
+`--gmail-token-cache`, and `--gmail-max-messages` can override them. Never put
+access/refresh tokens in the scheduler env file; Microsoft tokens
+remain in the separate MSAL cache. Existing env files are preserved.
+
+Review privacy-safe summaries and failures in the user journal:
+
+```bash
+journalctl --user -u agentledger-mail.service -n 100 --no-pager
+```
+
+Journal output contains counts, run IDs, paths, and safe error types—not mail
+bodies, subjects, previews, prompts, or tokens. If the timer is unavailable,
+use `scheduler run-now` or `run-scheduled` directly. LINE notification and
+approval remain a later phase; their integration point is the pending Calendar
+Action identified by the stored `calendar_action_id`.
+
+### Approval Queue
+
+Every Calendar Agent Action written with `status=awaiting_approval` is added to
+the SQLite `approval_queue` only after its source AgentLedger JSONL has been
+written atomically. Confirmed actions, clarification requests, and duplicate
+`calendar_action_id` values are not queued. Mail processing state remains in
+`processed_messages`, batch state in `runs`, and human approval state in
+`approval_queue`; SQLite does not replace the AgentLedger audit log.
+
+Queue entries receive short IDs such as `AP-000001` and expire after 72 hours
+by default. Inspect pending decisions without displaying sender addresses,
+message bodies, or previews:
+
+```bash
+uv run mail-calendar-orchestrator approvals list
+uv run mail-calendar-orchestrator approvals show AP-000001
+uv run mail-calendar-orchestrator approvals summary
+```
+
+Resolve one through the reusable Python `ApprovalService` (also exposed by the
+CLI):
+
+```bash
+uv run mail-calendar-orchestrator approvals approve AP-000001 \
+  --actor daichi --reason "Approved"
+
+uv run mail-calendar-orchestrator approvals reject AP-000002 \
+  --actor daichi --reason "Not relevant"
+
+uv run mail-calendar-orchestrator approvals expire
+```
+
+Approve/reject uses the existing `CalendarAgent.resolve` implementation. It
+validates the source Action and IDs, refuses existing Outcome/Human
+Intervention events, and writes a new atomic JSONL; the source run is never
+overwritten. Approval appends an `accept` Human Intervention and a confirmed
+`calendar_event_approved` Outcome. Rejection appends a `reject` intervention
+and contradicted `calendar_event_rejected` Outcome. SQLite conditional state
+transitions ensure only one concurrent CLI or future webhook request succeeds.
+
+`approved` means permission was granted for a future calendar write—it does
+**not** mean a calendar event was created. A future CalendarExecutor will turn
+approved records into actual `calendar_event_created` or failed outcomes.
+Expiry currently changes only Queue status to `expired`; it does not fabricate
+a Human Intervention or Calendar Agent Outcome.
+
+Approval SQLite rows contain IDs, bounded title/date/location, state,
+timestamps, actor/reason (maximum 500 characters), and source/outcome JSONL
+paths. They never contain body text, previews, Graph or LLM raw responses,
+prompts, attachments, or tokens. LINE notification/webhook integration remains
+the next phase and can call `ApprovalService.approve()` or `.reject()` directly.
+
+### Google Calendar execution
+
+Google Calendar writing is a separate, explicit phase after human approval:
+
+```text
+awaiting_approval → approved → executing → calendar_created
+                                      └──→ calendar_failed
+```
+
+`approved` means permission to write; only `calendar_created` means Google
+Calendar accepted the event. Mail scheduled runs never execute this phase.
+Create an event only with an explicit command:
+
+```bash
+uv run mail-calendar-orchestrator approvals execute AP-000001 \
+  --calendar-provider google \
+  --google-calendar-id primary
+```
+
+Approval can optionally be followed immediately by execution, but this is off
+by default:
+
+```bash
+uv run mail-calendar-orchestrator approvals approve AP-000001 \
+  --actor daichi --reason "Approved" --execute
+```
+
+The provider-neutral `CalendarExecutor.create_event()` boundary receives a
+validated `CalendarExecutionRequest`; `GoogleCalendarExecutor` is the first
+implementation. SQLite stores provider, calendar ID, attempts, external event
+ID/link, safe errors, timestamps, and result JSONL in `calendar_execution`.
+Temporary 403 quota errors, 429, 5xx, and network timeouts use finite
+exponential backoff and remain retryable (maximum three execution attempts).
+Validation, credentials, permission, calendar-not-found, and malformed response
+errors are permanent. Google authentication failure does not affect Outlook
+polling or the Approval Queue.
+
+Idempotency is enforced twice: SQLite refuses an already `calendar_created`
+Approval, and Google `events.list` searches
+`privateExtendedProperty=agentledger_approval_id=AP-...` before `events.insert`.
+The created event stores private Approval, Action, Candidate, source-provider,
+and hashed source-message identifiers. It sends only title, timezone-aware
+start/end, location, and this minimal description:
+
+```text
+Created by AgentLedger.
+Approval ID: AP-000001
+Source: Outlook mail
+```
+
+It does not send body/preview, sender address, Graph response, Qwen reasoning,
+prompt/evidence, or tokens. Success appends a new confirmed
+`calendar_event_created` Outcome; failure appends
+`calendar_event_creation_failed`. The approved Human Intervention is not
+duplicated, the source JSONL is not overwritten, and Explorer selects the
+newest Outcome.
+
+#### Google OAuth setup
+
+The implementation follows Google's Desktop installed-application flow and
+uses only `https://www.googleapis.com/auth/calendar.events`. The official
+`google-api-python-client`, `google-auth-httplib2`, and
+`google-auth-oauthlib` libraries handle OAuth and token refresh; OAuth is not
+implemented manually.
+
+1. Create/select a project in Google Cloud Console.
+2. Enable the Google Calendar API.
+3. Configure the Google Auth consent screen.
+4. For a personal Google account, select an External audience and add your own
+   account as a test user while the app remains in testing.
+5. Create an OAuth Client ID with application type **Desktop app**.
+6. Download the JSON to
+   `~/.config/agentledger/google_credentials.json`.
+7. Restrict it with `chmod 600`.
+8. Run the authorization command and approve Calendar event access in the
+   browser:
+
+```bash
+mkdir -p ~/.config/agentledger
+chmod 700 ~/.config/agentledger
+chmod 600 ~/.config/agentledger/google_credentials.json
+
+uv run mail-calendar-orchestrator google-calendar auth
+uv run mail-calendar-orchestrator google-calendar status
+```
+
+The refreshable token is stored at
+`~/.config/agentledger/google_calendar_token.json` with mode `0600`. Neither
+file is committed, copied to SQLite/AgentLedger, or printed to the journal.
+Use `AGENTLEDGER_GOOGLE_CALENDAR_ID` to target a dedicated calendar instead of
+`primary`; credentials/token paths also accept
+`AGENTLEDGER_GOOGLE_CREDENTIALS` and `AGENTLEDGER_GOOGLE_TOKEN`.
+
+Google notes that public External apps using user-data scopes may require OAuth
+verification. A personal testing app restricted to configured test users can
+remain in testing, subject to Google's test-user and token-lifetime rules.
+See the official [Python Calendar quickstart](https://developers.google.com/workspace/calendar/api/quickstart/python),
+[Calendar scopes](https://developers.google.com/workspace/calendar/api/auth),
+[events.insert reference](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert),
+and [extended properties guide](https://developers.google.com/workspace/calendar/api/guides/extended-properties).
+
+#### Gmail read-only OAuth check
+
+The same Desktop OAuth client file can also authorize Gmail, but Gmail uses an
+independent token cache and exactly one scope:
+
+```text
+Credentials: ~/.config/agentledger/google_credentials.json
+Gmail token: ~/.config/agentledger/gmail_token.json
+Scope: https://www.googleapis.com/auth/gmail.readonly
+```
+
+Enable the Gmail API in the same Google Cloud project, then authenticate and
+check read-only access:
+
+```bash
+uv run mail-calendar-orchestrator gmail auth
+uv run mail-calendar-orchestrator gmail status
+uv run mail-calendar-orchestrator gmail list --limit 5
+uv run mail-calendar-orchestrator gmail analyze 19fe4ddfaee15750
+```
+
+The access check calls `users.messages.list` with `userId=me` and
+`maxResults=1`; it does not fetch a message body or connect Gmail to the mail
+classification pipeline. The Gmail token is written atomically with mode
+`0600` and is never shared with
+`~/.config/agentledger/google_calendar_token.json`. Credentials and tokens are
+not written to AgentLedger JSONL, SQLite, or command output. Override paths
+with `AGENTLEDGER_GOOGLE_CREDENTIALS` and `AGENTLEDGER_GMAIL_TOKEN` when needed.
+The `gmail list` command prints only the provider-prefixed message ID, received
+time, From header, and Subject header. It requests `format=metadata` with only
+the `From` and `Subject` headers; it does not print or process the body, snippet,
+OAuth token, or client secret. Gmail remains disconnected from Outlook
+processing and scheduled runs.
+
+`gmail analyze` is an explicit, one-message diagnostic command. Pass the raw
+Gmail message ID without the `gmail:` prefix. It fetches that message with
+`format=full`, prefers a non-attachment `text/plain` MIME part, and safely
+converts `text/html` only when plain text is absent. It then runs the existing
+local Qwen/Validator pipeline in `llm-first` mode. The command prints only the
+provider-prefixed ID, final classification, candidate decision, normalized
+candidate fields, confidence, and validation issue names. It does not create an
+Approval, send LINE messages, write Calendar events, update scheduled-run state,
+or write AgentLedger JSONL. Full mail content, attachments, raw model output,
+OAuth tokens, and client secrets are not printed or saved by this command.
+
+After manual verification, scheduled Gmail ingestion can be enabled explicitly:
+
+```bash
+uv run mail-calendar-orchestrator run-scheduled --enable-gmail
+```
+
+Scheduled Gmail requests use `gmail.readonly`, the `INBOX` label, a provider-
+specific successful-poll cursor (with the same overlap window as Outlook), and
+the configured maximum message count. Gmail returns `gmail:<id>` and Outlook
+returns `outlook:<id>` as canonical message IDs. SQLite keys processed state by
+both provider and canonical ID, so the same raw provider ID cannot collide.
+Both providers feed the same `EmailMessage` → Qwen → Validator → Candidate →
+Approval/LINE path. Mail is never marked read, changed, or deleted.
+
+Provider fetches are isolated. If one provider fails, messages already fetched
+from the other are still processed; only the successful provider cursor moves.
+The run becomes `completed_with_errors`, and safe provider status/error-type
+summaries are recorded in SQLite and printed by `run-scheduled` and
+`state summary`. If all enabled providers fail, the run is recorded as failed
+and exits non-zero. Provider exception details, mail bodies, tokens, and raw LLM
+responses are not stored in the provider summary.
+
+Google classifies `gmail.readonly` as a restricted scope. Keep the OAuth app in
+an appropriate testing configuration for personal use and review Google's
+verification and data-handling requirements before broader deployment. See
+the official [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
+and [`users.messages.list` reference](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list).
 
 Only one email is analyzed per Ollama request. The input contains sender,
 subject, received time, bounded body text (6000 characters by default, maximum
@@ -538,9 +839,11 @@ Validator distinguishes the model's `llm_proposed_classification` from the
 normalized `final_classification` and records `classification_corrections`.
 Sentinel security types such as `"none"` are treated as null. A security
 classification requires a security category, a real notification type, or a
-deterministically recognized security phrase. Non-candidates
-(`candidate_type=none` and `should_create_calendar_candidate=false`) do not run
-irrelevant date/time/duration grounding checks.
+deterministically recognized security phrase. `final_classification` is the
+canonical semantic proposal; the internal `should_create_calendar_candidate`
+value is derived from it rather than generated separately by the LLM.
+Non-candidates (`candidate_type=none` and a non-calendar final classification)
+do not run irrelevant date/time/duration grounding checks.
 
 In `llm-first`, connection refusal, timeout, missing model, HTTP failure, empty or
 oversized response, invalid JSON, and schema failure fall back conservatively
@@ -663,3 +966,126 @@ described according to the policy mode actually used:
 The simulation is a research integration. Domain-specific market rules,
 metrics, and cycle detection remain under `src/circular_coffee/`; generic audit
 and Explorer behavior belongs under `src/agentledger/`.
+## LINE approval UI
+
+LINE Messaging API can be used as a narrow approval UI for pending calendar
+candidates. LINE only sends notifications and postback decisions; mail analysis,
+LLM classification, approval state, and calendar execution remain in the existing
+local services.
+
+Create the private configuration file (created with mode `0600`):
+
+```bash
+uv run mail-calendar-orchestrator line init-config
+```
+
+Edit `~/.config/agentledger/line-approval.env`:
+
+```dotenv
+LINE_CHANNEL_SECRET=
+LINE_CHANNEL_ACCESS_TOKEN=
+LINE_ALLOWED_USER_ID=
+```
+
+Check configuration without printing values, then send a harmless test message:
+
+```bash
+uv run mail-calendar-orchestrator line status
+uv run mail-calendar-orchestrator line test-message
+```
+
+Send an awaiting approval manually and run the local webhook server:
+
+```bash
+uv run mail-calendar-orchestrator line notify AP-000001
+uv run mail-calendar-orchestrator line webhook --host 127.0.0.1 --port 8787
+curl http://127.0.0.1:8787/health
+```
+
+The webhook endpoint is `POST /line/webhook`. Keep it bound to localhost and
+publish it through a secure HTTPS tunnel such as Cloudflare Tunnel or Tailscale
+Funnel. Do not expose the Mini PC with router port forwarding. LINE requires a
+publicly reachable HTTPS webhook URL. The long-running webhook should use a
+separate user service (for example `agentledger-line-webhook.service`); keep it
+separate from the existing oneshot mail timer so a LINE outage cannot stop mail
+analysis.
+
+LINE Developers setup:
+
+1. Create a Provider and a Messaging API channel in LINE Developers, linked to a
+   LINE Official Account.
+2. Copy the Channel secret and issue a channel access token.
+3. Add the Official Account as a friend.
+4. Obtain your own user ID from the `source.userId` of a one-to-one webhook event;
+   handle it only during setup and do not leave the full ID in normal logs.
+5. Fill the private env file and run `line status`.
+6. Configure the tunnel HTTPS URL ending in `/line/webhook`, enable **Use webhook**
+   and webhook redelivery, then run the console webhook verification.
+7. Run `line test-message`, create an awaiting approval, and run `line notify`.
+
+Webhook signatures are verified against the exact raw body before JSON parsing.
+Only the configured one-to-one LINE user is accepted. Approval buttons carry a
+random one-time token; SQLite stores only its SHA-256 hash and rejects expired,
+modified, consumed, or replayed interactions. `webhookEventId` provides an
+additional redelivery guard. Notifications contain only the title, date/time,
+duration, location, source provider, short decision summary, and approval ID—not
+mail bodies, sender addresses, source message IDs, prompts, evidence, reasoning,
+credentials, or raw webhook payloads.
+
+### Run the LINE webhook with systemd --user
+
+The webhook can run as a user service independently from the mail scheduler.
+Installation writes `~/.config/systemd/user/agentledger-line-webhook.service`
+atomically and runs `systemctl --user daemon-reload`; it does not start the
+service automatically. The existing LINE env file must exist and is kept at
+mode `0600`. Secrets are referenced with `EnvironmentFile` and are never copied
+into the unit.
+
+If the manual webhook is already using port 8787, stop it with Ctrl+C first.
+Then install, enable, and inspect the service:
+
+```bash
+uv run mail-calendar-orchestrator line service install
+uv run mail-calendar-orchestrator line service enable
+uv run mail-calendar-orchestrator line service status
+```
+
+Additional management commands are:
+
+```bash
+uv run mail-calendar-orchestrator line service restart
+uv run mail-calendar-orchestrator line service disable
+uv run mail-calendar-orchestrator line service uninstall
+```
+
+`uninstall` removes only the systemd unit; it does not remove
+`~/.config/agentledger/line-approval.env`. Verify the local endpoint and recent
+journal messages with:
+
+```bash
+curl http://127.0.0.1:8787/health
+journalctl --user -u agentledger-line-webhook.service -n 30
+```
+
+User services can depend on a login session. To keep the webhook running after
+the Mini PC boots without an interactive login, enable linger manually when
+needed (the installer never runs sudo):
+
+```bash
+sudo loginctl enable-linger daichi
+loginctl show-user daichi -p Linger
+```
+
+This service binds only to `127.0.0.1:8787`. It does not manage cloudflared.
+The current development route remains:
+
+```text
+LINE
+  → trycloudflare.com
+  → cloudflared Quick Tunnel
+  → 127.0.0.1:8787
+```
+
+The webhook service may be active and healthy while LINE still cannot reach it
+if the separate Quick Tunnel has stopped. Running Quick Tunnel under systemd or
+using a fixed custom domain is intentionally left for a later phase.

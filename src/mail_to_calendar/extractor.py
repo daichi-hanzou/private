@@ -6,7 +6,9 @@ from datetime import datetime, timedelta
 
 from calendar_agent.models import CalendarRequest
 
-from .models import CalendarCandidate, EmailMessage, ImportanceResult
+from .models import (
+    CalendarCandidate, EmailMessage, ImportanceResult, canonical_message_id,
+)
 from .time_normalization import normalize_calendar_datetime
 
 
@@ -86,7 +88,7 @@ class RuleBasedCalendarExtractor:
             clarification = True
         duration = 60 if candidate_type == "event" and start else None
         digest = hashlib.sha256(
-            f"{message.provider}:{message.message_id}".encode()
+            canonical_message_id(message.provider, message.message_id).encode()
         ).hexdigest()[:12]
         return CalendarCandidate(
             candidate_id=f"calendar-candidate-{digest}",

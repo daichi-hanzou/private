@@ -45,6 +45,26 @@ def test_hash_normalizes_whitespace_and_state_decisions(tmp_path) -> None:
         assert store.decision(original, reprocess=True).process
 
 
+def test_legacy_outlook_id_migrates_without_reprocessing(tmp_path) -> None:
+    legacy = message("legacy-id")
+    canonical = EmailMessage(**{
+        **legacy.__dict__, "message_id": "outlook:legacy-id"
+    })
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.mark_processing(
+            legacy, run_id="old-run", analysis_mode="llm-first",
+            model_name="qwen3:8b",
+        )
+        store.mark_result(legacy, status="processed")
+        decision = store.decision(canonical)
+        assert not decision.process
+        assert decision.reason == "already_processed"
+        row = store.connection.execute(
+            "SELECT message_id FROM processed_messages WHERE provider='outlook'"
+        ).fetchone()
+        assert row["message_id"] == "outlook:legacy-id"
+
+
 def test_retry_failed_retryable_and_stale_transitions(tmp_path) -> None:
     item = message()
     with MailStateStore(tmp_path / "state.sqlite3") as store:

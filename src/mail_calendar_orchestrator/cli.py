@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from mail_to_calendar.microsoft_auth import (
     MicrosoftAuthenticator,
@@ -17,12 +18,51 @@ from mail_to_calendar.outlook_provider import (
 from mail_to_calendar.hybrid_analyzer import HybridMailAnalyzer
 from mail_to_calendar.llm_classifier import LLMCalendarClassifier
 from mail_to_calendar.ollama_client import OllamaClient, OllamaError
+from mail_to_calendar.gmail_auth import (
+    DEFAULT_GMAIL_CREDENTIALS,
+    DEFAULT_GMAIL_TOKEN,
+    GmailReadOnlyAuth,
+)
+from mail_to_calendar.gmail_client import (
+    GmailProviderConfig,
+    GmailReadOnlyClient,
+    ScheduledGmailProvider,
+)
+from mail_to_calendar.classifier import RuleBasedImportanceClassifier
+from mail_to_calendar.extractor import RuleBasedCalendarExtractor
 
 from .service import MailCalendarOrchestrator
+from .scheduler import (
+    DEFAULT_OUTPUT_DIR,
+    SystemdUserScheduler,
+    run_scheduled_batch,
+)
+from .approvals import APPROVAL_STATUSES, ApprovalService
+from calendar_execution.google_auth import (
+    DEFAULT_CREDENTIALS, DEFAULT_TOKEN, GoogleCalendarAuth,
+)
+from calendar_execution.google_calendar import (
+    GoogleCalendarClient, GoogleCalendarExecutor,
+)
+from calendar_execution.service import CalendarExecutionService
+from line_approval.cli import (
+    DEFAULT_LINE_ENV, configuration_status, initialize_config, load_config,
+)
+from line_approval.client import LineMessagingClient, text_message
+from line_approval.service import LineApprovalService
+from line_approval.webhook import serve_webhook
+from line_approval.systemd import LineWebhookSystemdService
 from .state import DEFAULT_STATE_DB, MailStateStore
 
 
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _load_dotenv(path: Path = Path(".env")) -> list[str]:
@@ -185,7 +225,14 @@ def _parser() -> argparse.ArgumentParser:
     check.set_defaults(ollama_thinking=False)
     check.add_argument("--allow-remote-ollama", action="store_true")
     state = commands.add_parser("state", help="Inspect or reset mail state.")
-    state.add_argument("--state-db", type=Path, default=DEFAULT_STATE_DB)
+    state.add_argument(
+        "--state-db", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
+    )
+    state.add_argument(
+        "--timezone", default=os.environ.get("AGENTLEDGER_TIMEZONE", "Asia/Tokyo")
+    )
+    state.add_argument("--poll-overlap-minutes", type=int, default=5)
     state_commands = state.add_subparsers(dest="state_command", required=True)
     state_commands.add_parser("summary")
     recent = state_commands.add_parser("recent")
@@ -193,7 +240,311 @@ def _parser() -> argparse.ArgumentParser:
     reset = state_commands.add_parser("reset-message")
     reset.add_argument("--provider", required=True)
     reset.add_argument("--message-id", required=True)
+    state_commands.add_parser("cursor")
+
+    scheduled = commands.add_parser(
+        "run-scheduled", help="Run one non-interactive mail provider batch."
+    )
+    scheduled.add_argument("--client-id")
+    scheduled.add_argument("--authority", default="https://login.microsoftonline.com/consumers")
+    scheduled.add_argument(
+        "--token-cache", type=Path,
+        default=Path("~/.config/agentledger/microsoft_token_cache.json"),
+    )
+    scheduled.add_argument("--folder", default="inbox")
+    scheduled.add_argument("--max-messages", type=int, default=50)
+    scheduled.add_argument("--poll-overlap-minutes", type=int, default=5)
+    scheduled.add_argument("--start-from", default=None)
+    scheduled.add_argument("--reset-start-from", action="store_true")
+    scheduled.add_argument(
+        "--state-db", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
+    )
+    scheduled.add_argument(
+        "--output-dir", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))),
+    )
+    scheduled.add_argument(
+        "--timezone", default=os.environ.get("AGENTLEDGER_TIMEZONE", "Asia/Tokyo")
+    )
+    scheduled.add_argument("--base-year", type=int, default=datetime.now().year)
+    scheduled.add_argument(
+        "--ollama-base-url",
+        default=os.environ.get("AGENTLEDGER_OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
+    scheduled.add_argument(
+        "--ollama-model",
+        default=os.environ.get("AGENTLEDGER_OLLAMA_MODEL", "qwen3:8b"),
+    )
+    scheduled.add_argument("--ollama-timeout-seconds", type=float, default=120)
+    scheduled.add_argument("--generate-explorer", action="store_true")
+    gmail_toggle = scheduled.add_mutually_exclusive_group()
+    gmail_toggle.add_argument(
+        "--enable-gmail", action="store_true", dest="gmail_enabled"
+    )
+    gmail_toggle.add_argument(
+        "--disable-gmail", action="store_false", dest="gmail_enabled"
+    )
+    scheduled.set_defaults(
+        gmail_enabled=_env_enabled("AGENTLEDGER_GMAIL_ENABLED", False)
+    )
+    scheduled.add_argument(
+        "--gmail-credentials", type=Path,
+        default=Path(os.environ.get(
+            "AGENTLEDGER_GOOGLE_CREDENTIALS", str(DEFAULT_GMAIL_CREDENTIALS)
+        )),
+    )
+    scheduled.add_argument(
+        "--gmail-token-cache", type=Path,
+        default=Path(os.environ.get(
+            "AGENTLEDGER_GMAIL_TOKEN", str(DEFAULT_GMAIL_TOKEN)
+        )),
+    )
+    scheduled.add_argument("--gmail-max-messages", type=int, default=50)
+
+    scheduler = commands.add_parser("scheduler", help="Manage the systemd user timer.")
+    scheduler.add_argument(
+        "--state-db", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
+    )
+    scheduler.add_argument(
+        "--timezone", default=os.environ.get("AGENTLEDGER_TIMEZONE", "Asia/Tokyo")
+    )
+    scheduler.add_argument("--start-from", default=None)
+    scheduler.add_argument("--reset-start-from", action="store_true")
+    scheduler_commands = scheduler.add_subparsers(dest="scheduler_command", required=True)
+    install = scheduler_commands.add_parser("install")
+    install.add_argument("--enable", action="store_true")
+    for name in ("status", "enable", "disable", "uninstall", "run-now"):
+        scheduler_commands.add_parser(name)
+
+    approvals = commands.add_parser("approvals", help="Manage pending calendar approvals.")
+    approvals.add_argument(
+        "--state-db", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
+    )
+    approvals.add_argument(
+        "--output-dir", type=Path,
+        default=Path("~/.local/share/agentledger/approvals"),
+    )
+    approval_commands = approvals.add_subparsers(dest="approval_command", required=True)
+    listing = approval_commands.add_parser("list")
+    listing.add_argument("--status", choices=sorted(APPROVAL_STATUSES))
+    listing.add_argument("--all", action="store_true")
+    listing.add_argument("--limit", type=int, default=20)
+    show = approval_commands.add_parser("show")
+    show.add_argument("approval_id")
+    approval_commands.add_parser("summary")
+    for resolution in ("approve", "reject"):
+        command = approval_commands.add_parser(resolution)
+        command.add_argument("approval_id")
+        command.add_argument("--actor", required=True)
+        command.add_argument("--reason", required=True)
+        if resolution == "approve":
+            command.add_argument("--execute", action="store_true")
+            _add_google_execution_arguments(command)
+    approval_commands.add_parser("expire")
+    execute = approval_commands.add_parser("execute")
+    execute.add_argument("approval_id")
+    _add_google_execution_arguments(execute)
+
+    google = commands.add_parser(
+        "google-calendar", help="Configure Google Calendar OAuth."
+    )
+    google.add_argument(
+        "--credentials", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_GOOGLE_CREDENTIALS", str(DEFAULT_CREDENTIALS))),
+    )
+    google.add_argument(
+        "--token-cache", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_GOOGLE_TOKEN", str(DEFAULT_TOKEN))),
+    )
+    google.add_argument(
+        "--google-calendar-id",
+        default=os.environ.get("AGENTLEDGER_GOOGLE_CALENDAR_ID", "primary"),
+    )
+    google_commands = google.add_subparsers(dest="google_command", required=True)
+    google_commands.add_parser("auth")
+    google_commands.add_parser("status")
+    gmail = commands.add_parser(
+        "gmail", help="Configure Gmail read-only OAuth access."
+    )
+    gmail.add_argument(
+        "--credentials", type=Path,
+        default=Path(os.environ.get(
+            "AGENTLEDGER_GOOGLE_CREDENTIALS", str(DEFAULT_GMAIL_CREDENTIALS)
+        )),
+    )
+    gmail.add_argument(
+        "--token-cache", type=Path,
+        default=Path(os.environ.get(
+            "AGENTLEDGER_GMAIL_TOKEN", str(DEFAULT_GMAIL_TOKEN)
+        )),
+    )
+    gmail_commands = gmail.add_subparsers(dest="gmail_command", required=True)
+    gmail_commands.add_parser("auth")
+    gmail_commands.add_parser("status")
+    gmail_list = gmail_commands.add_parser(
+        "list", help="List bounded Gmail message metadata."
+    )
+    gmail_list.add_argument("--limit", type=int, default=5)
+    gmail_analyze = gmail_commands.add_parser(
+        "analyze", help="Analyze one Gmail message without creating side effects."
+    )
+    gmail_analyze.add_argument("message_id")
+    gmail_analyze.add_argument("--base-year", type=int, default=datetime.now().year)
+    gmail_analyze.add_argument("--timezone", default="Asia/Tokyo")
+    gmail_analyze.add_argument(
+        "--ollama-base-url",
+        default=os.environ.get("AGENTLEDGER_OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
+    gmail_analyze.add_argument(
+        "--ollama-model",
+        default=os.environ.get("AGENTLEDGER_OLLAMA_MODEL", "qwen3:8b"),
+    )
+    gmail_analyze.add_argument("--ollama-timeout-seconds", type=float, default=120)
+    gmail_analyze.add_argument("--llm-confidence-threshold", type=float, default=0.75)
+    gmail_analyze.add_argument("--llm-body-max-chars", type=int, default=6000)
+    gmail_analyze.add_argument("--allow-remote-ollama", action="store_true")
+    line = commands.add_parser("line", help="Manage LINE approval notifications.")
+    line.add_argument("--config", type=Path, default=DEFAULT_LINE_ENV)
+    line.add_argument(
+        "--state-db", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
+    )
+    line.add_argument(
+        "--output-dir", type=Path,
+        default=Path("~/.local/share/agentledger/approvals"),
+    )
+    line.add_argument(
+        "--google-calendar-id",
+        default=os.environ.get("AGENTLEDGER_GOOGLE_CALENDAR_ID", "primary"),
+    )
+    line.add_argument(
+        "--google-credentials", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_GOOGLE_CREDENTIALS", str(DEFAULT_CREDENTIALS))),
+    )
+    line.add_argument(
+        "--google-token-cache", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_GOOGLE_TOKEN", str(DEFAULT_TOKEN))),
+    )
+    line_commands = line.add_subparsers(dest="line_command", required=True)
+    line_commands.add_parser("init-config")
+    line_commands.add_parser("status")
+    line_commands.add_parser("test-message")
+    notify = line_commands.add_parser("notify")
+    notify.add_argument("approval_id")
+    webhook = line_commands.add_parser("webhook")
+    webhook.add_argument("--host", default="127.0.0.1")
+    webhook.add_argument("--port", type=int, default=8787)
+    line_service = line_commands.add_parser(
+        "service", help="Manage the systemd user LINE webhook service."
+    )
+    line_service_commands = line_service.add_subparsers(
+        dest="line_service_command", required=True
+    )
+    for name in ("install", "status", "enable", "disable", "restart", "uninstall"):
+        line_service_commands.add_parser(name)
     return parser
+
+
+def _add_google_execution_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--calendar-provider", choices=("google",), default="google")
+    parser.add_argument(
+        "--google-calendar-id",
+        default=os.environ.get("AGENTLEDGER_GOOGLE_CALENDAR_ID", "primary"),
+    )
+    parser.add_argument(
+        "--google-credentials", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_GOOGLE_CREDENTIALS", str(DEFAULT_CREDENTIALS))),
+    )
+    parser.add_argument(
+        "--google-token-cache", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_GOOGLE_TOKEN", str(DEFAULT_TOKEN))),
+    )
+
+
+def _calendar_execution_service(
+    store: MailStateStore, args: argparse.Namespace
+) -> CalendarExecutionService:
+    auth = GoogleCalendarAuth(args.google_credentials, args.google_token_cache)
+    google_service = auth.build_service(interactive=False)
+    executor = GoogleCalendarExecutor(GoogleCalendarClient(google_service))
+    return CalendarExecutionService(
+        store, executor, output_dir=args.output_dir
+    )
+
+
+def _check_google_event_access(
+    auth: GoogleCalendarAuth, calendar_id: str, *, interactive: bool
+) -> None:
+    try:
+        service = auth.build_service(interactive=interactive)
+        service.events().list(
+            calendarId=calendar_id,
+            maxResults=1,
+            singleEvents=True,
+        ).execute()
+    except Exception as exc:
+        response = getattr(exc, "resp", None)
+        status = getattr(response, "status", None)
+        if status == 403:
+            raise RuntimeError(
+                "Google Calendar event access was denied (403); "
+                "verify the calendar.events permission"
+            ) from exc
+        if isinstance(exc, (OSError, RuntimeError, ValueError)):
+            raise
+        raise RuntimeError("Google Calendar event access check failed") from exc
+
+
+def _check_gmail_read_access(
+    auth: GmailReadOnlyAuth, *, interactive: bool
+) -> None:
+    try:
+        service = auth.build_service(interactive=interactive)
+        service.users().messages().list(
+            userId="me", maxResults=1, includeSpamTrash=False
+        ).execute()
+    except Exception as exc:
+        response = getattr(exc, "resp", None)
+        status = getattr(response, "status", None)
+        if status == 403:
+            raise RuntimeError(
+                "Gmail read access was denied (403); verify the gmail.readonly permission"
+            ) from exc
+        if status == 401:
+            raise RuntimeError(
+                "Gmail authentication was rejected (401); run gmail auth again"
+            ) from exc
+        if isinstance(exc, (OSError, RuntimeError, ValueError)):
+            raise
+        raise RuntimeError("Gmail read access check failed") from exc
+
+
+def _notify_pending_line_best_effort(state_path: str | Path) -> None:
+    """Notify pending approvals without changing the mail batch result."""
+    status = configuration_status(DEFAULT_LINE_ENV)
+    if not all(status.values()):
+        return
+    try:
+        config = load_config(DEFAULT_LINE_ENV)
+        with MailStateStore(state_path) as store:
+            approvals = ApprovalService(store)
+            service = LineApprovalService(
+                store,
+                approvals,
+                LineMessagingClient(config.channel_access_token),
+                channel_secret=config.channel_secret,
+                allowed_user_id=config.allowed_user_id,
+            )
+            for record in approvals.list(status="awaiting_approval", limit=50):
+                try:
+                    service.notify(record.approval_id)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+    except (OSError, RuntimeError, ValueError):
+        return
 
 
 def main() -> None:
@@ -239,18 +590,412 @@ def main() -> None:
                     print(f"Last successful run: {summary['last_successful_run'] or 'none'}")
                     print(f"Last run duration: {summary['last_run_duration_ms'] or 0} ms")
                     print(f"Last processed message time: {summary['last_processed_message_time'] or 'none'}")
+                    for provider_result in summary["provider_results"]:
+                        line = (
+                            f"Provider {provider_result['provider']}: "
+                            f"{provider_result['status']} "
+                            f"(fetched={provider_result['fetched_messages']})"
+                        )
+                        if provider_result["error_type"]:
+                            line += f" error={provider_result['error_type']}"
+                        print(line)
                 elif args.state_command == "recent":
                     print(f"State DB: {store.path}")
                     for row in store.recent(max(1, args.limit)):
                         print("\t".join(str(row[key] or "-") for key in row.keys()))
-                else:
+                elif args.state_command == "reset-message":
                     removed = store.reset_message(args.provider, args.message_id)
                     if not removed:
                         raise ValueError("message state not found")
                     print(f"Reset: {args.provider}/{args.message_id}")
+                else:
+                    cursor = store.cursor(
+                        overlap_minutes=args.poll_overlap_minutes
+                    )
+                    print(f"Processing started from: {cursor['processing_started_from'].isoformat()}")
+                    print(f"Last successful poll: {cursor['last_successful_poll_at'] or 'none'}")
+                    print(f"Overlap: {cursor['overlap_minutes']} minutes")
+                    print(f"Next fetch from: {cursor['next_fetch_from'].isoformat()}")
             return
-        analyzer = None
-        if args.analysis_mode != "rule-only":
+        if args.command == "scheduler":
+            scheduler = SystemdUserScheduler()
+            if args.scheduler_command == "install":
+                with MailStateStore(args.state_db) as store:
+                    started = store.ensure_bootstrap(
+                        timezone_name=args.timezone,
+                        start_from=args.start_from,
+                        reset=args.reset_start_from,
+                    )
+                created = scheduler.install(enable=args.enable)
+                print("Created:")
+                for path in created:
+                    print(path)
+                print(f"Initial processing start: {started.isoformat()}")
+                print("Emails before this time will not be processed.")
+                print("Next runs: 07:30, 12:30, 18:30")
+            elif args.scheduler_command == "status":
+                print(scheduler.status())
+            elif args.scheduler_command == "enable":
+                scheduler.enable()
+            elif args.scheduler_command == "disable":
+                scheduler.disable()
+            elif args.scheduler_command == "uninstall":
+                scheduler.uninstall()
+            else:
+                scheduler.run_now()
+            return
+        if args.command == "line":
+            if args.line_command == "init-config":
+                print(f"LINE config: {initialize_config(args.config)}")
+                return
+            if args.line_command == "status":
+                status = configuration_status(args.config)
+                print(
+                    "Channel secret: "
+                    + ("configured" if status["LINE_CHANNEL_SECRET"] else "missing")
+                )
+                print(
+                    "Access token: "
+                    + ("configured" if status["LINE_CHANNEL_ACCESS_TOKEN"] else "missing")
+                )
+                print(
+                    "Allowed user: "
+                    + ("configured" if status["LINE_ALLOWED_USER_ID"] else "missing")
+                )
+                print("Webhook server: configured")
+                return
+            if args.line_command == "service":
+                manager = LineWebhookSystemdService(env_file=args.config)
+                if args.line_service_command == "install":
+                    print(f"Installed: {manager.install()}")
+                elif args.line_service_command == "status":
+                    print(manager.status())
+                elif args.line_service_command == "enable":
+                    manager.enable()
+                    print("LINE webhook service: enabled")
+                elif args.line_service_command == "disable":
+                    manager.disable()
+                    print("LINE webhook service: disabled")
+                elif args.line_service_command == "restart":
+                    manager.restart()
+                    print("LINE webhook service: restarted")
+                else:
+                    manager.uninstall()
+                    print("LINE webhook service: uninstalled")
+                return
+            config = load_config(args.config)
+            client = LineMessagingClient(config.channel_access_token)
+            if args.line_command == "test-message":
+                result = client.push(
+                    config.allowed_user_id,
+                    text_message("AgentLedger LINE integration test"),
+                )
+                if not result.success:
+                    raise RuntimeError(result.error_message or "LINE test message failed")
+                print("LINE test message: sent")
+                return
+            with MailStateStore(args.state_db) as store:
+                approvals = ApprovalService(store, output_dir=args.output_dir)
+                calendar_service = None
+                if args.line_command == "webhook":
+                    calendar_service = _calendar_execution_service(store, args)
+                service = LineApprovalService(
+                    store, approvals, client,
+                    channel_secret=config.channel_secret,
+                    allowed_user_id=config.allowed_user_id,
+                    calendar_service=calendar_service,
+                    calendar_id=args.google_calendar_id,
+                )
+                if args.line_command == "notify":
+                    result = service.notify(args.approval_id)
+                    if not result.success:
+                        raise RuntimeError(
+                            result.error_message or "LINE notification failed"
+                        )
+                    print(f"LINE notification: sent ({args.approval_id})")
+                else:
+                    print(f"LINE webhook: http://{args.host}:{args.port}")
+                    serve_webhook(service, host=args.host, port=args.port)
+            return
+        if args.command == "approvals":
+            with MailStateStore(args.state_db) as store:
+                approval_service = ApprovalService(
+                    store, output_dir=args.output_dir
+                )
+                if args.approval_command == "list":
+                    status = None if args.all else (args.status or "awaiting_approval")
+                    records = approval_service.list(status=status, limit=args.limit)
+                    print("Approval ID\tDate\tTime\tTitle\tStatus")
+                    for record in records:
+                        print(
+                            f"{record.approval_id}\t{record.date or '-'}\t"
+                            f"{record.start or '-'}\t{record.title}\t{record.status}"
+                        )
+                elif args.approval_command == "show":
+                    record = approval_service.get(args.approval_id)
+                    message_id = record.source_message_id or "-"
+                    safe_message_id = (
+                        message_id if len(message_id) <= 12
+                        else f"{message_id[:6]}…{message_id[-4:]}"
+                    )
+                    print(f"Approval ID: {record.approval_id}")
+                    print(f"Title: {record.title}")
+                    print(f"Date/time: {record.date or '-'} {record.start or '-'}")
+                    print(f"Duration: {record.duration_minutes or '-'}")
+                    print(f"Location: {record.location or '-'}")
+                    print(f"Candidate type: {record.candidate_type}")
+                    print(f"Decision summary: {record.classification_summary or '-'}")
+                    print(f"Source provider: {record.source_provider or '-'}")
+                    print(f"Source message ID: {safe_message_id}")
+                    print(f"Created at: {record.created_at.isoformat()}")
+                    print(f"Expires at: {record.expires_at.isoformat() if record.expires_at else '-'}")
+                    print(f"Status: {record.status}")
+                    print(f"Source JSONL: {record.source_jsonl_path}")
+                elif args.approval_command == "summary":
+                    summary = approval_service.summary()
+                    for status in sorted(APPROVAL_STATUSES):
+                        print(f"{status.replace('_', ' ').title()}: {summary[status]}")
+                    print(f"Oldest pending: {summary['oldest_pending'] or '-'}")
+                    print(f"Newest pending: {summary['newest_pending'] or '-'}")
+                elif args.approval_command == "approve":
+                    record = approval_service.approve(
+                        args.approval_id, args.actor, args.reason
+                    )
+                    print(f"Approved: {record.approval_id}")
+                    print(f"Output: {record.outcome_jsonl_path}")
+                    if args.execute:
+                        result = _calendar_execution_service(store, args).execute(
+                            record.approval_id,
+                            provider=args.calendar_provider,
+                            calendar_id=args.google_calendar_id,
+                        )
+                        print(
+                            f"Calendar execution: "
+                            f"{'created' if result.success else 'failed'}"
+                        )
+                        if not result.success:
+                            raise RuntimeError("Google Calendar execution failed")
+                elif args.approval_command == "reject":
+                    record = approval_service.reject(
+                        args.approval_id, args.actor, args.reason
+                    )
+                    print(f"Rejected: {record.approval_id}")
+                    print(f"Output: {record.outcome_jsonl_path}")
+                elif args.approval_command == "expire":
+                    print(f"Expired: {approval_service.expire()}")
+                else:
+                    result = _calendar_execution_service(store, args).execute(
+                        args.approval_id, provider=args.calendar_provider,
+                        calendar_id=args.google_calendar_id,
+                    )
+                    print(f"Calendar execution: {'created' if result.success else 'failed'}")
+                    print(f"External event ID: {result.external_event_id or '-'}")
+                    if not result.success:
+                        raise RuntimeError("Google Calendar execution failed")
+            return
+        if args.command == "google-calendar":
+            auth = GoogleCalendarAuth(args.credentials, args.token_cache)
+            if args.google_command == "status":
+                status = auth.status()
+                print(
+                    "Credentials file: "
+                    + ("found" if status["credentials_found"] else "missing")
+                )
+                print(
+                    "Token cache: "
+                    + ("found" if status["token_found"] else "missing")
+                )
+                print(f"Calendar ID: {args.google_calendar_id}")
+                if status["credentials_found"] and status["token_found"]:
+                    _check_google_event_access(
+                        auth, args.google_calendar_id, interactive=False
+                    )
+                    print("Authentication: available")
+                    print("Event access: available")
+                else:
+                    print("Authentication: authorization required")
+                    print("Event access: unavailable")
+            else:
+                _check_google_event_access(
+                    auth, args.google_calendar_id, interactive=True
+                )
+                print("Google Calendar authentication: available")
+                print(f"Calendar ID: {args.google_calendar_id}")
+                print("Event access: available")
+            return
+        if args.command == "gmail":
+            auth = GmailReadOnlyAuth(args.credentials, args.token_cache)
+            if args.gmail_command == "status":
+                status = auth.status()
+                print(
+                    "Credentials file: "
+                    + ("found" if status["credentials_found"] else "missing")
+                )
+                print(
+                    "Gmail token cache: "
+                    + ("found" if status["token_found"] else "missing")
+                )
+                if status["credentials_found"] and status["token_found"]:
+                    _check_gmail_read_access(auth, interactive=False)
+                    print("Authentication: available")
+                    print("Gmail read-only access: available")
+                else:
+                    print("Authentication: authorization required")
+                    print("Gmail read-only access: unavailable")
+            elif args.gmail_command == "auth":
+                _check_gmail_read_access(auth, interactive=True)
+                print("Gmail authentication: available")
+                print("Gmail read-only access: available")
+            elif args.gmail_command == "list":
+                service = auth.build_service(interactive=False)
+                summaries = GmailReadOnlyClient(service).list_messages(
+                    limit=args.limit
+                )
+                print("Message ID\tReceived at\tFrom\tSubject")
+                for message in summaries:
+                    print(
+                        f"{message.message_id}\t{message.received_at}\t"
+                        f"{message.sender}\t{message.subject}"
+                    )
+            else:
+                service = auth.build_service(interactive=False)
+                message = GmailReadOnlyClient(service).get_message(args.message_id)
+                client = OllamaClient(
+                    base_url=args.ollama_base_url,
+                    model=args.ollama_model,
+                    timeout_seconds=args.ollama_timeout_seconds,
+                    thinking=False,
+                    allow_remote=args.allow_remote_ollama,
+                )
+                analyzer = HybridMailAnalyzer(
+                    LLMCalendarClassifier(
+                        client, max_body_chars=args.llm_body_max_chars
+                    ),
+                    base_year=args.base_year,
+                    timezone=args.timezone,
+                    mode="llm-first",
+                    confidence_threshold=args.llm_confidence_threshold,
+                    require_llm=True,
+                )
+                importance = RuleBasedImportanceClassifier().classify(message)
+                candidate = RuleBasedCalendarExtractor(
+                    base_year=args.base_year, timezone=args.timezone
+                ).extract(message, importance)
+                analysis = analyzer.analyze(message, importance, candidate)
+                normalized = analysis.final_candidate
+                print(f"Message ID: {message.message_id}")
+                print(f"Final classification: {analysis.final_classification}")
+                print(f"Candidate allowed: {'yes' if normalized else 'no'}")
+                print(f"Confidence: {analysis.confidence:.2f}")
+                if normalized:
+                    print(f"Candidate type: {normalized.candidate_type}")
+                    print(f"Title: {normalized.title}")
+                    print(f"Date: {normalized.date or 'not recorded'}")
+                    print(f"Start: {normalized.start or 'not recorded'}")
+                    print(f"End: {normalized.end or 'not recorded'}")
+                    print(
+                        "Duration minutes: "
+                        + (
+                            str(normalized.duration_minutes)
+                            if normalized.duration_minutes is not None
+                            else "not recorded"
+                        )
+                    )
+                    print(f"Timezone: {normalized.timezone}")
+                    print(f"Location: {normalized.location or 'not recorded'}")
+                print(
+                    "Validation issues: "
+                    + (", ".join(analysis.validation_issues) or "none")
+                )
+            return
+        if args.command == "run-scheduled":
+            if not 1 <= args.max_messages <= 100:
+                raise ValueError("max_messages must be between 1 and 100")
+            client_id = args.client_id or os.environ.get("AGENTLEDGER_MICROSOFT_CLIENT_ID")
+            if not client_id:
+                raise ValueError("Microsoft client ID is required via environment")
+            state_store = MailStateStore(args.state_db)
+            state_store.ensure_bootstrap(
+                timezone_name=args.timezone, start_from=args.start_from,
+                reset=args.reset_start_from,
+            )
+            cursor = state_store.cursor(
+                overlap_minutes=args.poll_overlap_minutes, provider="outlook"
+            )
+            client = OllamaClient(
+                base_url=args.ollama_base_url, model=args.ollama_model,
+                timeout_seconds=args.ollama_timeout_seconds, thinking=False,
+            )
+            check = client.check_model()
+            if not check.model_available:
+                raise OllamaError(f"Ollama model is not installed: {args.ollama_model}")
+            analyzer = HybridMailAnalyzer(
+                LLMCalendarClassifier(client), base_year=args.base_year,
+                timezone=args.timezone, mode="llm-first",
+            )
+            config = OutlookProviderConfig(
+                client_id=client_id, authority=args.authority, scopes=["Mail.Read"],
+                token_cache_path=args.token_cache, folder=args.folder,
+                max_messages=args.max_messages, unread_only=False,
+                received_after=cursor["next_fetch_from"], include_body=True,
+            )
+            authenticator = MicrosoftAuthenticator(
+                client_id=config.client_id, authority=config.authority,
+                scopes=config.scopes, token_cache_path=config.token_cache_path,
+            )
+            provider = OutlookProvider(config, authenticator=authenticator)
+            scheduled_providers = {"outlook": provider}
+            if args.gmail_enabled:
+                if not 1 <= args.gmail_max_messages <= 100:
+                    raise ValueError(
+                        "gmail_max_messages must be between 1 and 100"
+                    )
+                gmail_cursor = state_store.cursor(
+                    overlap_minutes=args.poll_overlap_minutes,
+                    provider="gmail",
+                )
+                gmail_auth = GmailReadOnlyAuth(
+                    args.gmail_credentials, args.gmail_token_cache
+                )
+                scheduled_providers["gmail"] = ScheduledGmailProvider(
+                    gmail_auth,
+                    GmailProviderConfig(
+                        max_messages=args.gmail_max_messages,
+                        received_after=gmail_cursor["next_fetch_from"],
+                    ),
+                )
+            orchestrator = MailCalendarOrchestrator(
+                base_year=args.base_year, timezone=args.timezone,
+                analyzer=analyzer, state_store=state_store,
+                analysis_mode="llm-first", model_name=args.ollama_model,
+            )
+            scheduled_result = run_scheduled_batch(
+                providers=scheduled_providers, orchestrator=orchestrator,
+                state_store=state_store, output_dir=args.output_dir,
+                overlap_minutes=args.poll_overlap_minutes,
+                generate_explorer=args.generate_explorer,
+                now=datetime.now(ZoneInfo(args.timezone)),
+            )
+            result = scheduled_result.orchestration
+            print("Mode: scheduled read-only Outlook / pending local proposals")
+            print(f"Fetch from: {scheduled_result.fetch_from.isoformat()}")
+            for name, provider_result in (
+                scheduled_result.provider_results or {}
+            ).items():
+                line = (
+                    f"Provider {name}: {provider_result['status']} "
+                    f"(fetched={provider_result['fetched_messages']})"
+                )
+                if provider_result.get("error_type"):
+                    line += f" error={provider_result['error_type']}"
+                print(line)
+            if scheduled_result.html_path:
+                print(f"Explorer: {scheduled_result.html_path}")
+            provider = None
+        else:
+            provider = None
+            analyzer = None
+        if args.command != "run-scheduled" and args.analysis_mode != "rule-only":
             client = OllamaClient(
                 base_url=args.ollama_base_url,
                 model=args.ollama_model,
@@ -268,20 +1013,20 @@ def main() -> None:
                 confidence_threshold=args.llm_confidence_threshold,
                 require_llm=args.require_llm,
             )
-        else:
+        elif args.command != "run-scheduled":
             analyzer = HybridMailAnalyzer(
                 None,
                 base_year=args.base_year,
                 timezone=args.timezone,
                 mode="rule-only",
             )
-        state_store = None if args.no_state else MailStateStore(args.state_db)
-        orchestrator = MailCalendarOrchestrator(
+        if args.command != "run-scheduled":
+            state_store = None if args.no_state else MailStateStore(args.state_db)
+            orchestrator = MailCalendarOrchestrator(
             base_year=args.base_year, timezone=args.timezone, analyzer=analyzer,
             state_store=state_store, analysis_mode=args.analysis_mode,
             model_name=args.ollama_model if args.analysis_mode != "rule-only" else None,
-        )
-        provider = None
+            )
         if args.command == "process":
             result = orchestrator.process(
                 args.input,
@@ -291,7 +1036,7 @@ def main() -> None:
                 reprocess=args.reprocess,
                 retry_failed=args.retry_failed,
             )
-        else:
+        elif args.command == "outlook":
             client_id = args.client_id or os.environ.get(
                 "AGENTLEDGER_MICROSOFT_CLIENT_ID"
             )
@@ -353,6 +1098,8 @@ def main() -> None:
             f"{mask_account(provider.authenticated_account)}\n"
             f"Fetched messages: {result.fetched_messages}"
         )
+    if args.command == "run-scheduled" and result.state_db:
+        _notify_pending_line_best_effort(result.state_db)
     if result.new_messages == 0:
         print("No new messages to process.")
     print(
@@ -378,9 +1125,10 @@ def main() -> None:
         f"Invalid: {result.invalid_messages}\n"
         f"Retryable failures: {result.retryable_failures}\n"
         f"Permanent failures: {result.permanent_failures}\n"
+        f"Approvals created: {result.approvals_created}\n"
         f"Run ID: {result.run_id or '-'}\n"
         f"State DB: {result.state_db or 'disabled'}\n"
-        f"Mode: {'analysis only' if result.analysis_only else args.analysis_mode}\n"
+        f"Mode: {'analysis only' if result.analysis_only else getattr(args, 'analysis_mode', 'llm-first')}\n"
         f"Output: {result.output_path}"
     )
     if state_store is not None:

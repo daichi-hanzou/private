@@ -35,3 +35,4 @@ class OrchestrationResult:
     permanent_failures: int = 0
     run_id: str | None = None
     state_db: Path | None = None
+    approvals_created: int = 0

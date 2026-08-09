@@ -12,7 +12,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from .microsoft_auth import TokenProvider
-from .models import EmailMessage
+from .models import EmailMessage, canonical_message_id
 
 
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
@@ -240,7 +240,8 @@ class OutlookProvider:
         if not message_id:
             raise ValueError("message_id is required")
         token = self.authenticator.acquire_token()
-        url = f"{GRAPH_ROOT}/me/messages/{quote(message_id, safe='')}"
+        raw_message_id = message_id.removeprefix("outlook:")
+        url = f"{GRAPH_ROOT}/me/messages/{quote(raw_message_id, safe='')}"
         payload = self._get_json(
             url,
             token=token,
@@ -263,6 +264,7 @@ class OutlookProvider:
             filters.append("isRead eq false")
         if filters:
             params["$filter"] = " and ".join(filters)
+            params["$orderby"] = "receivedDateTime asc"
         else:
             params["$orderby"] = "receivedDateTime desc"
         return params
@@ -360,7 +362,7 @@ class OutlookProvider:
         preview = raw.get("bodyPreview")
         return EmailMessage(
             provider="outlook",
-            message_id=str(raw["id"]),
+            message_id=canonical_message_id("outlook", str(raw["id"])),
             thread_id=(
                 str(raw["conversationId"])
                 if raw.get("conversationId") is not None

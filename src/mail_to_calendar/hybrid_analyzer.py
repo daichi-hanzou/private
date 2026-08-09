@@ -6,7 +6,9 @@ from typing import Literal
 
 from .llm_classifier import LLMCalendarClassifier
 from .llm_models import HybridAnalysisResult, LLMAnalysisInput
-from .models import CalendarCandidate, EmailMessage, ImportanceResult
+from .models import (
+    CalendarCandidate, EmailMessage, ImportanceResult, canonical_message_id,
+)
 from .ollama_client import OllamaError
 from .validator import LLMResultValidator
 
@@ -142,6 +144,7 @@ class HybridMailAnalyzer:
             llm.final_classification,
             checked.classification_corrections,
             checked.time_normalization,
+            llm.summary(),
         )
 
     def _should_use_llm(self, importance: ImportanceResult, candidate: CalendarCandidate | None) -> bool:
@@ -181,7 +184,9 @@ class HybridMailAnalyzer:
         llm,
         time_normalization: dict[str, str | int] | None = None,
     ) -> CalendarCandidate:
-        digest = hashlib.sha256(f"{message.provider}:{message.message_id}".encode()).hexdigest()[:12]
+        digest = hashlib.sha256(
+            canonical_message_id(message.provider, message.message_id).encode()
+        ).hexdigest()[:12]
         return CalendarCandidate(
             candidate_id=f"calendar-candidate-{digest}", source_provider=message.provider,
             source_message_id=message.message_id, source_thread_id=message.thread_id,

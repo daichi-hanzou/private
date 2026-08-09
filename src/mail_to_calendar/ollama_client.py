@@ -142,6 +142,17 @@ class OllamaClient:
             raise OllamaError("Ollama structured-output check returned an invalid result")
         return OllamaCheckResult(True, True, True, latency_ms)
 
+    def check_model(self) -> OllamaCheckResult:
+        """Lightweight scheduled-run check without an inference request."""
+        response = self._request("get", "/api/tags")
+        data = self._response_json(response)
+        models = data.get("models")
+        names = {
+            str(item.get("name") or item.get("model"))
+            for item in models or [] if isinstance(item, dict)
+        }
+        return OllamaCheckResult(True, self.model in names, False, 0)
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
             response = getattr(self.transport, method)(

@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def canonical_message_id(provider: str, message_id: str) -> str:
+    prefix = f"{provider}:"
+    return message_id if message_id.startswith(prefix) else f"{prefix}{message_id}"
+
+
 @dataclass(frozen=True)
 class EmailMessage:
     provider: str

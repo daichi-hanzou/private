@@ -9,6 +9,7 @@ from typing import Any
 from .classifier import RuleBasedImportanceClassifier
 from .extractor import RuleBasedCalendarExtractor
 from .hybrid_analyzer import HybridMailAnalyzer
+from .llm_classifier import SCHEMA_VERSION
 from .llm_models import HybridAnalysisResult
 from .models import CalendarCandidate, EmailMessage, ImportanceResult
 from .provider import MailProvider
@@ -418,7 +419,20 @@ class MailToCalendarService:
             "input_truncated": analysis.input_truncated,
             "rule_result_summary": analysis.rule_result,
             "llm_result_summary": (
-                analysis.llm_result.summary() if analysis.llm_result else None
+                analysis.llm_result_summary
+                or (analysis.llm_result.summary() if analysis.llm_result else None)
+            ),
+            "normalized_candidate": (
+                {
+                    "date": analysis.final_candidate.date,
+                    "start": analysis.final_candidate.start,
+                    "end": analysis.final_candidate.end,
+                    "duration_minutes": analysis.final_candidate.duration_minutes,
+                    "timezone": analysis.final_candidate.timezone,
+                    "location": analysis.final_candidate.location,
+                }
+                if analysis.final_candidate
+                else None
             ),
         }
         classifier = self.analyzer.classifier if self.analyzer else None
@@ -428,7 +442,7 @@ class MailToCalendarService:
                     "model_version": None,
                     "prompt_template_version": classifier.prompt_metadata.template_version,
                     "system_prompt_template_hash": classifier.prompt_metadata.system_template_hash,
-                    "schema_version": "mail-analysis-schema-v2",
+                    "schema_version": SCHEMA_VERSION,
                     "schema_hash": classifier.prompt_metadata.schema_hash,
                 }
             )

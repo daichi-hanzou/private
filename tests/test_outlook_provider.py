@@ -293,7 +293,7 @@ def test_graph_message_conversion_and_safe_html(tmp_path) -> None:
     message = messages[0]
     assert isinstance(message, EmailMessage)
     assert message.provider == "outlook"
-    assert message.message_id == "message-1"
+    assert message.message_id == "outlook:message-1"
     assert message.thread_id == "conversation-1"
     assert message.sender == "sender@example.com"
     assert message.recipients == ["me@outlook.com"]
@@ -313,7 +313,7 @@ def test_graph_message_conversion_and_safe_html(tmp_path) -> None:
         authenticator=_Auth(),
         transport=single_transport,
     ).get_message("single")
-    assert single.message_id == "single"
+    assert single.message_id == "outlook:single"
     assert single_transport.calls[0]["url"].endswith("/me/messages/single")
 
 
@@ -344,8 +344,8 @@ def test_list_query_paging_and_maximum(tmp_path) -> None:
     )
 
     assert [message.message_id for message in provider.list_messages()] == [
-        "one",
-        "two",
+        "outlook:one",
+        "outlook:two",
     ]
     assert len(transport.calls) == 2
     first = transport.calls[0]
@@ -504,7 +504,7 @@ def test_fake_outlook_e2e_is_private_pending_and_explorable(tmp_path) -> None:
     assert outcome_status(calendar_bundle) == "pending"
     assert calendar_bundle.action.raw_event["metadata"][
         "source_message_id"
-    ] == "message-1"
+    ] == "outlook:message-1"
     html = render_explorer(
         normalized,
         ingestion=ingestion,
