@@ -121,7 +121,7 @@ def test_reject_writes_contradicted_outcome(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("first,second", [
-    ("approve", "approve"), ("approve", "reject"), ("reject", "approve")
+    ("approve", "reject"), ("reject", "approve")
 ])
 def test_resolved_approval_cannot_transition_again(tmp_path, first, second) -> None:
     store, _, record = register(tmp_path)
@@ -130,6 +130,18 @@ def test_resolved_approval_cannot_transition_again(tmp_path, first, second) -> N
         getattr(service, first)(record.approval_id, "actor", "reason")
         with pytest.raises(ValueError, match="not awaiting approval"):
             getattr(service, second)(record.approval_id, "actor", "reason")
+    finally:
+        store.close()
+
+
+def test_repeated_approve_is_an_idempotent_noop(tmp_path) -> None:
+    store, _, record = register(tmp_path)
+    try:
+        service = ApprovalService(store)
+        first = service.approve(record.approval_id, "actor", "reason")
+        second = service.approve(record.approval_id, "actor", "reason")
+        assert first.status == second.status == "approved"
+        assert first.outcome_jsonl_path == second.outcome_jsonl_path
     finally:
         store.close()
 
@@ -177,7 +189,7 @@ def test_source_integrity_rejects_missing_action_outcome_and_intervention(tmp_pa
             store.close()
 
 
-def test_concurrent_approve_only_one_succeeds(tmp_path) -> None:
+def test_concurrent_approve_is_idempotent(tmp_path) -> None:
     store, _, record = register(tmp_path)
     db = store.path
     store.close()
@@ -192,7 +204,7 @@ def test_concurrent_approve_only_one_succeeds(tmp_path) -> None:
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: approve(), range(2)))
-    assert sorted(results) == ["approved", "rejected"]
+    assert results == ["approved", "approved"]
 
 
 def test_orchestrator_registers_only_pending_and_preserves_privacy(tmp_path) -> None:

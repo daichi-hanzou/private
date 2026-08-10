@@ -114,6 +114,25 @@ class GoogleCalendarExecutor:
                 retryable=retryable,
             )
 
+    def find_existing(
+        self, request: CalendarExecutionRequest
+    ) -> CalendarExecutionResult | None:
+        try:
+            existing = self.client.find_by_approval(
+                request.calendar_id, request.approval_id
+            )
+            return (
+                _success(existing, request, already_exists=True)
+                if existing else None
+            )
+        except GoogleCalendarAPIError as exc:
+            return CalendarExecutionResult(
+                success=False, provider=self.provider,
+                calendar_id=request.calendar_id,
+                error_type=type(exc).__name__, error_message=str(exc)[:300],
+                retryable=_retryable(exc),
+            )
+
 
 def google_event_payload(request: CalendarExecutionRequest) -> dict[str, Any]:
     if not request.title.strip():

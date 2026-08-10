@@ -362,6 +362,12 @@ def _parser() -> argparse.ArgumentParser:
     execute = approval_commands.add_parser("execute")
     execute.add_argument("approval_id")
     _add_google_execution_arguments(execute)
+    recover = approval_commands.add_parser(
+        "recover", help="Reconcile stale calendar executions without inserting events."
+    )
+    recover.add_argument("--stale-after-seconds", type=int, default=300)
+    recover.add_argument("--limit", type=int, default=100)
+    _add_google_execution_arguments(recover)
 
     google = commands.add_parser(
         "google-calendar", help="Configure Google Calendar OAuth."
@@ -771,6 +777,17 @@ def main() -> None:
                     print(f"Created at: {record.created_at.isoformat()}")
                     print(f"Expires at: {record.expires_at.isoformat() if record.expires_at else '-'}")
                     print(f"Status: {record.status}")
+                    print(
+                        "Execution started at: "
+                        f"{record.execution_started_at.isoformat() if record.execution_started_at else '-'}"
+                    )
+                    print(
+                        "Executed at: "
+                        f"{record.executed_at.isoformat() if record.executed_at else '-'}"
+                    )
+                    print(f"Calendar event ID: {record.calendar_event_id or '-'}")
+                    print(f"Last execution error: {record.last_execution_error or '-'}")
+                    print(f"Retry count: {record.retry_count}")
                     print(f"Source JSONL: {record.source_jsonl_path}")
                 elif args.approval_command == "summary":
                     summary = approval_service.summary()
@@ -804,6 +821,30 @@ def main() -> None:
                     print(f"Output: {record.outcome_jsonl_path}")
                 elif args.approval_command == "expire":
                     print(f"Expired: {approval_service.expire()}")
+                elif args.approval_command == "recover":
+                    recovered = _calendar_execution_service(
+                        store, args
+                    ).recover_stale(
+                        provider=args.calendar_provider,
+                        calendar_id=args.google_calendar_id,
+                        stale_after_seconds=args.stale_after_seconds,
+                        limit=args.limit,
+                    )
+                    print(f"Recovery candidates: {len(recovered)}")
+                    for item in recovered:
+                        print(f"{item.approval_id}: {item.status}")
+                    print(
+                        "Reconciled: "
+                        f"{sum(item.status == 'reconciled' for item in recovered)}"
+                    )
+                    print(
+                        "Event not found: "
+                        f"{sum(item.status == 'event_not_found' for item in recovered)}"
+                    )
+                    print(
+                        "Lookup failed: "
+                        f"{sum(item.status == 'lookup_failed' for item in recovered)}"
+                    )
                 else:
                     result = _calendar_execution_service(store, args).execute(
                         args.approval_id, provider=args.calendar_provider,

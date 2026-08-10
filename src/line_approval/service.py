@@ -211,15 +211,19 @@ class LineApprovalService:
             )
         except ValueError:
             return WebhookResult(400, "invalid postback")
-        claim = self._consume_token(approval_id, token)
+        claim = self._consume_token(approval_id, token, action=action)
         if claim is not None:
             return claim
         actor = masked_actor(incoming_user)
         try:
             if action == "approve":
-                record = self.approvals.approve(
-                    approval_id, actor=actor, reason="Approved via LINE"
-                )
+                record = self.approvals.get(approval_id)
+                if record.status == "awaiting_approval":
+                    record = self.approvals.approve(
+                        approval_id, actor=actor, reason="Approved via LINE"
+                    )
+                elif record.status in {"rejected", "expired", "failed"}:
+                    return WebhookResult(200, "approval already resolved", True)
                 if self.calendar_service is None:
                     reply = "⚠️ 承認しましたがCalendar実行が設定されていません"
                 else:
@@ -234,9 +238,13 @@ class LineApprovalService:
                         "⚠️ 承認しましたがCalendar登録に失敗しました\n後で再試行できます。"
                     )
             else:
-                self.approvals.reject(
-                    approval_id, actor=actor, reason="Rejected via LINE"
-                )
+                record = self.approvals.get(approval_id)
+                if record.status == "awaiting_approval":
+                    self.approvals.reject(
+                        approval_id, actor=actor, reason="Rejected via LINE"
+                    )
+                else:
+                    return WebhookResult(200, "approval already resolved", True)
                 reply = "❌ カレンダー登録候補を拒否しました"
         except ValueError:
             return WebhookResult(409, "approval cannot be resolved")
@@ -248,7 +256,9 @@ class LineApprovalService:
             self._record_event(str(event_id))
         return WebhookResult(200, "ok", True)
 
-    def _consume_token(self, approval_id: str, token: str) -> WebhookResult | None:
+    def _consume_token(
+        self, approval_id: str, token: str, *, action: str
+    ) -> WebhookResult | None:
         connection = sqlite3.connect(self.state.path, timeout=30)
         connection.row_factory = sqlite3.Row
         try:
@@ -264,18 +274,22 @@ class LineApprovalService:
             if row is None or approval is None:
                 connection.rollback()
                 return WebhookResult(404, "approval interaction not found")
+            if not hmac.compare_digest(row["token_hash"], token_hash(token)):
+                connection.rollback()
+                return WebhookResult(403, "approval token mismatch")
             if row["consumed_at"]:
                 connection.rollback()
-                return WebhookResult(409, "approval token already used")
+                if action == "approve" and approval["status"] in {
+                    "approved", "executing", "calendar_failed", "calendar_created"
+                }:
+                    return None
+                return WebhookResult(200, "approval token already used")
             if datetime.fromisoformat(row["expires_at"]) <= now:
                 connection.rollback()
                 return WebhookResult(410, "approval token expired")
             if approval["status"] != "awaiting_approval":
                 connection.rollback()
-                return WebhookResult(409, "approval is no longer pending")
-            if not hmac.compare_digest(row["token_hash"], token_hash(token)):
-                connection.rollback()
-                return WebhookResult(403, "approval token mismatch")
+                return WebhookResult(200, "approval is no longer pending")
             connection.execute(
                 "UPDATE approval_interaction_tokens SET consumed_at=? "
                 "WHERE approval_id=? AND consumed_at IS NULL",

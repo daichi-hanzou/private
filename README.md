@@ -684,6 +684,19 @@ prompt/evidence, or tokens. Success appends a new confirmed
 duplicated, the source JSONL is not overwritten, and Explorer selects the
 newest Outcome.
 
+After a process or PC restart, explicitly reconcile executions that have been
+`executing` for at least five minutes:
+
+```bash
+uv run mail-calendar-orchestrator approvals recover
+```
+
+Use `--stale-after-seconds` and `--limit` to adjust the bounded scan. Recovery
+only searches Google Calendar by the private Approval marker. An existing event
+is reconciled to `calendar_created`; a missing event or lookup failure leaves
+the Approval unchanged for review. Recovery never calls `events.insert` and is
+safe to run repeatedly.
+
 #### Google OAuth setup
 
 The implementation follows Google's Desktop installed-application flow and

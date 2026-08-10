@@ -50,6 +50,11 @@ class ApprovalRecord:
     reason: str | None
     source_jsonl_path: str
     outcome_jsonl_path: str | None
+    execution_started_at: datetime | None
+    executed_at: datetime | None
+    calendar_event_id: str | None
+    last_execution_error: str | None
+    retry_count: int
 
 
 class ApprovalService:
@@ -227,6 +232,11 @@ class ApprovalService:
             if row is None:
                 raise ValueError(f"approval not found: {approval_id}")
             if row["status"] != "awaiting_approval":
+                if resolution == "approve" and row["status"] in {
+                    "approved", "executing", "calendar_created", "calendar_failed"
+                }:
+                    connection.commit()
+                    return self._record(row)
                 raise ValueError(
                     f"approval is not awaiting approval: {approval_id} ({row['status']})"
                 )
@@ -347,4 +357,9 @@ class ApprovalService:
             actor=row["actor"], reason=row["reason"],
             source_jsonl_path=row["source_jsonl_path"],
             outcome_jsonl_path=row["outcome_jsonl_path"],
+            execution_started_at=date("execution_started_at"),
+            executed_at=date("executed_at"),
+            calendar_event_id=row["calendar_event_id"],
+            last_execution_error=row["last_execution_error"],
+            retry_count=int(row["retry_count"] or 0),
         )

@@ -322,7 +322,7 @@ def test_concurrent_postback_only_executes_once(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(resolve, range(2)))
     assert sum(calls for _, calls in results) == 1
-    assert sorted(status for status, _ in results) == [200, 409]
+    assert sorted(status for status, _ in results) == [200, 200]
 
 
 @pytest.mark.parametrize(

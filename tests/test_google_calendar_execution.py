@@ -26,6 +26,7 @@ from calendar_execution.google_calendar import (
 from calendar_execution.models import (
     CalendarExecutionRequest,
     CalendarExecutionResult,
+    CalendarRecoveryResult,
 )
 from calendar_execution.service import CalendarExecutionService
 from mail_calendar_orchestrator.approvals import ApprovalService
@@ -89,6 +90,22 @@ class FakeExecutor:
     def create_event(self, value):
         self.requests.append(value)
         return self.results.pop(0)
+
+
+def mark_executing(store, approval_id, started_at):
+    with store.connection:
+        store.connection.execute(
+            "UPDATE approval_queue SET status='executing',execution_started_at=? "
+            "WHERE approval_id=?", (started_at, approval_id),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO calendar_execution(
+                approval_id,provider,calendar_id,status,attempt_count,started_at
+            ) VALUES(?,?,?,?,?,?)
+            """,
+            (approval_id, "google", "primary", "executing", 1, started_at),
+        )
 
 
 def test_google_payload_datetime_timezone_tracking_and_privacy() -> None:
@@ -169,6 +186,13 @@ def test_success_state_audit_latest_outcome_and_sqlite_idempotency(tmp_path) -> 
         )
         assert len(bundles[0].human_interventions) == 1
         assert outcome_status(bundles[0]) == "confirmed"
+        success_outcomes = [
+            event for event in ingestion.events
+            if event.get("event_type") == "outcome_observed"
+            and (event.get("actual_outcome") or {}).get("outcome_type")
+            == "calendar_event_created"
+        ]
+        assert len(success_outcomes) == 1
         html = render_explorer(
             normalize_events(ingestion.events), ingestion=ingestion,
             source_path=row["result_jsonl_path"],
@@ -273,11 +297,208 @@ def test_concurrent_execution_calls_executor_once(tmp_path) -> None:
         first = pool.submit(execute)
         assert entered.wait(timeout=2)
         second = pool.submit(execute)
-        with pytest.raises(ValueError, match="not executable"):
-            second.result(timeout=2)
+        duplicate = second.result(timeout=2)
+        assert not duplicate.success
+        assert duplicate.error_type == "AlreadyProcessing"
+        assert duplicate.already_exists
         release.set()
         assert first.result(timeout=2).success
     assert len(executor.requests) == 1
+
+
+def test_crash_after_insert_reconciles_existing_marker_without_reinsert(
+    tmp_path, monkeypatch
+) -> None:
+    store, record = approved(tmp_path)
+
+    class RecoverableExecutor(FakeExecutor):
+        def __init__(self):
+            super().__init__()
+            self.existing = None
+            self.find_requests = []
+
+        def find_existing(self, value):
+            self.find_requests.append(value)
+            if self.existing is None:
+                return None
+            return CalendarExecutionResult(
+                success=True, provider="google", calendar_id=value.calendar_id,
+                external_event_id=self.existing, start=value.start, end=value.end,
+                already_exists=True,
+            )
+
+        def create_event(self, value):
+            result = super().create_event(value)
+            self.existing = result.external_event_id
+            return result
+
+    executor = RecoverableExecutor()
+    crashing = CalendarExecutionService(store, executor, output_dir=tmp_path)
+
+    def crash_before_sqlite_finish(*_args, **_kwargs):
+        raise RuntimeError("simulated crash after calendar insert")
+
+    monkeypatch.setattr(crashing, "_finish", crash_before_sqlite_finish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        crashing.execute(record.approval_id)
+    assert ApprovalService(store).get(record.approval_id).status == "executing"
+    assert len(executor.requests) == 1
+
+    recovered = CalendarExecutionService(
+        store, executor, output_dir=tmp_path
+    ).execute(record.approval_id)
+    assert recovered.success and recovered.already_exists
+    assert recovered.external_event_id == "google-event-1"
+    assert len(executor.requests) == 1
+    reconciled = ApprovalService(store).get(record.approval_id)
+    assert reconciled.status == "calendar_created"
+    assert reconciled.calendar_event_id == "google-event-1"
+    assert reconciled.executed_at is not None
+    row = store.connection.execute(
+        "SELECT * FROM calendar_execution WHERE approval_id=?",
+        (record.approval_id,),
+    ).fetchone()
+    events = read_jsonl(row["result_jsonl_path"]).events
+    assert sum(
+        event.get("event_type") == "outcome_observed"
+        and (event.get("actual_outcome") or {}).get("outcome_type")
+        == "calendar_event_created"
+        for event in events
+    ) == 1
+    assert len(list(tmp_path.glob(
+        f"calendar-execution-{record.approval_id}-created.jsonl"
+    ))) == 1
+    store.close()
+
+
+def test_recover_stale_reconciles_marker_and_is_idempotent(tmp_path) -> None:
+    store, record = approved(tmp_path)
+    mark_executing(store, record.approval_id, "2026-08-10T00:00:00+00:00")
+
+    class LookupOnly:
+        create_calls = 0
+
+        def find_existing(self, value):
+            return CalendarExecutionResult(
+                success=True, provider="google", calendar_id=value.calendar_id,
+                external_event_id="existing-google-event", start=value.start,
+                end=value.end, already_exists=True,
+            )
+
+        def create_event(self, _value):
+            self.create_calls += 1
+            raise AssertionError("recover must never insert")
+
+    executor = LookupOnly()
+    service = CalendarExecutionService(store, executor, output_dir=tmp_path)
+    results = service.recover_stale(
+        stale_after_seconds=300,
+        now=datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+    )
+    assert results == [CalendarRecoveryResult(
+        record.approval_id, "reconciled", "existing-google-event"
+    )]
+    assert executor.create_calls == 0
+    assert ApprovalService(store).get(record.approval_id).status == "calendar_created"
+    assert service.recover_stale(
+        stale_after_seconds=300,
+        now=datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+    ) == []
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "lookup,status",
+    [(None, "event_not_found"), ("failure", "lookup_failed")],
+)
+def test_recover_stale_never_inserts_when_marker_absent_or_lookup_fails(
+    tmp_path, lookup, status
+) -> None:
+    store, record = approved(tmp_path)
+    mark_executing(store, record.approval_id, "2026-08-10T00:00:00+00:00")
+
+    class LookupOnly:
+        create_calls = 0
+
+        def find_existing(self, value):
+            if lookup is None:
+                return None
+            return CalendarExecutionResult(
+                success=False, provider="google", calendar_id=value.calendar_id,
+                error_type="GoogleCalendarAPIError",
+                error_message="safe lookup failure", retryable=True,
+            )
+
+        def create_event(self, _value):
+            self.create_calls += 1
+            raise AssertionError("recover must never insert")
+
+    executor = LookupOnly()
+    result = CalendarExecutionService(
+        store, executor, output_dir=tmp_path
+    ).recover_stale(
+        stale_after_seconds=300,
+        now=datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+    )[0]
+    assert result.status == status
+    assert executor.create_calls == 0
+    assert ApprovalService(store).get(record.approval_id).status == "executing"
+    store.close()
+
+
+def test_recover_stale_excludes_recent_and_nonexecuting_approvals(tmp_path) -> None:
+    store, record = approved(tmp_path)
+    mark_executing(store, record.approval_id, "2026-08-10T00:59:00+00:00")
+
+    class LookupOnly:
+        def find_existing(self, _value):
+            raise AssertionError("recent execution must not be queried")
+
+    assert CalendarExecutionService(store, LookupOnly()).recover_stale(
+        stale_after_seconds=300,
+        now=datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+    ) == []
+    store.close()
+
+
+def test_approvals_recover_cli_reports_bounded_results(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    captured = {}
+
+    class RecoveryService:
+        def recover_stale(self, **kwargs):
+            captured.update(kwargs)
+            return [
+                CalendarRecoveryResult("AP-000001", "reconciled", "event-1"),
+                CalendarRecoveryResult("AP-000002", "event_not_found"),
+                CalendarRecoveryResult(
+                    "AP-000003", "lookup_failed",
+                    error_type="GoogleCalendarAPIError",
+                ),
+            ]
+
+    monkeypatch.setattr(
+        "mail_calendar_orchestrator.cli._calendar_execution_service",
+        lambda _store, _args: RecoveryService(),
+    )
+    monkeypatch.setattr("sys.argv", [
+        "mail-calendar-orchestrator", "approvals",
+        "--state-db", str(tmp_path / "state.sqlite3"),
+        "--output-dir", str(tmp_path), "recover",
+        "--stale-after-seconds", "600", "--limit", "25",
+    ])
+    main()
+    output = capsys.readouterr().out
+    assert "Recovery candidates: 3" in output
+    assert "AP-000001: reconciled" in output
+    assert "AP-000002: event_not_found" in output
+    assert "AP-000003: lookup_failed" in output
+    assert "Reconciled: 1" in output
+    assert "Event not found: 1" in output
+    assert "Lookup failed: 1" in output
+    assert captured["stale_after_seconds"] == 600
+    assert captured["limit"] == 25
 
 
 @pytest.mark.parametrize(

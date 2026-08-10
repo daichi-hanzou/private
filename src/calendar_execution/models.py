@@ -36,3 +36,11 @@ class CalendarExecutionResult:
     already_exists: bool = False
     raw_response_summary: dict[str, Any] | None = None
     retryable: bool = False
+
+
+@dataclass(frozen=True)
+class CalendarRecoveryResult:
+    approval_id: str
+    status: str
+    external_event_id: str | None = None
+    error_type: str | None = None

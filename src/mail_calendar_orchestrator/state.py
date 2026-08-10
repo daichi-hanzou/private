@@ -235,6 +235,27 @@ class MailStateStore:
                 );
                 """
             )
+            self._ensure_column(
+                "approval_queue", "execution_started_at", "TEXT"
+            )
+            self._ensure_column("approval_queue", "executed_at", "TEXT")
+            self._ensure_column("approval_queue", "calendar_event_id", "TEXT")
+            self._ensure_column(
+                "approval_queue", "last_execution_error", "TEXT"
+            )
+            self._ensure_column(
+                "approval_queue", "retry_count", "INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _ensure_column(self, table: str, name: str, declaration: str) -> None:
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute(f"PRAGMA table_info({table})")
+        }
+        if name not in columns:
+            self.connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
+            )
 
     def get_system_value(self, key: str) -> str | None:
         row = self.connection.execute(
