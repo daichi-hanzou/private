@@ -164,6 +164,7 @@ def google_event_payload(request: CalendarExecutionRequest) -> dict[str, Any]:
         "agentledger_candidate_id": request.candidate_id or "none",
         "agentledger_source_provider": request.source_provider or "unknown",
         "agentledger_source_message_hash": source_hash,
+        "agentledger_duration_source": request.duration_source,
     }
     payload = {
         "summary": request.title[:200],
@@ -180,9 +181,14 @@ def google_event_payload(request: CalendarExecutionRequest) -> dict[str, Any]:
 def execution_datetimes(
     *, date: str | None, start: str | None, end: str | None,
     duration_minutes: int | None, timezone: str,
-) -> tuple[str, str, int]:
-    if not start or not duration_minutes or duration_minutes <= 0:
-        raise ValueError("approved calendar event requires start and duration")
+    default_duration_minutes: int = 60,
+) -> tuple[str, str, int, str]:
+    if not start:
+        raise ValueError("approved calendar event requires a start time")
+    if duration_minutes is not None and duration_minutes <= 0:
+        raise ValueError("approved calendar event duration must be positive")
+    if default_duration_minutes <= 0:
+        raise ValueError("default calendar event duration must be positive")
     try:
         zone = ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
@@ -193,16 +199,29 @@ def execution_datetimes(
     start_dt = datetime.fromisoformat(start_value)
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=zone)
+    effective_duration = duration_minutes
+    duration_source = "extracted"
     if end:
         end_value = end if "T" in end else f"{date}T{end}" if date else ""
         end_dt = datetime.fromisoformat(end_value)
         if end_dt.tzinfo is None:
             end_dt = end_dt.replace(tzinfo=zone)
+        if effective_duration is None:
+            effective_duration = int(
+                (end_dt - start_dt).total_seconds() // 60
+            )
+            duration_source = "derived_from_end"
     else:
-        end_dt = start_dt + timedelta(minutes=duration_minutes)
+        if effective_duration is None:
+            effective_duration = default_duration_minutes
+            duration_source = "default"
+        end_dt = start_dt + timedelta(minutes=effective_duration)
     if end_dt <= start_dt:
         raise ValueError("approved calendar event end must be after start")
-    return start_dt.isoformat(), end_dt.isoformat(), duration_minutes
+    return (
+        start_dt.isoformat(), end_dt.isoformat(), effective_duration,
+        duration_source,
+    )
 
 
 def _success(

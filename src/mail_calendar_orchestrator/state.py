@@ -233,6 +233,23 @@ class MailStateStore:
                     webhook_event_id TEXT PRIMARY KEY,
                     processed_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS important_mail_notifications (
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    notification_type TEXT NOT NULL DEFAULT 'important_mail',
+                    category TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    notification_date TEXT,
+                    amount TEXT,
+                    should_notify_user INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    attempted_at TEXT,
+                    notified_at TEXT,
+                    last_error_type TEXT,
+                    retryable INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (provider,message_id,notification_type)
+                );
                 """
             )
             self._ensure_column(
@@ -246,6 +263,39 @@ class MailStateStore:
             self._ensure_column(
                 "approval_queue", "retry_count", "INTEGER NOT NULL DEFAULT 0"
             )
+            self._ensure_column(
+                "important_mail_notifications", "retryable",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+
+    def register_important_notification(
+        self, *, provider: str, message_id: str, category: str,
+        subject: str, notification_date: str | None, amount: str | None,
+    ) -> bool:
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO important_mail_notifications(
+                    provider,message_id,notification_type,category,subject,
+                    notification_date,amount,should_notify_user,status
+                ) VALUES(?,?,'important_mail',?,?,?,?,1,'pending')
+                """,
+                (
+                    provider, message_id, category[:80], subject[:200],
+                    notification_date, amount,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def pending_important_notifications(self, *, limit: int = 50) -> list[sqlite3.Row]:
+        if not 1 <= limit <= 500:
+            raise ValueError("important notification limit must be between 1 and 500")
+        return self.connection.execute(
+            "SELECT * FROM important_mail_notifications "
+            "WHERE (status='pending' OR (status='failed' AND retryable=1)) "
+            "AND attempt_count<3 "
+            "ORDER BY rowid ASC LIMIT ?", (limit,),
+        ).fetchall()
 
     def _ensure_column(self, table: str, name: str, declaration: str) -> None:
         columns = {

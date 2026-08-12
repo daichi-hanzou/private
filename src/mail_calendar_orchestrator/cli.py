@@ -461,6 +461,14 @@ def _parser() -> argparse.ArgumentParser:
     line_commands.add_parser("test-message")
     notify = line_commands.add_parser("notify")
     notify.add_argument("approval_id")
+    line_important = line_commands.add_parser(
+        "important", help="Dispatch button-free important mail notifications."
+    )
+    line_important_commands = line_important.add_subparsers(
+        dest="line_important_command", required=True
+    )
+    send_pending = line_important_commands.add_parser("send-pending")
+    send_pending.add_argument("--limit", type=int, default=50)
     webhook = line_commands.add_parser("webhook")
     webhook.add_argument("--host", default="127.0.0.1")
     webhook.add_argument("--port", type=int, default=8787)
@@ -570,6 +578,7 @@ def _notify_pending_line_best_effort(state_path: str | Path) -> None:
                     service.notify(record.approval_id)
                 except (OSError, RuntimeError, ValueError):
                     continue
+            service.dispatch_pending_important(limit=50)
     except (OSError, RuntimeError, ValueError):
         return
 
@@ -740,6 +749,14 @@ def main() -> None:
                             result.error_message or "LINE notification failed"
                         )
                     print(f"LINE notification: sent ({args.approval_id})")
+                elif args.line_command == "important":
+                    dispatched = service.dispatch_pending_important(
+                        limit=args.limit
+                    )
+                    print(f"Selected: {dispatched.selected}")
+                    print(f"Sent: {dispatched.sent}")
+                    print(f"Failed: {dispatched.failed}")
+                    print(f"Skipped: {dispatched.skipped}")
                 else:
                     print(f"LINE webhook: http://{args.host}:{args.port}")
                     serve_webhook(service, host=args.host, port=args.port)
@@ -1408,6 +1425,7 @@ def main() -> None:
         f"Retryable failures: {result.retryable_failures}\n"
         f"Permanent failures: {result.permanent_failures}\n"
         f"Approvals created: {result.approvals_created}\n"
+        f"Important notifications queued: {result.important_notifications_created}\n"
         f"Run ID: {result.run_id or '-'}\n"
         f"State DB: {result.state_db or 'disabled'}\n"
         f"Mode: {'analysis only' if result.analysis_only else getattr(args, 'analysis_mode', 'llm-first')}\n"

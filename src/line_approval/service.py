@@ -12,7 +12,9 @@ from mail_calendar_orchestrator.approvals import ApprovalRecord, ApprovalService
 from mail_calendar_orchestrator.state import MailStateStore
 
 from .client import text_message
-from .models import LineSendResult, MessagePayload, WebhookResult
+from .models import (
+    ImportantDispatchResult, LineSendResult, MessagePayload, WebhookResult,
+)
 from .security import (
     decode_postback,
     encode_postback,
@@ -125,6 +127,93 @@ class LineApprovalService:
             )
         return result
 
+    def notify_important(self, provider: str, message_id: str) -> LineSendResult:
+        """Send one button-free important-mail notification idempotently."""
+        connection = sqlite3.connect(self.state.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM important_mail_notifications "
+                "WHERE provider=? AND message_id=? "
+                "AND notification_type='important_mail'",
+                (provider, message_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("important mail notification not found")
+            if row["status"] in {"sent", "sending"}:
+                connection.commit()
+                return LineSendResult(True)
+            if int(row["attempt_count"]) >= 3:
+                raise ValueError("important mail notification retry limit reached")
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = connection.execute(
+                "UPDATE important_mail_notifications SET status='sending',"
+                "attempt_count=attempt_count+1,attempted_at=?,last_error_type=NULL "
+                "WHERE provider=? AND message_id=? "
+                "AND notification_type='important_mail' "
+                "AND status IN ('pending','failed')",
+                (now, provider, message_id),
+            )
+            if cursor.rowcount != 1:
+                connection.commit()
+                return LineSendResult(True)
+            connection.commit()
+        finally:
+            connection.close()
+        result = self.client.push(
+            self.allowed_user_id, self.important_notification_payload(row)
+        )
+        with self.state.connection:
+            self.state.connection.execute(
+                "UPDATE important_mail_notifications SET status=?,notified_at=?,"
+                "last_error_type=?,retryable=? WHERE provider=? AND message_id=? "
+                "AND notification_type='important_mail'",
+                (
+                    "sent" if result.success else "failed",
+                    datetime.now(timezone.utc).isoformat() if result.success else None,
+                    result.error_type if not result.success else None,
+                    1 if (not result.success and result.retryable) else 0,
+                    provider, message_id,
+                ),
+            )
+        return result
+
+    def dispatch_pending_important(self, *, limit: int = 50) -> ImportantDispatchResult:
+        rows = self.state.pending_important_notifications(limit=limit)
+        sent = 0
+        failed = 0
+        skipped = 0
+        for row in rows:
+            try:
+                result = self.notify_important(
+                    str(row["provider"]), str(row["message_id"])
+                )
+            except (OSError, RuntimeError, ValueError):
+                skipped += 1
+                continue
+            if result.success:
+                sent += 1
+            else:
+                failed += 1
+        return ImportantDispatchResult(len(rows), sent, failed, skipped)
+
+    @staticmethod
+    def important_notification_payload(row: Any) -> MessagePayload:
+        lines = [
+            "⚠️ 重要メール",
+            "",
+            str(row["subject"])[:200],
+            "",
+            f"種類: {str(row['category'])[:80]}",
+        ]
+        if row["notification_date"]:
+            lines.append(f"日付・期限: {str(row['notification_date'])[:20]}")
+        if row["amount"]:
+            lines.append(f"金額: {str(row['amount'])[:40]}")
+        lines.extend(["", "内容を確認してください。"])
+        return text_message("\n".join(lines))
+
     @staticmethod
     def _non_retryable_error(error_type: str | None) -> bool:
         if not error_type or not error_type.startswith("HTTP"):
@@ -143,32 +232,71 @@ class LineApprovalService:
         elif record.duration_minutes:
             time_range += f"（{record.duration_minutes}分）"
         reason = (record.classification_summary or "予定候補として抽出されました")[:200]
-        text = (
-            "📅 カレンダー登録候補\n"
-            f"予定: {record.title[:200]}\n"
-            f"日時: {record.date or '日付未記録'} {time_range}\n"
-            f"種類: {record.candidate_type[:80]}\n"
-            f"場所: {(record.location or '未記録')[:100]}\n"
-            f"理由: {reason}\n"
-            f"元: {(record.source_provider or 'mail').title()}\n"
-            f"Approval ID: {record.approval_id}"
-        )
+        fields = [
+            {
+                "type": "text",
+                "text": f"{record.date or '日付未記録'} {time_range}"[:300],
+                "size": "md",
+                "wrap": True,
+            },
+        ]
+        if record.location:
+            fields.append({
+                "type": "text", "text": record.location[:300],
+                "size": "sm", "color": "#555555", "wrap": True,
+            })
+        fields.extend([
+            {
+                "type": "text",
+                "text": f"種類: {record.candidate_type[:80]}",
+                "size": "xs", "color": "#777777", "wrap": True,
+            },
+            {
+                "type": "text", "text": reason,
+                "size": "xs", "color": "#777777", "wrap": True,
+            },
+            {
+                "type": "text", "text": f"Approval ID: {record.approval_id}",
+                "size": "xxs", "color": "#999999", "wrap": True,
+            },
+        ])
         return {
-            "type": "text",
-            "text": text[:1000],
-            "quickReply": {
-                "items": [
-                    {"type": "action", "action": {
-                        "type": "postback", "label": "承認",
-                        "data": encode_postback("approve", record.approval_id, token),
-                        "displayText": "承認します",
-                    }},
-                    {"type": "action", "action": {
-                        "type": "postback", "label": "拒否",
-                        "data": encode_postback("reject", record.approval_id, token),
-                        "displayText": "拒否します",
-                    }},
-                ]
+            "type": "flex",
+            "altText": f"予定候補: {record.title[:300]}",
+            "contents": {
+                "type": "bubble",
+                "header": {
+                    "type": "box", "layout": "vertical", "contents": [{
+                        "type": "text", "text": "📅 予定候補",
+                        "weight": "bold", "color": "#1B5E20",
+                    }],
+                },
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "md",
+                    "contents": [{
+                        "type": "text", "text": record.title[:300],
+                        "weight": "bold", "size": "lg", "wrap": True,
+                    }, *fields],
+                },
+                "footer": {
+                    "type": "box", "layout": "horizontal", "spacing": "md",
+                    "contents": [
+                        {"type": "button", "style": "primary", "action": {
+                            "type": "postback", "label": "承認",
+                            "data": encode_postback(
+                                "approve", record.approval_id, token
+                            ),
+                            "displayText": "承認します",
+                        }},
+                        {"type": "button", "style": "secondary", "action": {
+                            "type": "postback", "label": "拒否",
+                            "data": encode_postback(
+                                "reject", record.approval_id, token
+                            ),
+                            "displayText": "拒否します",
+                        }},
+                    ],
+                },
             },
         }
 

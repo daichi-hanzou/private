@@ -21,6 +21,7 @@ from calendar_execution.google_calendar import (
     GoogleCalendarAPIError,
     GoogleCalendarClient,
     GoogleCalendarExecutor,
+    execution_datetimes,
     google_event_payload,
 )
 from calendar_execution.models import (
@@ -121,6 +122,7 @@ def test_google_payload_datetime_timezone_tracking_and_privacy() -> None:
     assert private["agentledger_action_id"] == "action-1"
     assert private["agentledger_candidate_id"] == "candidate-1"
     assert private["agentledger_source_provider"] == "outlook"
+    assert private["agentledger_duration_source"] == "extracted"
     assert private["agentledger_source_message_hash"]
     serialized = json.dumps(payload)
     for forbidden in (
@@ -128,6 +130,18 @@ def test_google_payload_datetime_timezone_tracking_and_privacy() -> None:
         "refresh_token", "raw Graph", "LLM reasoning",
     ):
         assert forbidden not in serialized
+
+
+def test_execution_adapter_applies_default_duration_only_when_missing() -> None:
+    start, end, duration, source = execution_datetimes(
+        date="2026-08-15", start="10:30", end=None,
+        duration_minutes=None, timezone="Asia/Tokyo",
+    )
+
+    assert start == "2026-08-15T10:30:00+09:00"
+    assert end == "2026-08-15T11:30:00+09:00"
+    assert duration == 60
+    assert source == "default"
 
 
 def test_google_executor_existing_event_is_idempotent() -> None:

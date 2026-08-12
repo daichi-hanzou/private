@@ -11,6 +11,7 @@ from agentledger.html import render_explorer
 from agentledger.ingestion import read_jsonl
 from agentledger.normalizer import normalize_events
 from mail_calendar_orchestrator.service import MailCalendarOrchestrator
+from mail_calendar_orchestrator.state import MailStateStore
 from mail_calendar_orchestrator.cli import _parser, main
 from mail_to_calendar.hybrid_analyzer import HybridMailAnalyzer
 from mail_to_calendar.classifier import RuleBasedImportanceClassifier
@@ -354,6 +355,665 @@ def test_grounded_personal_commitment_corrects_informational_llm_output():
     assert (
         "candidate_type:none->event_due_to_grounded_user_commitment"
     ) in analysis.classification_corrections
+
+
+def test_hospital_candidate_with_grounded_start_needs_no_duration_or_end():
+    message = _message(
+        subject="8月15日 病院予約",
+        body="8月15日10時30分に病院を予約しています。",
+    )
+    raw = _raw(
+        category="appointment",
+        candidate_type="event",
+        title="病院予約",
+        date="2026-08-15",
+        start="10:30",
+        end=None,
+        duration_minutes=None,
+        user_commitment_evidence=["病院を予約しています"],
+        evidence=["8月15日", "10時30分", "病院を予約しています"],
+    )
+
+    analysis = _llm_first_result(message, raw).analysis_results[0]
+
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate is not None
+    assert analysis.final_candidate.date == "2026-08-15"
+    assert analysis.final_candidate.start == "10:30"
+    assert analysis.final_candidate.end is None
+    assert analysis.final_candidate.duration_minutes is None
+    assert analysis.validation_issues == []
+
+
+def test_private_mailbox_prompt_prioritizes_personal_life_commitments():
+    prompt = " ".join(SYSTEM_PROMPT.split())
+    assert "primarily used for personal life management" in SYSTEM_PROMPT
+    assert "travel and hotel reservations" in SYSTEM_PROMPT
+    assert "hospital, dental, and health-check" in SYSTEM_PROMPT
+    assert "payments, invoices, billing" in SYSTEM_PROMPT
+    assert "tax, government, contract, deadline, and renewal" in SYSTEM_PROMPT
+    assert "family and child schedules" in SYSTEM_PROMPT
+    assert "event and ticket reservations" in SYSTEM_PROMPT
+    assert "delivery or pickup arrangements" in SYSTEM_PROMPT
+    assert "grounded personal commitment takes priority" in SYSTEM_PROMPT
+    assert "importance alone does not make them calendar candidates" in prompt
+
+
+def test_hotel_reservation_with_incidental_campaign_is_calendar_candidate():
+    title = "楽天トラベル 宿泊予約"
+    hotel = "東京ベイホテル"
+    message = _message(
+        subject=f"{title}確認",
+        body=(
+            "楽天トラベルのポイント10倍キャンペーン実施中です。"
+            "予約番号 RT-123456。あなたの宿泊予約が確定しました。"
+            f"8月13日17:00から18:00まで{hotel}でチェックインしてください。"
+        ),
+    )
+    raw = _raw(
+        category="promotion",
+        candidate_type="event",
+        title=title,
+        date="2026-08-13",
+        start="17:00",
+        end="18:00",
+        duration_minutes=60,
+        location=hotel,
+        final_classification="promotion",
+        generic_event_advertisement=True,
+        user_commitment_detected=True,
+        user_commitment_evidence=["あなたの宿泊予約が確定しました"],
+        evidence=["8月13日", "17:00", "18:00", hotel],
+    )
+    result = _llm_first_result(message, raw)
+    analysis = result.analysis_results[0]
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate is not None
+    assert analysis.final_candidate.date == "2026-08-13"
+    assert analysis.final_candidate.start == "17:00"
+    assert analysis.final_candidate.location == hotel
+    assert analysis.validation_issues == []
+    assert result.candidates == [analysis.final_candidate]
+    assert analysis.final_classification != "clarification_required"
+    decision = next(
+        event for event in result.events
+        if event["event_type"] == "decision_made"
+    )
+    assert decision["selected_action"] == "propose_calendar_candidate"
+    assert (
+        "semantic_consistency:promotion->"
+        "calendar_candidate_due_to_strong_personal_reservation_evidence"
+    ) in analysis.classification_corrections
+
+
+def _strong_reservation_message():
+    return _message(
+        subject="「楽天トラベル」予約確認メール",
+        body=(
+            "ポイント還元キャンペーンとクーポン、旅行保険のご案内です。"
+            "予約番号 RT-123456。本人の宿泊予約が確定しました。"
+            "宿泊施設: 月岡温泉 白玉の湯 華鳳。"
+            "チェックイン日時: 2026年8月13日 17:00。支払い済みです。"
+        ),
+    )
+
+
+def test_strong_reservation_corrects_promotion_with_missing_llm_datetime():
+    message = _strong_reservation_message()
+    raw = _noncandidate("promotion")
+    result = _llm_first_result(message, raw)
+    analysis = result.analysis_results[0]
+    assert analysis.strong_personal_reservation_evidence is True
+    assert analysis.rule_derived_datetime_used is True
+    assert analysis.llm_proposed_classification == "promotion"
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate is not None
+    assert analysis.final_candidate.date == "2026-08-13"
+    assert analysis.final_candidate.start == "17:00"
+    assert analysis.llm_result.user_commitment_detected is True
+    assert analysis.validation_issues == []
+    assert (
+        "semantic_consistency:promotion->"
+        "calendar_candidate_due_to_strong_personal_reservation_evidence"
+    ) in analysis.classification_corrections
+    assert (
+        "user_commitment_detected:false->"
+        "true_from_strong_personal_reservation_evidence"
+    ) in analysis.classification_corrections
+    decision = next(
+        event for event in result.events if event["event_type"] == "decision_made"
+    )
+    audit = decision["analysis"]
+    assert audit["strong_personal_reservation_evidence"] is True
+    assert audit["rule_derived_datetime_used"] is True
+    assert audit["llm_result_summary"]["date"] is None
+    assert audit["normalized_candidate"]["date"] == "2026-08-13"
+
+
+def test_same_reservation_is_stable_across_llm_classification_variance():
+    message = _strong_reservation_message()
+    promotion = _llm_first_result(message, _noncandidate("promotion"))
+    candidate = _llm_first_result(message, _raw(
+        title="楽天トラベル 予約確認メール",
+        date="2026-08-13", start="17:00", end=None,
+        duration_minutes=None, location="月岡温泉 白玉の湯 華鳳",
+        user_commitment_evidence=["本人の宿泊予約が確定しました"],
+        evidence=[
+            "2026年8月13日", "17:00", "月岡温泉 白玉の湯 華鳳",
+            "本人の宿泊予約が確定しました",
+        ],
+    ))
+    first = promotion.analysis_results[0]
+    second = candidate.analysis_results[0]
+    assert first.final_classification == second.final_classification == (
+        "calendar_candidate"
+    )
+    assert first.final_candidate is not None
+    assert second.final_candidate is not None
+    assert first.final_candidate.date == second.final_candidate.date == "2026-08-13"
+    assert first.final_candidate.start == second.final_candidate.start == "17:00"
+    assert first.strong_personal_reservation_evidence is True
+    assert second.strong_personal_reservation_evidence is True
+    assert second.rule_derived_datetime_used is False
+    assert not any(
+        "strong_personal_reservation" in correction
+        for correction in second.classification_corrections
+    )
+
+
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        (
+            "病院予約確認", "予約番号 M-100。本人の受診予約が確定しました。"
+            "病院の診察日時: 2026年8月13日 10:00。",
+        ),
+        (
+            "航空券予約確認", "予約番号 F-100。本人の搭乗予約が確定しました。"
+            "航空便の出発日時: 2026年8月13日 13:00。",
+        ),
+    ],
+)
+def test_strong_reservation_correction_generalizes_beyond_hotels(subject, body):
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body),
+        _noncandidate("informational"),
+    ).analysis_results[0]
+    assert analysis.strong_personal_reservation_evidence
+    assert analysis.final_classification == "calendar_candidate"
+    assert analysis.final_candidate is not None
+
+
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        ("楽天ポイント10倍", "キャンペーン期間は2026年8月13日17:00開始です。"),
+        ("新商品広告", "店舗で2026年8月13日17:00から販売します。"),
+        ("カード引き落とし", "50,000円を2026年8月13日に口座振替予定です。"),
+    ],
+)
+def test_nonreservation_mail_never_receives_strong_reservation_correction(
+    subject, body
+):
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body), _noncandidate("promotion")
+    ).analysis_results[0]
+    assert analysis.strong_personal_reservation_evidence is False
+    assert analysis.rule_derived_datetime_used is False
+    assert analysis.final_candidate is None
+    assert not any(
+        "strong_personal_reservation" in correction
+        for correction in analysis.classification_corrections
+    )
+
+
+def _orchestrate_notification_case(tmp_path, message, raw):
+    store = MailStateStore(tmp_path / "state.sqlite3")
+    result = MailCalendarOrchestrator(
+        base_year=2026, timezone="Asia/Tokyo",
+        analyzer=_analyzer(FakeOllamaClient(raw), mode="llm-first"),
+        state_store=store, analysis_mode="llm-first", model_name="qwen3:8b",
+    ).process_provider(Provider([message]), tmp_path / "result.jsonl")
+    return store, result
+
+
+@pytest.mark.parametrize(
+    "subject,body,amount",
+    [
+        (
+            "口座振替予定のお知らせ",
+            "2026年8月27日に58,240円を振替予定です。前日までに残高確認してください。",
+            "58,240円",
+        ),
+        (
+            "クレジットカード請求",
+            "2026年8月27日にカード請求額42,000円を引き落とします。",
+            "42,000円",
+        ),
+        (
+            "税金の納付期限",
+            "税金15,000円の納付期限は2026年8月31日です。",
+            "15,000円",
+        ),
+    ],
+)
+def test_important_noncalendar_mail_is_queued_for_line_without_approval(
+    tmp_path, subject, body, amount
+):
+    raw = _raw(
+        is_important=True, importance_score=0.95, category="deadline",
+        should_create_calendar_candidate=False, candidate_type="deadline",
+        title=subject, date=("2026-08-31" if "31日" in body else "2026-08-27"),
+        start=None, end=None, duration_minutes=None, location=None,
+        clarification_required=True,
+        final_classification="clarification_required",
+        user_commitment_detected=True,
+        user_commitment_evidence=["残高確認"] if "残高確認" in body else ["引き落とし"] if "引き落とし" in body else ["納付期限"],
+        generic_event_advertisement=False,
+        should_notify_user=False,
+        evidence=["2026年8月31日"] if "31日" in body else ["2026年8月27日"],
+    )
+    store, result = _orchestrate_notification_case(
+        tmp_path, _message(subject=subject, body=body), raw
+    )
+    try:
+        assert result.calendar_proposals == 0
+        assert result.approvals_created == 0
+        assert result.important_notifications_created == 1
+        analysis = result.events[1]["analysis"]
+        assert analysis["llm_should_notify_user"] is False
+        assert analysis["should_notify_user"] is True
+        assert analysis["notification_override_applied"] is True
+        assert analysis["notification_override_reason"] == (
+            "important_deadline_with_user_obligation"
+        )
+        assert analysis["notification_grounded_date_present"] is True
+        assert analysis["notification_amount_detected"] is True
+        assert analysis["llm_result_summary"]["should_notify_user"] is False
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM approval_queue"
+        ).fetchone()[0] == 0
+        row = store.connection.execute(
+            "SELECT * FROM important_mail_notifications"
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["category"] == "deadline"
+        assert row["should_notify_user"] == 1
+        assert row["amount"] == amount
+        assert row["notification_date"] in {"2026-08-27", "2026-08-31"}
+    finally:
+        store.close()
+
+
+def test_insurance_renewal_notification_override_without_amount(tmp_path):
+    message = _message(
+        subject="保険更新のお知らせ",
+        body="保険更新の手続き期限は2026年8月31日です。手続きしてください。",
+    )
+    raw = _raw(
+        is_important=True, importance_score=0.9, category="deadline",
+        should_create_calendar_candidate=False, candidate_type="deadline",
+        title="保険更新のお知らせ", date="2026-08-31", start=None,
+        end=None, duration_minutes=None, location=None,
+        clarification_required=True,
+        final_classification="clarification_required",
+        user_commitment_detected=True,
+        user_commitment_evidence=["手続きしてください"],
+        generic_event_advertisement=False, should_notify_user=False,
+        evidence=["2026年8月31日", "手続きしてください"],
+    )
+    store, result = _orchestrate_notification_case(tmp_path, message, raw)
+    try:
+        assert result.important_notifications_created == 1
+        analysis = result.events[1]["analysis"]
+        assert analysis["notification_override_applied"] is True
+        assert analysis["notification_amount_detected"] is False
+        row = store.connection.execute(
+            "SELECT * FROM important_mail_notifications"
+        ).fetchone()
+        assert row["notification_date"] == "2026-08-31"
+        assert row["amount"] is None
+    finally:
+        store.close()
+
+
+def test_campaign_deadline_does_not_override_should_notify_user(tmp_path):
+    message = _message(
+        subject="ポイント10倍キャンペーン",
+        body="ポイント10倍キャンペーンは2026年8月27日までです。",
+    )
+    store, result = _orchestrate_notification_case(
+        tmp_path, message,
+        _noncandidate(
+            "promotion", is_important=True, should_notify_user=False,
+            date="2026-08-27", evidence=["2026年8月27日"],
+        ),
+    )
+    try:
+        analysis = result.events[1]["analysis"]
+        assert analysis["llm_should_notify_user"] is False
+        assert analysis["should_notify_user"] is False
+        assert analysis["notification_override_applied"] is False
+        assert result.important_notifications_created == 0
+    finally:
+        store.close()
+
+
+def test_reprocess_does_not_duplicate_important_notification(tmp_path):
+    message = _message(
+        subject="口座振替予定のお知らせ",
+        body="2026年8月27日に58,240円を振替予定です。残高確認してください。",
+        message_id="bank-dedupe",
+    )
+    raw = _raw(
+        is_important=True, importance_score=0.95, category="deadline",
+        should_create_calendar_candidate=False, candidate_type="deadline",
+        title=message.subject, date="2026-08-27", start=None, end=None,
+        duration_minutes=None, location=None, clarification_required=True,
+        final_classification="clarification_required",
+        user_commitment_detected=True,
+        user_commitment_evidence=["残高確認"],
+        generic_event_advertisement=False, should_notify_user=False,
+        evidence=["2026年8月27日", "残高確認"],
+    )
+    store = MailStateStore(tmp_path / "state.sqlite3")
+    orchestrator = MailCalendarOrchestrator(
+        base_year=2026, analyzer=_analyzer(FakeOllamaClient(raw), mode="llm-first"),
+        state_store=store, analysis_mode="llm-first", model_name="qwen3:8b",
+    )
+    try:
+        first = orchestrator.process_provider(
+            Provider([message]), tmp_path / "first.jsonl"
+        )
+        second = orchestrator.process_provider(
+            Provider([message]), tmp_path / "second.jsonl", reprocess=True
+        )
+        assert first.important_notifications_created == 1
+        assert second.important_notifications_created == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM important_mail_notifications"
+        ).fetchone()[0] == 1
+    finally:
+        store.close()
+
+
+def test_security_notification_does_not_receive_important_override(tmp_path):
+    message = _message(
+        subject="新しいサインイン",
+        body="2026年8月27日に新しいサインインを検出しました。",
+    )
+    store, result = _orchestrate_notification_case(
+        tmp_path, message,
+        _noncandidate(
+            "security_notification", is_important=True,
+            should_notify_user=False, date="2026-08-27",
+            evidence=["2026年8月27日"],
+        ),
+    )
+    try:
+        analysis = result.events[1]["analysis"]
+        assert analysis["notification_override_applied"] is False
+        assert result.important_notifications_created == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("kind", ["hospital", "hotel"])
+def test_calendar_approval_excludes_duplicate_important_notification(
+    tmp_path, kind
+):
+    if kind == "hospital":
+        subject = "病院予約"
+        body = "2026年8月15日10:30から11:30まで中央病院の受診予約済みです。"
+        location = "中央病院"
+        commitment = "受診予約済みです"
+    else:
+        subject = "ホテル予約"
+        body = "2026年8月15日17:00から18:00まで青空ホテルの宿泊予約済みです。"
+        location = "青空ホテル"
+        commitment = "宿泊予約済みです"
+    raw = _raw(
+        is_important=True, importance_score=0.95, category="appointment",
+        title=subject, date="2026-08-15", start=("10:30" if kind == "hospital" else "17:00"),
+        end=("11:30" if kind == "hospital" else "18:00"),
+        duration_minutes=60, location=location,
+        user_commitment_evidence=[commitment],
+        should_notify_user=True,
+        evidence=["2026年8月15日", location, commitment],
+    )
+    store, result = _orchestrate_notification_case(
+        tmp_path, _message(subject=subject, body=body), raw
+    )
+    try:
+        assert result.calendar_proposals == 1
+        assert result.approvals_created == 1
+        assert result.important_notifications_created == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM important_mail_notifications"
+        ).fetchone()[0] == 0
+    finally:
+        store.close()
+
+
+def test_generic_promotion_is_not_queued_for_important_line_notification(tmp_path):
+    store, result = _orchestrate_notification_case(
+        tmp_path,
+        _message(
+            subject="ポイント10倍キャンペーン",
+            body="2026年8月15日17:00からセールを開催します。",
+        ),
+        _noncandidate("promotion", should_notify_user=False),
+    )
+    try:
+        assert result.approvals_created == 0
+        assert result.important_notifications_created == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM important_mail_notifications"
+        ).fetchone()[0] == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "subject,title,body",
+    [
+        (
+            "「楽天トラベル」予約確認メール",
+            "楽天トラベル 予約確認メール",
+            "8月13日17:00から18:00まで本人の宿泊予約があります。",
+        ),
+        (
+            "Fw: 【重要】8月13日 歯科予約のお知らせ",
+            "8月13日 歯科予約",
+            "8月13日17:00から18:00まで本人の歯科予約があります。",
+        ),
+    ],
+)
+def test_title_grounding_allows_quotes_spacing_decoration_and_forward_prefix(
+    subject, title, body
+):
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            title=title, date="2026-08-13", start="17:00", end="18:00",
+            duration_minutes=60,
+            user_commitment_evidence=["本人の"],
+            evidence=["8月13日", "17:00", "18:00", "本人の"],
+        )),
+        _message(subject=subject, body=body),
+    )
+    assert checked.candidate_allowed
+    assert checked.final_classification == "calendar_candidate"
+    assert "title_not_grounded" not in checked.issues
+    assert "title_grounding_relaxed" not in checked.issues
+
+
+def test_title_tokens_can_be_soft_grounded_from_body_for_human_approval():
+    hotel = "月岡温泉 白玉の湯 華鳳"
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            title=f"{hotel} 宿泊",
+            date="2026-08-13", start="17:00", end=None,
+            duration_minutes=None, location=hotel,
+            user_commitment_evidence=["本人の宿泊予約"],
+            evidence=["8月13日", "17:00", hotel, "本人の宿泊予約"],
+        )),
+        _message(
+            subject="予約確認メール",
+            body=(
+                f"{hotel}\n8月13日17:00チェックイン。"
+                "本人の宿泊予約が確定しています。"
+            ),
+        ),
+    )
+    assert checked.candidate_allowed
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.issues == ["title_grounding_relaxed"]
+
+
+@pytest.mark.parametrize(
+    "subject,title",
+    [
+        ("楽天トラベル予約確認", "明日の重要会議"),
+        ("歯科予約のお知らせ", "家族旅行"),
+    ],
+)
+def test_unrelated_title_remains_a_hard_rejection(subject, title):
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            title=title, date="2026-08-13", start="17:00", end="18:00",
+            duration_minutes=60,
+            user_commitment_evidence=["本人の予約"],
+            evidence=["8月13日", "17:00", "18:00", "本人の予約"],
+        )),
+        _message(
+            subject=subject,
+            body="8月13日17:00から18:00まで本人の予約があります。",
+        ),
+    )
+    assert not checked.candidate_allowed
+    assert checked.final_classification == "invalid"
+    assert "title_not_grounded" in checked.issues
+
+
+def test_grounded_title_does_not_override_ungrounded_date_or_time():
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            title="歯科予約", date="2026-08-14", start="19:00", end=None,
+            duration_minutes=None,
+            user_commitment_evidence=["本人の歯科予約"],
+            evidence=["本人の歯科予約"],
+        )),
+        _message(
+            subject="歯科予約",
+            body="8月13日17:00に本人の歯科予約があります。",
+        ),
+    )
+    assert not checked.candidate_allowed
+    assert "date_not_grounded" in checked.issues
+    assert "start_not_grounded" in checked.issues
+
+
+@pytest.mark.parametrize(
+    "title,body,location,commitment",
+    [
+        (
+            "病院予約", "8月13日10:00から11:00まで中央病院で受診予約済みです。",
+            "中央病院", "受診予約済みです",
+        ),
+        (
+            "歯科予約", "8月13日11:00から12:00まで青空歯科で診察を予約しました。",
+            "青空歯科", "診察を予約しました",
+        ),
+        (
+            "航空券予約", "8月13日13:00から14:00まで羽田空港発の便を予約済みです。",
+            "羽田空港", "便を予約済みです",
+        ),
+        (
+            "鉄道予約", "8月13日16:00から17:00まで東京駅発の列車を予約済みです。",
+            "東京駅", "列車を予約済みです",
+        ),
+        (
+            "イベントチケット", "8月13日19:00から20:00まで市民ホールのチケットを購入済みです。",
+            "市民ホール", "チケットを購入済みです",
+        ),
+    ],
+)
+def test_private_reservations_are_allowed_candidates(
+    title, body, location, commitment
+):
+    start = {
+        "病院予約": "10:00", "歯科予約": "11:00",
+        "航空券予約": "13:00", "鉄道予約": "16:00",
+    }.get(
+        title, "19:00"
+    )
+    end = {
+        "病院予約": "11:00", "歯科予約": "12:00",
+        "航空券予約": "14:00", "鉄道予約": "17:00",
+    }.get(
+        title, "20:00"
+    )
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            category="appointment",
+            title=title,
+            date="2026-08-13", start=start, end=end,
+            duration_minutes=60, location=location,
+            user_commitment_evidence=[commitment],
+            evidence=["8月13日", start, end, location],
+        )),
+        _message(subject=title, body=body),
+    )
+    assert checked.candidate_allowed
+    assert checked.final_classification == "calendar_candidate"
+    assert checked.issues == []
+
+
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        ("楽天タイムセール", "8月13日17:00からポイント10倍キャンペーンを開催します。"),
+        ("新商品広告", "8月13日17:00発売の新商品をご案内します。"),
+    ],
+)
+def test_dated_generic_promotions_remain_blocked(subject, body):
+    checked = LLMResultValidator(base_year=2026).validate(
+        LLMAnalysisResult.from_dict(_raw(
+            category="promotion", title=subject,
+            date="2026-08-13", start="17:00", end=None,
+            duration_minutes=None,
+            generic_event_advertisement=True,
+            user_commitment_detected=False,
+            user_commitment_evidence=[],
+            evidence=["8月13日", "17:00"],
+        )),
+        _message(subject=subject, body=body),
+    )
+    assert not checked.candidate_allowed
+    assert checked.final_classification == "promotion"
+
+
+@pytest.mark.parametrize(
+    "subject,body,category",
+    [
+        ("カード請求", "カード利用額50,000円を8月27日に引き落とします。", "informational"),
+        ("税金の納付期限", "住民税の納付期限は8月31日です。", "deadline"),
+        ("保険契約更新", "保険契約の更新期限は8月31日です。", "deadline"),
+    ],
+)
+def test_private_payment_and_deadline_mail_remains_important_without_forced_candidate(
+    subject, body, category
+):
+    raw = _noncandidate(
+        "informational", category=category, is_important=True,
+        importance_score=0.9, reasons=["personal payment or deadline"],
+        evidence=["8月27日"] if "27日" in body else ["8月31日"],
+    )
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body), raw
+    ).analysis_results[0]
+    assert analysis.final_importance.is_important
+    assert analysis.final_candidate is None
 
 
 def test_personal_commitment_without_datetime_requires_clarification():

@@ -36,3 +36,4 @@ class OrchestrationResult:
     run_id: str | None = None
     state_db: Path | None = None
     approvals_created: int = 0
+    important_notifications_created: int = 0

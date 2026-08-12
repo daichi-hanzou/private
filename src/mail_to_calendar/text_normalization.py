@@ -24,6 +24,68 @@ def contains_japanese_explicit_date(value: str) -> bool:
     ))
 
 
+_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*[:：]\s*)+", re.I)
+_TITLE_TOKEN = re.compile(r"[0-9a-z]+|[一-龥々〆ヵヶぁ-んァ-ヶー]+", re.I)
+_TITLE_GENERIC_TOKENS = frozenset({
+    "重要", "お知らせ", "ご案内", "案内", "確認", "メール",
+    "予約", "予定", "通知", "について", "the", "a", "an",
+})
+
+
+def title_grounding_projection(value: str) -> str:
+    """Return a punctuation/width-insensitive projection for title matching."""
+    normalized = _REPLY_PREFIX.sub("", nfkc_text(value).casefold())
+    return "".join(
+        character
+        for character in normalized
+        if not unicodedata.category(character).startswith(("P", "S", "Z", "C"))
+    )
+
+
+def title_grounding_tokens(value: str) -> tuple[str, ...]:
+    """Return bounded lexical chunks without attempting semantic similarity."""
+    normalized = _REPLY_PREFIX.sub("", nfkc_text(value).casefold())
+    separated = "".join(
+        character
+        if not unicodedata.category(character).startswith(("P", "S", "Z", "C"))
+        else " "
+        for character in normalized
+    )
+    return tuple(
+        token for token in _TITLE_TOKEN.findall(separated)
+        if len(token) >= 2 and token not in _TITLE_GENERIC_TOKENS
+    )
+
+
+def title_grounding_status(title: str, subject: str, body: str) -> str:
+    """Return ``grounded``, ``relaxed``, or ``not_grounded`` deterministically."""
+    title_projection = title_grounding_projection(title)
+    if not title_projection:
+        return "not_grounded"
+    source_projections = (
+        title_grounding_projection(subject), title_grounding_projection(body)
+    )
+    if any(
+        title_projection in source
+        or (len(source) >= 4 and source in title_projection)
+        for source in source_projections if source
+    ):
+        return "grounded"
+    tokens = title_grounding_tokens(title)
+    if not tokens:
+        return "not_grounded"
+    searchable = title_grounding_projection(f"{subject}\n{body}")
+    matched = tuple(token for token in tokens if token in searchable)
+    total_weight = sum(len(token) for token in tokens)
+    matched_weight = sum(len(token) for token in matched)
+    if (
+        matched_weight / total_weight >= 0.7
+        and (len(matched) >= 2 or matched_weight >= 8)
+    ):
+        return "relaxed"
+    return "not_grounded"
+
+
 _TRANSPORT_HEADER = re.compile(
     r"^\s*(?:差出人|送信日時|宛先|件名|from|sent|to|cc|subject)\s*[:：]",
     re.IGNORECASE,

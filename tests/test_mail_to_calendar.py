@@ -254,7 +254,7 @@ def test_candidates_for_meeting_deadline_ambiguous_and_promotion() -> None:
     assert meeting.title == "定例会議"
     assert meeting.date == "2026-08-12"
     assert meeting.start == "15:00"
-    assert meeting.duration_minutes == 60
+    assert meeting.duration_minutes is None
     assert meeting.requires_approval
     assert deadline is not None
     assert deadline.candidate_type == "deadline"
@@ -351,6 +351,7 @@ def test_calendar_agent_conversion_boundary() -> None:
     assert isinstance(request, CalendarRequest)
     assert request.requested_date == "2026-08-12"
     assert request.available_slots == ["15:00"]
+    assert request.duration_minutes is None
 
     assert ambiguous is not None
     with pytest.raises(ValueError, match="requires clarification"):

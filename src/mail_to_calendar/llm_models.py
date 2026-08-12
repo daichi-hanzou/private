@@ -254,3 +254,11 @@ class HybridAnalysisResult:
     classification_corrections: list[str] = field(default_factory=list)
     time_normalization: dict[str, str | int] | None = None
     llm_result_summary: dict[str, Any] | None = None
+    strong_personal_reservation_evidence: bool = False
+    rule_derived_datetime_used: bool = False
+    llm_should_notify_user: bool = False
+    final_should_notify_user: bool = False
+    notification_override_applied: bool = False
+    notification_override_reason: str | None = None
+    notification_grounded_date: str | None = None
+    notification_amount_detected: bool = False

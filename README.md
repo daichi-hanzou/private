@@ -627,6 +627,31 @@ paths. They never contain body text, previews, Graph or LLM raw responses,
 prompts, attachments, or tokens. LINE notification/webhook integration remains
 the next phase and can call `ApprovalService.approve()` or `.reject()` directly.
 
+### Important mail LINE notifications
+
+In scheduled private-mailbox runs, an analyzed message is queued for a
+button-free LINE notification when it is important, its validated LLM result has
+`should_notify_user=true`, and it is not an executable CalendarCandidate.
+Calendar candidates use the existing Approval notification exclusively. The
+important-mail payload contains only the bounded Subject, category, grounded
+date/deadline when available, an optional deterministically extracted yen
+amount, and a fixed instruction to review the message; it never contains the
+body, raw LLM response, prompt, or credentials.
+
+SQLite deduplicates these sends by provider, canonical message ID, and
+`important_mail` notification type. Status progresses through `pending`,
+`sending`, and `sent` or `failed`, with a bounded attempt count and safe error
+type. LINE failure remains best-effort and does not fail the analyzed mail run.
+Scheduled runs dispatch pending important-mail rows after analysis. The same
+dispatcher can be invoked manually without touching Calendar Approvals:
+
+```bash
+uv run mail-calendar-orchestrator line important send-pending
+```
+
+Retryable failures are selected again on a later scheduled/manual dispatch up
+to three attempts; permanent failures and already-sent rows are not resent.
+
 ### Google Calendar execution
 
 Google Calendar writing is a separate, explicit phase after human approval:
@@ -1056,6 +1081,10 @@ LINE Messaging API can be used as a narrow approval UI for pending calendar
 candidates. LINE only sends notifications and postback decisions; mail analysis,
 LLM classification, approval state, and calendar execution remain in the existing
 local services.
+
+Calendar approvals use persistent Flex Message postback buttons, not Quick Reply,
+so an older approval remains actionable after later important-mail notifications.
+Important-mail notifications remain button-free text messages.
 
 Create the private configuration file (created with mode `0600`):
 

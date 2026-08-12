@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .llm_models import FinalClassification, LLMAnalysisResult
 from .models import EmailMessage
 from .time_normalization import normalize_calendar_datetime, normalize_calendar_time
-from .text_normalization import date_detection_text
+from .text_normalization import date_detection_text, title_grounding_status
 
 
 @dataclass(frozen=True)
@@ -108,15 +108,22 @@ class LLMResultValidator:
         grounded_personal_datetime = self._personal_datetime_grounded(
             result, message, text
         )
+        grounded_personal_commitment = bool(
+            result.user_commitment_detected
+            and commitment_grounded
+            and grounded_personal_datetime
+        )
+        generic_promotion = bool(
+            promotion and not grounded_personal_commitment
+        )
         if (
-            result.final_classification == "informational"
+            result.final_classification in {"informational", "promotion"}
             and result.user_commitment_detected
             and commitment_grounded
-            and not generic_ad
-            and not promotion
             and not security
         ):
             if grounded_personal_datetime:
+                original_classification = result.final_classification
                 original_candidate_type = result.candidate_type
                 result = replace(
                     result,
@@ -128,7 +135,7 @@ class LLMResultValidator:
                     should_create_calendar_candidate=True,
                 )
                 semantic_corrections.append(
-                    "semantic_consistency:informational->"
+                    f"semantic_consistency:{original_classification}->"
                     "calendar_candidate_due_to_grounded_user_commitment"
                 )
                 if original_candidate_type == "none":
@@ -161,6 +168,7 @@ class LLMResultValidator:
             result.candidate_type == "none"
             and not result.should_create_calendar_candidate
         )
+        candidate_requested = result.final_classification == "calendar_candidate"
         normalized_date = result.date
         normalized_start = result.start
         normalized_end = result.end
@@ -274,8 +282,29 @@ class LLMResultValidator:
                 issues.append("duration_not_grounded")
         elif temporal_validation_required and grounded_range_duration is not None:
             normalized_duration = grounded_range_duration
-        if temporal_validation_required and result.title and result.title.casefold() not in folded:
-            issues.append("title_not_grounded")
+        if temporal_validation_required and result.title:
+            title_status = title_grounding_status(
+                result.title, message.subject, message.body_text
+            )
+            if title_status == "relaxed":
+                relaxed_allowed = bool(
+                    candidate_requested
+                    and start_grounded
+                    and result.date
+                    and self._date_grounded(
+                        result.date, text, message, result.timezone
+                    )
+                    and result.user_commitment_detected
+                    and commitment_grounded
+                    and not security
+                    and not generic_ad
+                )
+                issues.append(
+                    "title_grounding_relaxed"
+                    if relaxed_allowed else "title_not_grounded"
+                )
+            elif title_status == "not_grounded":
+                issues.append("title_not_grounded")
         if (
             temporal_validation_required
             and result.date
@@ -284,14 +313,13 @@ class LLMResultValidator:
             issues.append("relative_date_requires_clarification")
         if temporal_validation_required and result.candidate_type == "deadline" and result.start and not self._has_time(text):
             issues.append("deadline_time_was_inferred")
-        candidate_requested = result.final_classification == "calendar_candidate"
         if result.confidence < self.confidence_threshold and (
             candidate_requested or result.clarification_required
         ):
             issues.append("confidence_below_threshold")
         if candidate_requested and security:
             issues.append("security_notification_not_calendar_candidate")
-        if candidate_requested and promotion:
+        if candidate_requested and generic_promotion:
             issues.append("promotion_not_calendar_candidate")
         if candidate_requested and generic_ad and not result.user_commitment_detected:
             issues.append("generic_event_without_user_commitment")
@@ -313,7 +341,11 @@ class LLMResultValidator:
             }
             for issue in issues
         )
-        candidate_blockers = bool(issues) or security or promotion
+        soft_issues = {"title_grounding_relaxed"}
+        candidate_blockers = (
+            any(issue not in soft_issues for issue in issues)
+            or security or generic_promotion
+        )
         candidate_allowed = candidate_requested and not candidate_blockers
         classification: FinalClassification
         rejected_reason = None
@@ -321,7 +353,7 @@ class LLMResultValidator:
             classification = "calendar_candidate"
         elif security:
             classification = "security_notification"
-        elif promotion:
+        elif generic_promotion:
             classification = "promotion"
         elif generic_ad and not result.user_commitment_detected:
             classification = (

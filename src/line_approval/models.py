@@ -28,3 +28,11 @@ class WebhookResult:
 
 
 MessagePayload = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ImportantDispatchResult:
+    selected: int
+    sent: int
+    failed: int
+    skipped: int

@@ -19,6 +19,7 @@ class CalendarExecutionRequest:
     source_provider: str | None
     source_message_id: str | None
     calendar_id: str
+    duration_source: str = "extracted"
 
 
 @dataclass(frozen=True)

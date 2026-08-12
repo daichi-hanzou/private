@@ -399,6 +399,10 @@ class MailToCalendarService:
             "classification_corrections": (
                 analysis.classification_corrections
             ),
+            "strong_personal_reservation_evidence": (
+                analysis.strong_personal_reservation_evidence
+            ),
+            "rule_derived_datetime_used": analysis.rule_derived_datetime_used,
             "time_normalization": analysis.time_normalization,
             "validation_issues": analysis.validation_issues,
             "fallback_reason": analysis.fallback_reason,
@@ -408,6 +412,22 @@ class MailToCalendarService:
             "user_commitment_detected": bool(
                 analysis.llm_result
                 and analysis.llm_result.user_commitment_detected
+            ),
+            "should_notify_user": bool(
+                analysis.llm_result and analysis.llm_result.should_notify_user
+            ),
+            "llm_should_notify_user": analysis.llm_should_notify_user,
+            "notification_override_applied": (
+                analysis.notification_override_applied
+            ),
+            "notification_override_reason": (
+                analysis.notification_override_reason
+            ),
+            "notification_grounded_date_present": bool(
+                analysis.notification_grounded_date
+            ),
+            "notification_amount_detected": (
+                analysis.notification_amount_detected
             ),
             "generic_event_advertisement": bool(
                 analysis.llm_result

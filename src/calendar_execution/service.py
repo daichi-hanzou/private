@@ -259,7 +259,7 @@ class CalendarExecutionService:
 
     @staticmethod
     def _request(record: ApprovalRecord, calendar_id: str) -> CalendarExecutionRequest:
-        start, end, duration = execution_datetimes(
+        start, end, duration, duration_source = execution_datetimes(
             date=record.date, start=record.start, end=record.end,
             duration_minutes=record.duration_minutes, timezone=record.timezone,
         )
@@ -269,6 +269,7 @@ class CalendarExecutionService:
             calendar_action_id=record.calendar_action_id,
             candidate_id=record.candidate_id, title=record.title,
             start=start, end=end, duration_minutes=duration,
+            duration_source=duration_source,
             timezone=record.timezone, location=record.location,
             description=(
                 f"Created by AgentLedger.\nApproval ID: {record.approval_id}\n"
@@ -298,6 +299,7 @@ class CalendarExecutionService:
         now = datetime.now(timezone.utc).isoformat()
         actual: dict[str, Any]
         if result.success:
+            execution_request = self._request(record, result.calendar_id)
             actual = {
                 "outcome_type": "calendar_event_created",
                 "provider": result.provider,
@@ -306,6 +308,12 @@ class CalendarExecutionService:
                 "html_link": result.html_link,
                 "start": result.start,
                 "end": result.end,
+                "duration_minutes": (
+                    record.duration_minutes
+                    if record.duration_minutes is not None else None
+                ),
+                "execution_duration_minutes": execution_request.duration_minutes,
+                "duration_source": execution_request.duration_source,
                 "already_exists": result.already_exists,
             }
             status = "confirmed"

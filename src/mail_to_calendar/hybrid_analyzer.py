@@ -12,6 +12,8 @@ from .models import (
     CalendarCandidate, EmailMessage, ImportanceResult, canonical_message_id,
 )
 from .ollama_client import OllamaError
+from .reservation_evidence import detect_strong_personal_reservation
+from .notification_evidence import detect_important_notification_evidence
 from .validator import LLMResultValidator
 from .text_normalization import (
     contains_japanese_explicit_date, date_detection_text, nfkc_text,
@@ -94,7 +96,77 @@ class HybridMailAnalyzer:
         try:
             llm = self.classifier.analyze(value)
             self.classifier.last_input_truncated = source_body_truncated
+            original_llm = llm
+            reservation = detect_strong_personal_reservation(
+                f"{analysis_message.subject}\n{analysis_message.body_text}",
+                base_year=self.base_year,
+            )
+            semantic_corrections: list[str] = []
+            rule_derived_datetime_used = False
+            if (
+                reservation.detected
+                and llm.final_classification in {"promotion", "informational"}
+            ):
+                original_classification = llm.final_classification
+                derived_date = llm.date or reservation.derived_date
+                derived_start = llm.start or reservation.derived_start
+                rule_derived_datetime_used = bool(
+                    (not llm.date and derived_date)
+                    or (not llm.start and derived_start)
+                )
+                llm = replace(
+                    llm,
+                    final_classification="calendar_candidate",
+                    should_create_calendar_candidate=True,
+                    candidate_type=(
+                        "event" if llm.candidate_type == "none"
+                        else llm.candidate_type
+                    ),
+                    title=llm.title or analysis_message.subject,
+                    date=derived_date,
+                    start=derived_start,
+                    user_commitment_detected=True,
+                    user_commitment_evidence=(
+                        llm.user_commitment_evidence
+                        or [reservation.commitment_evidence]
+                    ),
+                    generic_event_advertisement=False,
+                )
+                semantic_corrections.append(
+                    f"semantic_consistency:{original_classification}->"
+                    "calendar_candidate_due_to_strong_personal_reservation_evidence"
+                )
+                if not original_llm.user_commitment_detected:
+                    semantic_corrections.append(
+                        "user_commitment_detected:false->"
+                        "true_from_strong_personal_reservation_evidence"
+                    )
+                if rule_derived_datetime_used:
+                    semantic_corrections.append(
+                        "datetime:null->rule_derived_from_strong_personal_reservation_evidence"
+                    )
             checked = self.validator.validate(llm, analysis_message)
+            notification = detect_important_notification_evidence(
+                f"{analysis_message.subject}\n{analysis_message.body_text}",
+                base_year=self.base_year,
+            )
+            notification_override = bool(
+                notification.detected
+                and checked.result.is_important
+                and checked.final_classification
+                not in {"calendar_candidate", "promotion", "security_notification"}
+                and not checked.result.generic_event_advertisement
+                and not checked.result.should_notify_user
+            )
+            if notification_override:
+                checked = replace(
+                    checked,
+                    result=replace(checked.result, should_notify_user=True),
+                )
+                semantic_corrections.append(
+                    "should_notify_user:false->true_"
+                    "from_important_deadline_with_user_obligation"
+                )
         except (OllamaError, ValueError) as exc:
             latency = int((time.monotonic() - started) * 1000)
             if self.require_llm or self.mode == "llm-all":
@@ -152,10 +224,18 @@ class HybridMailAnalyzer:
             checked.result.confidence, sorted(set(issues)), None, latency,
             self.classifier.client.model, truncated, classification,
             rejection_reason,
-            llm.final_classification,
-            checked.classification_corrections,
+            original_llm.final_classification,
+            semantic_corrections + checked.classification_corrections,
             checked.time_normalization,
-            llm.summary(),
+            original_llm.summary(),
+            reservation.detected,
+            rule_derived_datetime_used,
+            original_llm.should_notify_user,
+            checked.result.should_notify_user,
+            notification_override,
+            notification.reason if notification_override else None,
+            notification.grounded_date if notification.detected else None,
+            notification.amount_detected if notification.detected else False,
         )
 
     def date_grounding_debug(

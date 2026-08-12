@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -247,6 +248,30 @@ class MailCalendarOrchestrator:
             approvals_created = len(
                 ApprovalService(self.state_store).register_pending(events, written)
             )
+        important_notifications_created = 0
+        if self.state_store is not None and not analysis_only:
+            for message, analysis in zip(
+                messages, mail_result.analysis_results or [], strict=False
+            ):
+                if not (
+                    analysis.final_importance.is_important
+                    and analysis.llm_result
+                    and analysis.llm_result.should_notify_user
+                    and analysis.final_classification != "calendar_candidate"
+                ):
+                    continue
+                if self.state_store.register_important_notification(
+                    provider=message.provider,
+                    message_id=message.message_id,
+                    category=analysis.llm_result.category,
+                    subject=message.subject,
+                    notification_date=(
+                        analysis.notification_grounded_date
+                        or analysis.llm_result.date
+                    ),
+                    amount=self._safe_amount(message.body_text),
+                ):
+                    important_notifications_created += 1
         failed_analyses = {
             message.message_id: analysis
             for message, analysis in zip(
@@ -366,7 +391,15 @@ class MailCalendarOrchestrator:
             run_id=run_id,
             state_db=self.state_store.path if self.state_store else None,
             approvals_created=approvals_created,
+            important_notifications_created=important_notifications_created,
         )
+
+    @staticmethod
+    def _safe_amount(body_text: str) -> str | None:
+        match = re.search(
+            r"(?<!\d)(\d{1,3}(?:,\d{3})+|\d+)\s*円", body_text
+        )
+        return f"{match.group(1)}円" if match else None
 
     @staticmethod
     def _is_retryable_llm_failure(reason: str | None) -> bool:

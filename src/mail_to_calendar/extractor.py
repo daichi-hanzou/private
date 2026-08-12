@@ -86,7 +86,9 @@ class RuleBasedCalendarExtractor:
         clarification = bool(ambiguous) or date is None or invalid_temporal
         if candidate_type != "deadline" and start is None:
             clarification = True
-        duration = 60 if candidate_type == "event" and start else None
+        # A duration is not inferred from a start time alone.  Calendar API
+        # adapters may apply an execution-only default later.
+        duration = None
         digest = hashlib.sha256(
             canonical_message_id(message.provider, message.message_id).encode()
         ).hexdigest()[:12]
@@ -198,8 +200,6 @@ def to_calendar_request(candidate: CalendarCandidate) -> CalendarRequest:
         raise ValueError("candidate date is required")
     if not candidate.start:
         raise ValueError("candidate start time is required")
-    if candidate.duration_minutes is None:
-        raise ValueError("candidate duration is required")
     return CalendarRequest(
         title=candidate.title,
         requested_date=candidate.date,
