@@ -99,6 +99,7 @@ class MailCalendarOrchestrator:
         selected = unique
         skipped = duplicate_count
         decisions = {}
+        message_source_ref = self._message_source_ref(provider)
         if self.state_store is not None:
             selected = []
             for message in unique:
@@ -123,6 +124,7 @@ class MailCalendarOrchestrator:
                     message, run_id=run_id, analysis_mode=self.analysis_mode,
                     model_name=self.model_name,
                     digest=decisions[message.message_id].content_hash,
+                    message_source_ref=message_source_ref,
                 )
         if not selected:
             if self.state_store is not None:
@@ -326,6 +328,7 @@ class MailCalendarOrchestrator:
                         "schema_version", "mail-analysis-schema-v2"
                     ),
                     source_run_id=source_run_id,
+                    source_jsonl_path=str(written),
                     error=(
                         failed_analyses[message.message_id].fallback_reason
                         if message.message_id in failed_analyses else None
@@ -400,6 +403,13 @@ class MailCalendarOrchestrator:
             r"(?<!\d)(\d{1,3}(?:,\d{3})+|\d+)\s*円", body_text
         )
         return f"{match.group(1)}円" if match else None
+
+    @staticmethod
+    def _message_source_ref(provider: MailProvider) -> str | None:
+        path = getattr(provider, "path", None)
+        if isinstance(path, Path):
+            return str(path.expanduser().resolve())
+        return None
 
     @staticmethod
     def _is_retryable_llm_failure(reason: str | None) -> bool:

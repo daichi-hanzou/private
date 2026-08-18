@@ -39,6 +39,10 @@ from .scheduler import (
     SystemdUserScheduler,
     run_scheduled_batch,
 )
+from .review_provider import OpenAIReviewClient, OpenAIReviewConfig
+from .review_service import ClassificationReviewService, parse_since
+from .review_sources import MessageResolver, ReviewSourceConfig
+from .review_web import serve_review_ui
 from .approvals import APPROVAL_STATUSES, ApprovalService
 from calendar_execution.google_auth import (
     DEFAULT_CREDENTIALS, DEFAULT_TOKEN, GoogleCalendarAuth,
@@ -480,6 +484,48 @@ def _parser() -> argparse.ArgumentParser:
     )
     for name in ("install", "status", "enable", "disable", "restart", "uninstall"):
         line_service_commands.add_parser(name)
+    review = commands.add_parser(
+        "review", help="Run and inspect classification review cases."
+    )
+    review.add_argument(
+        "--state-db", type=Path,
+        default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
+    )
+    review.add_argument("--client-id")
+    review.add_argument(
+        "--authority",
+        default="https://login.microsoftonline.com/consumers",
+    )
+    review.add_argument(
+        "--token-cache",
+        type=Path,
+        default=Path("~/.config/agentledger/microsoft_token_cache.json"),
+    )
+    review.add_argument(
+        "--gmail-credentials", type=Path,
+        default=Path(os.environ.get(
+            "AGENTLEDGER_GOOGLE_CREDENTIALS", str(DEFAULT_GMAIL_CREDENTIALS)
+        )),
+    )
+    review.add_argument(
+        "--gmail-token-cache", type=Path,
+        default=Path(os.environ.get(
+            "AGENTLEDGER_GMAIL_TOKEN", str(DEFAULT_GMAIL_TOKEN)
+        )),
+    )
+    review_commands = review.add_subparsers(dest="review_command", required=True)
+    review_run = review_commands.add_parser("run")
+    review_run.add_argument("--since")
+    review_run.add_argument("--include-reviewed", action="store_true")
+    review_run.add_argument("--limit", type=int)
+    review_list = review_commands.add_parser("list")
+    review_list.add_argument("--all", action="store_true")
+    review_list.add_argument("--limit", type=int, default=50)
+    review_show = review_commands.add_parser("show")
+    review_show.add_argument("review_case_id")
+    review_serve = review_commands.add_parser("serve")
+    review_serve.add_argument("--host", default="127.0.0.1")
+    review_serve.add_argument("--port", type=int, default=8791)
     return parser
 
 
@@ -583,6 +629,41 @@ def _notify_pending_line_best_effort(state_path: str | Path) -> None:
         return
 
 
+def _review_service(
+    store: MailStateStore, args: argparse.Namespace, *, require_client: bool
+) -> ClassificationReviewService:
+    class _NoopReviewClient:
+        model_name = ""
+
+        def review_case(self, _context: object) -> object:
+            raise RuntimeError("review model is not configured")
+
+        def chat(self, _context: object, _history: object, _user_message: str) -> str:
+            raise RuntimeError("review model is not configured")
+
+    if require_client:
+        review_config = OpenAIReviewConfig.from_env()
+        reviewer = OpenAIReviewClient(review_config)
+        review_version = review_config.review_version
+    else:
+        reviewer = _NoopReviewClient()
+        review_version = os.environ.get("AGENTLEDGER_REVIEW_VERSION", "v1")
+    return ClassificationReviewService(
+        store,
+        reviewer,
+        MessageResolver(
+            ReviewSourceConfig(
+                outlook_client_id=args.client_id,
+                outlook_authority=args.authority,
+                outlook_token_cache=args.token_cache,
+                gmail_credentials=args.gmail_credentials,
+                gmail_token_cache=args.gmail_token_cache,
+            )
+        ),
+        review_version=review_version,
+    )
+
+
 def main() -> None:
     try:
         _load_dotenv()
@@ -679,6 +760,62 @@ def main() -> None:
                 scheduler.uninstall()
             else:
                 scheduler.run_now()
+            return
+        if args.command == "review":
+            with MailStateStore(args.state_db) as store:
+                service = _review_service(
+                    store,
+                    args,
+                    require_client=args.review_command in {"run", "serve"},
+                )
+                if args.review_command == "run":
+                    result = service.run(
+                        since=parse_since(args.since),
+                        include_reviewed=args.include_reviewed,
+                        limit=args.limit,
+                    )
+                    print(f"Selected: {result.selected}")
+                    print(f"Created: {result.created}")
+                    print(f"Queue items: {result.queue_items}")
+                    if result.case_ids:
+                        print("Cases:")
+                        for case_id in result.case_ids:
+                            print(case_id)
+                elif args.review_command == "list":
+                    records = service.list_cases(
+                        queue_only=not args.all,
+                        limit=args.limit,
+                    )
+                    print("Review ID\tStatus\tFinal\tSuggested\tHuman\tMessage")
+                    for record in records:
+                        print(
+                            f"{record.review_case_id}\t{record.review_status}\t"
+                            f"{record.final_classification or '-'}\t"
+                            f"{record.suggested_classification or '-'}\t"
+                            f"{record.human_review_status}\t"
+                            f"{record.provider}:{record.message_id}"
+                        )
+                elif args.review_command == "show":
+                    detail = service.get_case_detail(args.review_case_id)
+                    case = detail["case"]
+                    context = detail["context"]
+                    print(f"Review ID: {case['review_case_id']}")
+                    print(f"Reviewer: {case['reviewer_model']} ({case['review_version']})")
+                    print(f"Status: {case['review_status']}")
+                    print(f"Human status: {case['human_review_status']}")
+                    print(f"Provider/message: {context['provider']} {context['message_id']}")
+                    print(f"Subject: {context['subject']}")
+                    print(f"Original classification: {context['original_classification'] or '-'}")
+                    print(f"Final classification: {context['final_classification'] or '-'}")
+                    print(f"Suggested classification: {case['suggested_classification'] or '-'}")
+                    print(f"Issue type: {case['issue_type'] or '-'}")
+                    print(f"Confidence: {case['confidence']:.2f}")
+                    print(f"Reason: {case['reason_summary']}")
+                    print("Analysis text:")
+                    print(context["analysis_text"])
+                else:
+                    print(f"Review UI: http://{args.host}:{args.port}")
+                    serve_review_ui(service, host=args.host, port=args.port)
             return
         if args.command == "line":
             if args.line_command == "init-config":

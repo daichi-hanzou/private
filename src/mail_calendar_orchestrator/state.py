@@ -112,6 +112,8 @@ class MailStateStore:
                     last_error_type TEXT,
                     last_error_message TEXT,
                     source_run_id TEXT,
+                    source_jsonl_path TEXT,
+                    message_source_ref TEXT,
                     PRIMARY KEY (provider, message_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_processed_candidate
@@ -250,6 +252,47 @@ class MailStateStore:
                     retryable INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (provider,message_id,notification_type)
                 );
+                CREATE TABLE IF NOT EXISTS review_case_id_sequence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT
+                );
+                CREATE TABLE IF NOT EXISTS review_cases (
+                    review_case_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    source_run_id TEXT,
+                    source_jsonl_path TEXT NOT NULL,
+                    message_source_ref TEXT,
+                    reviewer_model TEXT NOT NULL,
+                    review_version TEXT NOT NULL,
+                    review_status TEXT NOT NULL,
+                    suggested_classification TEXT,
+                    issue_type TEXT,
+                    confidence REAL NOT NULL,
+                    reason_summary TEXT NOT NULL,
+                    needs_human_review INTEGER NOT NULL,
+                    original_classification TEXT,
+                    final_classification TEXT,
+                    human_review_status TEXT NOT NULL DEFAULT 'pending',
+                    human_verdict TEXT,
+                    human_final_classification TEXT,
+                    lesson_summary TEXT,
+                    recommended_change_target TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    human_reviewed_at TEXT,
+                    UNIQUE(provider, message_id, reviewer_model, review_version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_review_queue
+                    ON review_cases(review_status, human_review_status, created_at);
+                CREATE TABLE IF NOT EXISTS review_chat_messages (
+                    review_case_id TEXT NOT NULL,
+                    message_index INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (review_case_id, message_index),
+                    FOREIGN KEY (review_case_id) REFERENCES review_cases(review_case_id)
+                );
                 """
             )
             self._ensure_column(
@@ -267,6 +310,8 @@ class MailStateStore:
                 "important_mail_notifications", "retryable",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            self._ensure_column("processed_messages", "source_jsonl_path", "TEXT")
+            self._ensure_column("processed_messages", "message_source_ref", "TEXT")
 
     def register_important_notification(
         self, *, provider: str, message_id: str, category: str,
@@ -505,6 +550,7 @@ class MailStateStore:
     def mark_processing(
         self, message: EmailMessage, *, run_id: str, analysis_mode: str,
         model_name: str | None, digest: str | None = None,
+        message_source_ref: str | None = None,
     ) -> None:
         now = _timestamp()
         digest = digest or content_hash(message)
@@ -514,8 +560,9 @@ class MailStateStore:
                 INSERT INTO processed_messages (
                     provider,message_id,thread_id,received_at,subject_hash,
                     content_hash,first_seen_at,processing_started_at,
-                    processing_status,analysis_mode,model_name,source_run_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    processing_status,analysis_mode,model_name,source_run_id,
+                    message_source_ref
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(provider,message_id) DO UPDATE SET
                     thread_id=excluded.thread_id,
                     received_at=excluded.received_at,
@@ -526,12 +573,17 @@ class MailStateStore:
                     analysis_mode=excluded.analysis_mode,
                     model_name=excluded.model_name,
                     source_run_id=excluded.source_run_id,
+                    message_source_ref=COALESCE(
+                        excluded.message_source_ref,
+                        processed_messages.message_source_ref
+                    ),
                     retry_count=processed_messages.retry_count + 1,
                     last_error_type=NULL,last_error_message=NULL
                 """,
                 (message.provider, message.message_id, message.thread_id,
                  message.received_at, subject_hash(message), digest, now, now,
-                 "processing", analysis_mode, model_name, run_id),
+                 "processing", analysis_mode, model_name, run_id,
+                 message_source_ref),
             )
 
     def mark_result(
@@ -542,6 +594,7 @@ class MailStateStore:
         prompt_template_version: str | None = None,
         schema_version: str | None = None,
         source_run_id: str | None = None,
+        source_jsonl_path: str | None = None,
         error: BaseException | str | None = None,
     ) -> None:
         if status not in {"processed", "skipped", "failed", "retryable"}:
@@ -563,12 +616,14 @@ class MailStateStore:
                     prompt_template_version=COALESCE(?,prompt_template_version),
                     schema_version=COALESCE(?,schema_version),
                     source_run_id=COALESCE(?,source_run_id),
+                    source_jsonl_path=COALESCE(?,source_jsonl_path),
                     last_error_type=?,last_error_message=?
                 WHERE provider=? AND message_id=?
                 """,
                 (status, _timestamp(), final_classification, candidate_id,
                  mail_action_id, calendar_action_id, prompt_template_version,
-                 schema_version, source_run_id, error_type, error_message,
+                 schema_version, source_run_id, source_jsonl_path,
+                 error_type, error_message,
                  message.provider, message.message_id),
             )
 
@@ -652,6 +707,54 @@ class MailStateStore:
             "final_classification,last_processed_at,retry_count,last_error_type "
             "FROM processed_messages ORDER BY first_seen_at DESC LIMIT ?", (limit,)
         ))
+
+    def processed_message(
+        self, provider: str, message_id: str
+    ) -> sqlite3.Row | None:
+        return self.connection.execute(
+            "SELECT * FROM processed_messages WHERE provider=? AND message_id=?",
+            (provider, message_id),
+        ).fetchone()
+
+    def review_candidates(
+        self,
+        *,
+        reviewer_model: str,
+        review_version: str,
+        since: str | None = None,
+        include_reviewed: bool = False,
+        limit: int | None = None,
+    ) -> list[sqlite3.Row]:
+        query = [
+            "SELECT pm.* FROM processed_messages pm ",
+            "LEFT JOIN review_cases rc ON rc.provider=pm.provider "
+            "AND rc.message_id=pm.message_id "
+            "AND rc.reviewer_model=? AND rc.review_version=? ",
+            "WHERE pm.processing_status='processed' "
+            "AND pm.source_jsonl_path IS NOT NULL ",
+        ]
+        parameters: list[Any] = [reviewer_model, review_version]
+        if not include_reviewed:
+            query.append("AND rc.review_case_id IS NULL ")
+        if since is not None:
+            query.append("AND pm.last_processed_at>=? ")
+            parameters.append(since)
+        query.append(
+            "ORDER BY COALESCE(pm.last_processed_at, pm.first_seen_at) DESC "
+        )
+        if limit is not None:
+            query.append("LIMIT ?")
+            parameters.append(limit)
+        return list(
+            self.connection.execute("".join(query), tuple(parameters))
+        )
+
+    def next_review_case_id(self) -> str:
+        with self.connection:
+            value = self.connection.execute(
+                "INSERT INTO review_case_id_sequence DEFAULT VALUES"
+            ).lastrowid
+        return f"RV-{int(value):06d}"
 
     def retryable_message_ids(
         self, *, provider: str = "outlook", limit: int = 50
