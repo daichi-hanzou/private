@@ -25,6 +25,8 @@ class OrchestrationResult:
     analysis_only: bool = False
     informational_messages: int = 0
     promotion_messages: int = 0
+    transactional_messages: int = 0
+    taxonomy_ignored_messages: int = 0
     security_notifications: int = 0
     invalid_messages: int = 0
     calendar_candidate_messages: int = 0

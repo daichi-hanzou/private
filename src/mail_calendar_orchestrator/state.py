@@ -134,6 +134,8 @@ class MailStateStore:
                     clarification_required INTEGER NOT NULL DEFAULT 0,
                     promotions INTEGER NOT NULL DEFAULT 0,
                     informational INTEGER NOT NULL DEFAULT 0,
+                    transactional INTEGER NOT NULL DEFAULT 0,
+                    taxonomy_ignored INTEGER NOT NULL DEFAULT 0,
                     security_notifications INTEGER NOT NULL DEFAULT 0,
                     invalid INTEGER NOT NULL DEFAULT 0,
                     duration_ms INTEGER,
@@ -275,6 +277,8 @@ class MailStateStore:
                     human_review_status TEXT NOT NULL DEFAULT 'pending',
                     human_verdict TEXT,
                     human_final_classification TEXT,
+                    subject TEXT,
+                    human_comment TEXT,
                     lesson_summary TEXT,
                     recommended_change_target TEXT,
                     created_at TEXT NOT NULL,
@@ -284,6 +288,19 @@ class MailStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_review_queue
                     ON review_cases(review_status, human_review_status, created_at);
+                CREATE TABLE IF NOT EXISTS human_review_history (
+                    review_case_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    human_verdict TEXT NOT NULL,
+                    final_classification TEXT NOT NULL,
+                    human_comment TEXT,
+                    recommended_change_target TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    reviewer_model TEXT NOT NULL,
+                    review_version TEXT NOT NULL,
+                    PRIMARY KEY (review_case_id, revision),
+                    FOREIGN KEY (review_case_id) REFERENCES review_cases(review_case_id)
+                );
                 CREATE TABLE IF NOT EXISTS review_chat_messages (
                     review_case_id TEXT NOT NULL,
                     message_index INTEGER NOT NULL,
@@ -292,6 +309,39 @@ class MailStateStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (review_case_id, message_index),
                     FOREIGN KEY (review_case_id) REFERENCES review_cases(review_case_id)
+                );
+                CREATE TABLE IF NOT EXISTS review_feedback_evidence (
+                    review_case_id TEXT NOT NULL,
+                    evidence_version TEXT NOT NULL,
+                    extractor_model TEXT NOT NULL,
+                    evidence_snippets_json TEXT NOT NULL,
+                    evidence_summary TEXT NOT NULL,
+                    grounding_status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (review_case_id, evidence_version),
+                    FOREIGN KEY (review_case_id) REFERENCES review_cases(review_case_id)
+                );
+                CREATE TABLE IF NOT EXISTS review_policy_syntheses (
+                    synthesis_id TEXT PRIMARY KEY,
+                    synthesis_version TEXT NOT NULL,
+                    synthesizer_model TEXT NOT NULL,
+                    time_window TEXT NOT NULL,
+                    review_version TEXT NOT NULL,
+                    conflicts_json TEXT NOT NULL,
+                    preference_changes_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS review_policy_candidates (
+                    synthesis_id TEXT NOT NULL,
+                    policy_id TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    recommended_targets_json TEXT NOT NULL,
+                    supporting_review_ids_json TEXT NOT NULL,
+                    supporting_evidence_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    PRIMARY KEY (synthesis_id, policy_id),
+                    FOREIGN KEY (synthesis_id) REFERENCES review_policy_syntheses(synthesis_id)
                 );
                 """
             )
@@ -312,6 +362,10 @@ class MailStateStore:
             )
             self._ensure_column("processed_messages", "source_jsonl_path", "TEXT")
             self._ensure_column("processed_messages", "message_source_ref", "TEXT")
+            self._ensure_column("review_cases", "subject", "TEXT")
+            self._ensure_column("review_cases", "human_comment", "TEXT")
+            self._ensure_column("runs", "transactional", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("runs", "taxonomy_ignored", "INTEGER NOT NULL DEFAULT 0")
 
     def register_important_notification(
         self, *, provider: str, message_id: str, category: str,
@@ -586,6 +640,39 @@ class MailStateStore:
                  message_source_ref),
             )
 
+    def recover_stale_processing(
+        self, *, stale_after: timedelta = timedelta(minutes=30),
+        now: datetime | None = None, limit: int = 500,
+    ) -> int:
+        """Return abandoned processing leases to the retry queue atomically."""
+        if stale_after <= timedelta(0):
+            raise ValueError("stale processing threshold must be positive")
+        if not 1 <= limit <= 5000:
+            raise ValueError("stale processing recovery limit must be 1..5000")
+        current = (now or _now()).astimezone(timezone.utc)
+        cutoff = current - stale_after
+        with self.connection:
+            rows = self.connection.execute(
+                "SELECT provider,message_id FROM processed_messages "
+                "WHERE processing_status='processing' AND ("
+                "processing_started_at IS NULL OR processing_started_at<=?) "
+                "ORDER BY processing_started_at ASC LIMIT ?",
+                (cutoff.isoformat(), limit),
+            ).fetchall()
+            for row in rows:
+                self.connection.execute(
+                    "UPDATE processed_messages SET processing_status='retryable',"
+                    "processing_started_at=NULL,last_error_type=?,"
+                    "last_error_message=? WHERE provider=? AND message_id=? "
+                    "AND processing_status='processing'",
+                    (
+                        "StaleProcessingRecovered",
+                        "previous mail batch ended before completion",
+                        row["provider"], row["message_id"],
+                    ),
+                )
+        return len(rows)
+
     def mark_result(
         self, message: EmailMessage, *, status: str,
         final_classification: str | None = None,
@@ -657,6 +744,7 @@ class MailStateStore:
         allowed = {
             "processed_messages", "failed_messages", "calendar_candidates",
             "clarification_required", "promotions", "informational",
+            "transactional", "taxonomy_ignored",
             "security_notifications", "invalid", "status",
         }
         values = {key: value for key, value in metrics.items() if key in allowed}
@@ -748,6 +836,21 @@ class MailStateStore:
         return list(
             self.connection.execute("".join(query), tuple(parameters))
         )
+
+    def review_selection_rows(
+        self, *, reviewer_model: str, review_version: str
+    ) -> list[sqlite3.Row]:
+        return list(self.connection.execute(
+            """
+            SELECT pm.*,rc.review_case_id AS existing_review_case_id
+            FROM processed_messages pm
+            LEFT JOIN review_cases rc ON rc.provider=pm.provider
+              AND rc.message_id=pm.message_id
+              AND rc.reviewer_model=? AND rc.review_version=?
+            ORDER BY COALESCE(pm.last_processed_at,pm.first_seen_at) DESC
+            """,
+            (reviewer_model, review_version),
+        ))
 
     def next_review_case_id(self) -> str:
         with self.connection:

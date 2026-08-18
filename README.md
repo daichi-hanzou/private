@@ -931,13 +931,18 @@ possible. Invented facts become invalid rather than clarification.
 Here, a calendar candidate means an item the user may add to their own personal
 calendar—not registration for or RSVP to an event. Public seminars and event
 advertisements require explicit evidence that the user intends to attend;
-security notices, promotions, and general information are not scheduled by
+security notices, advertising, and general information are not scheduled by
 default.
 
 Every LLM analysis ends in exactly one auditable classification:
-`calendar_candidate`, `clarification_required`, `informational`, `promotion`,
-`security_notification`, `ignored`, or `invalid`. General seminar/webinar
-advertising remains `promotion` or `informational` even when it contains a
+`calendar_candidate`, `transactional`, `security_notification`, `ignored`,
+`invalid`, or `clarification_required`. `transactional` covers a user's
+specific payment, investment execution, order, delivery, contract, or other
+confirmed obligation/state change. In the private-mailbox policy, a grounded
+`transactional` result is deterministically important and user-notifiable, so
+it enters Important Mail Notification rather than Calendar Approval even when
+the LLM proposed `should_notify_user=false`. General seminar/webinar advertising, promotions,
+newsletters, and general information become `ignored` even when they contain a
 date. New sign-ins, app connections, security codes, password changes, and
 suspicious-access notices become `security_notification`; they are not sent to
 Calendar Agent or to clarification. Clarification is reserved for cases such
@@ -953,6 +958,11 @@ canonical semantic proposal; the internal `should_create_calendar_candidate`
 value is derived from it rather than generated separately by the LLM.
 Non-candidates (`candidate_type=none` and a non-calendar final classification)
 do not run irrelevant date/time/duration grounding checks.
+
+Historical JSONL, SQLite, and Human Review values are not rewritten. Legacy
+`informational` and `promotion` values normalize to `ignored` only when compared
+with the current taxonomy. Mail `category` (for example payment, deadline, or
+security) and Calendar `candidate_type` remain independent axes.
 
 In `llm-first`, connection refusal, timeout, missing model, HTTP failure, empty or
 oversized response, invalid JSON, and schema failure fall back conservatively
@@ -1350,3 +1360,38 @@ TLS or network isolation. Soil sensors, photos, cameras, weather, and AI decisio
 are intentionally deferred to Phase 2. The present separation between decision,
 scheduling, HTTP command, history, and hardware control allows those inputs to be
 added without rewriting the GPIO safety controller.
+
+## Classification Review UI
+
+After creating review cases with `review run`, start the localhost-only Human
+Review UI:
+
+```bash
+uv run mail-calendar-orchestrator review serve
+```
+
+Open `http://127.0.0.1:8791`. The sidebar supports unresolved, disagreement,
+uncertain, resolved, and all-case filters. Review one email at a time, save a
+verdict, final classification, human comment, and recommended change target,
+then continue with **Save & Next**. Decision traces and long technical IDs stay
+collapsed by default. Human comments are retained in the current review record
+and an append-only revision history for later policy synthesis.
+
+### Human Feedback Synthesis POC
+
+Resolved Human Reviews with a non-empty `human_comment` can be converted into
+grounded, proposed policy knowledge. This does not modify Qwen prompts,
+validators, rules, code, Git, or deployments.
+
+```bash
+uv run mail-calendar-orchestrator review synthesize --since 30d --limit 50
+uv run mail-calendar-orchestrator review export-feedback --latest --format markdown
+uv run mail-calendar-orchestrator review export-feedback --latest --format json
+```
+
+Synthesis defaults to `AGENTLEDGER_REVIEW_VERSION`. Evidence snippets are
+checked deterministically against the case's analysis text before storage.
+Ungrounded snippets are discarded, unresolved Human Reviews are excluded, and
+single-case policy proposals are not persisted. SQLite retains versioned
+evidence, proposed policies, conflicts, preference changes, and supporting
+Review IDs without storing another copy of the full email body.

@@ -51,6 +51,41 @@ class MessageResolver:
             f"no review message source is configured for provider: {provider}"
         )
 
+    def retrieval_availability(
+        self, *, provider: str, message_source_ref: str | None
+    ) -> tuple[bool, str]:
+        """Check local configuration only; never contact a mail provider."""
+        if message_source_ref:
+            path = Path(message_source_ref).expanduser()
+            return (
+                path.is_file(),
+                "message_source_ref_found" if path.is_file()
+                else "message_source_ref_missing",
+            )
+        if provider == "gmail":
+            credentials = self.config.gmail_credentials.expanduser().is_file()
+            token = self.config.gmail_token_cache.expanduser().is_file()
+            if credentials and token:
+                return True, "gmail_readonly_credentials_available"
+            missing = []
+            if not credentials:
+                missing.append("gmail_credentials")
+            if not token:
+                missing.append("gmail_token_cache")
+            return False, "missing_" + "_and_".join(missing)
+        if provider == "outlook":
+            client = bool(self.config.outlook_client_id)
+            token = self.config.outlook_token_cache.expanduser().is_file()
+            if client and token:
+                return True, "outlook_readonly_credentials_available"
+            missing = []
+            if not client:
+                missing.append("outlook_client_id")
+            if not token:
+                missing.append("outlook_token_cache")
+            return False, "missing_" + "_and_".join(missing)
+        return False, "unsupported_provider_without_message_source_ref"
+
     @staticmethod
     def analysis_text(message: EmailMessage) -> str:
         return without_transport_headers(message.body_text)
@@ -91,8 +126,8 @@ class MessageResolver:
                 authenticator=MicrosoftAuthenticator(
                     client_id=self.config.outlook_client_id,
                     authority=self.config.outlook_authority,
-                    cache_path=self.config.outlook_token_cache,
                     scopes=["Mail.Read"],
+                    token_cache_path=self.config.outlook_token_cache,
                 ),
             )
         return self._outlook

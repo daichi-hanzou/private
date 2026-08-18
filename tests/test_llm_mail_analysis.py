@@ -990,7 +990,7 @@ def test_dated_generic_promotions_remain_blocked(subject, body):
         _message(subject=subject, body=body),
     )
     assert not checked.candidate_allowed
-    assert checked.final_classification == "promotion"
+    assert checked.final_classification == "ignored"
 
 
 @pytest.mark.parametrize(
@@ -1014,6 +1014,91 @@ def test_private_payment_and_deadline_mail_remains_important_without_forced_cand
     ).analysis_results[0]
     assert analysis.final_importance.is_important
     assert analysis.final_candidate is None
+    assert analysis.final_classification == "transactional"
+
+
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        ("投資信託 約定", "積立購入が完了しました。約定内容をご確認ください。"),
+        ("口座振替予定", "8月27日に58,240円を口座振替予定です。残高をご確認ください。"),
+        ("カード請求", "8月27日にカード請求額58,240円を引き落とします。"),
+    ],
+)
+def test_grounded_transactional_classification_forces_important_notification(
+    subject, body
+):
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body),
+        _noncandidate(
+            "transactional", category="informational",
+            is_important=False, should_notify_user=False,
+        ),
+    ).analysis_results[0]
+    assert analysis.final_classification == "transactional"
+    assert analysis.final_importance.is_important
+    assert analysis.llm_result.should_notify_user
+    assert analysis.final_candidate is None
+    assert (
+        "should_notify_user:false->true_from_grounded_transactional_policy"
+        in analysis.classification_corrections
+    )
+
+
+def test_order_confirmation_is_transactional_and_generic_investment_news_is_ignored():
+    order = _llm_first_result(
+        _message(
+            subject="ご注文を承りました",
+            body="注文番号 ABC-123 のご注文を承りました。",
+        ),
+        _noncandidate(
+            "transactional", category="informational",
+            is_important=False, should_notify_user=False,
+        ),
+    ).analysis_results[0]
+    newsletter = _llm_first_result(
+        _message(
+            subject="今週の投資情報ニュースレター",
+            body="マーケット情報とおすすめ商品をご紹介します。",
+        ),
+        _noncandidate(
+            "transactional", category="investment",
+            is_important=True, should_notify_user=True,
+        ),
+    ).analysis_results[0]
+
+    assert order.final_classification == "transactional"
+    assert order.llm_result.should_notify_user
+    assert order.final_candidate is None
+    assert newsletter.final_classification == "ignored"
+    assert not newsletter.llm_result.should_notify_user
+    assert newsletter.final_candidate is None
+
+
+def test_transactional_mail_enters_important_queue_without_calendar_approval(
+    tmp_path,
+):
+    message = _message(
+        subject="投資信託の約定通知",
+        body="投資信託の購入が完了しました。約定内容をご確認ください。",
+        message_id="transaction-notification",
+    )
+    raw = _noncandidate(
+        "transactional", category="investment", is_important=False,
+        should_notify_user=False,
+    )
+    store, result = _orchestrate_notification_case(tmp_path, message, raw)
+    try:
+        assert result.important_notifications_created == 1
+        assert result.calendar_proposals == 0
+        assert result.approvals_created == 0
+        row = store.connection.execute(
+            "SELECT * FROM important_mail_notifications"
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["message_id"] == "transaction-notification"
+    finally:
+        store.close()
 
 
 def test_personal_commitment_without_datetime_requires_clarification():
@@ -1056,7 +1141,7 @@ def test_ungrounded_personal_datetime_is_not_promoted_from_informational():
         ),
         _message(body="8月10日15時からProject meetingに参加予定です。"),
     )
-    assert checked.final_classification == "informational"
+    assert checked.final_classification == "ignored"
     assert not checked.candidate_allowed
     assert not any(
         correction.startswith("semantic_consistency:")
@@ -1826,7 +1911,7 @@ def test_llm_first_classifies_generic_seminar_without_clarification():
     )
     result = _llm_first_result(message, raw)
     analysis = result.analysis_results[0]
-    assert analysis.final_classification == "promotion"
+    assert analysis.final_classification == "ignored"
     assert analysis.final_candidate is None
     assert result.clarification_required == 0
 
@@ -1881,7 +1966,7 @@ def test_llm_first_informational_and_realistic_clarification():
         _message(subject="製品アップデート", body="新機能のお知らせです。"),
         _noncandidate("informational", evidence=["新機能"]),
     )
-    assert information.analysis_results[0].final_classification == "informational"
+    assert information.analysis_results[0].final_classification == "ignored"
 
     clarification = _llm_first_result(
         _message(
@@ -1945,7 +2030,7 @@ def test_validator_rejects_ad_security_and_missing_commitment_candidates():
         seminar,
     )
     assert not ad.candidate_allowed
-    assert ad.final_classification == "promotion"
+    assert ad.final_classification == "ignored"
     assert "generic_event_without_user_commitment" in ad.issues
 
     security_message = _message(
@@ -1970,21 +2055,21 @@ def test_validator_rejects_ad_security_and_missing_commitment_candidates():
             "採用情報をお届けします。応募者募集中です。",
             "promotion",
             True,
-            "promotion",
+            "ignored",
         ),
         (
             "今月のメールマガジン",
             "製品ニュースと一般情報をお届けします。",
             "informational",
             False,
-            "informational",
+            "ignored",
         ),
         (
             "美容商品のキャンペーン",
             "新商品の広告と期間限定セールです。",
             "promotion",
             True,
-            "promotion",
+            "ignored",
         ),
     ],
 )
@@ -2034,7 +2119,7 @@ def test_security_type_sentinels_do_not_override_generic_seminar(
         evidence=["参加者募集中"],
     )
     analysis = _llm_first_result(message, raw).analysis_results[0]
-    assert analysis.final_classification == "promotion"
+    assert analysis.final_classification == "ignored"
     assert analysis.llm_result.security_notification_type is None
     assert analysis.final_candidate is None
     assert not analysis.llm_result.should_create_calendar_candidate
@@ -2117,7 +2202,7 @@ def test_non_candidate_skips_irrelevant_temporal_validation():
     checked = LLMResultValidator(base_year=2026).validate(
         LLMAnalysisResult.from_dict(raw), message
     )
-    assert checked.final_classification == "promotion"
+    assert checked.final_classification == "ignored"
     assert not {
         "invalid_date",
         "invalid_start",
@@ -2160,7 +2245,7 @@ def test_classification_corrections_are_audited():
     )
     serialized = json.dumps(result.events, ensure_ascii=False)
     assert '"llm_proposed_classification": "security_notification"' in serialized
-    assert '"final_classification": "promotion"' in serialized
+    assert '"final_classification": "ignored"' in serialized
     assert '"classification_corrections"' in serialized
 
 
@@ -2240,7 +2325,7 @@ def test_orchestrator_passes_only_llm_first_calendar_candidate(tmp_path):
     ).process_provider(Provider(messages), output, requires_approval=True)
     assert result.calendar_proposals == 1
     assert result.pending_calendar_actions == 1
-    assert result.promotion_messages == 1
+    assert result.taxonomy_ignored_messages == 1
     assert result.security_notifications == 1
     assert result.clarification_required == 1
     calendar_actions = [

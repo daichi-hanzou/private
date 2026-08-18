@@ -43,6 +43,7 @@ class _ScheduledProvider:
         *, max_messages: int, provider_name: str = "outlook",
     ) -> None:
         self.provider = provider
+        self.state_store = state_store
         self.config = getattr(provider, "config", None)
         self.max_messages = max_messages
         self.provider_name = provider_name
@@ -67,9 +68,12 @@ class _ScheduledProvider:
             if key not in seen:
                 values.append(message)
                 seen.add(key)
-            if len(values) >= self.max_messages:
-                break
-        self._messages = values[: self.max_messages]
+        eligible = [
+            message for message in values
+            if self.state_store.decision(message).process
+        ]
+        eligible.sort(key=lambda item: item.received_at)
+        self._messages = eligible[: self.max_messages]
         return list(self._messages)
 
     def get_message(self, message_id: str) -> Any:
@@ -91,15 +95,22 @@ def run_scheduled_batch(
     orchestrator: MailCalendarOrchestrator,
     state_store: MailStateStore, output_dir: str | Path,
     overlap_minutes: int = 5, generate_explorer: bool = False,
-    now: datetime, run_id: str | None = None,
+    now: datetime, run_id: str | None = None, batch_limit: int = 10,
 ) -> ScheduledResult:
+    if not 1 <= batch_limit <= 100:
+        raise ValueError("scheduled batch limit must be between 1 and 100")
     run_id = run_id or f"mail-batch-{uuid4()}"
     if not state_store.acquire_scheduled_lock(run_id, now=now):
         raise RuntimeError("another scheduled mail batch is already running")
     try:
+        state_store.recover_stale_processing(now=now)
         sources = providers or ({"outlook": provider} if provider is not None else {})
         if not sources or any(value is None for value in sources.values()):
             raise ValueError("at least one scheduled mail provider is required")
+        if batch_limit < len(sources):
+            raise ValueError(
+                "scheduled batch limit must be at least the provider count"
+            )
         cursors = {
             name: state_store.cursor(
                 overlap_minutes=overlap_minutes, provider=name
@@ -109,13 +120,19 @@ def run_scheduled_batch(
         provider_results: dict[str, dict[str, Any]] = {}
         provider_failures: dict[str, Exception] = {}
         fetched_by_provider: dict[str, list[Any]] = {}
+        assigned_limits: dict[str, int] = {}
         combined: list[Any] = []
-        for name, source in sources.items():
+        source_count = len(sources)
+        base_limit, remainder = divmod(batch_limit, source_count)
+        for index, (name, source) in enumerate(sources.items()):
+            assigned_limit = max(1, base_limit + (1 if index < remainder else 0))
+            assigned_limits[name] = assigned_limit
             configured_limit = getattr(
                 getattr(source, "config", None), "max_messages", 50
             )
             scheduled = _ScheduledProvider(
-                source, state_store, max_messages=configured_limit,
+                source, state_store,
+                max_messages=min(configured_limit, assigned_limit),
                 provider_name=name,
             )
             try:
@@ -182,10 +199,11 @@ def run_scheduled_batch(
                 )
                 continue
             poll_completed = now
-            configured_limit = getattr(
-                getattr(sources[name], "config", None), "max_messages", 50
+            selected_limit = min(
+                getattr(getattr(sources[name], "config", None), "max_messages", 50),
+                assigned_limits[name],
             )
-            if configured_limit and len(values) >= configured_limit:
+            if selected_limit and len(values) >= selected_limit:
                 received = []
                 for message in values:
                     try:
@@ -260,6 +278,7 @@ def environment_template() -> str:
 AGENTLEDGER_OLLAMA_MODEL=qwen3:8b
 AGENTLEDGER_OLLAMA_BASE_URL=http://localhost:11434
 AGENTLEDGER_TIMEZONE=Asia/Tokyo
+AGENTLEDGER_SCHEDULED_BATCH_LIMIT=10
 # Set true only after Gmail read-only auth succeeds.
 AGENTLEDGER_GMAIL_ENABLED=false
 # AGENTLEDGER_STATE_DB=%h/.local/share/agentledger/mail_state.sqlite3

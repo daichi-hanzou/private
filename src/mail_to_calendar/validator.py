@@ -9,6 +9,9 @@ from .llm_models import FinalClassification, LLMAnalysisResult
 from .models import EmailMessage
 from .time_normalization import normalize_calendar_datetime, normalize_calendar_time
 from .text_normalization import date_detection_text, title_grounding_status
+from .notification_evidence import (
+    detect_important_notification_evidence, detect_transactional_evidence,
+)
 
 
 @dataclass(frozen=True)
@@ -117,7 +120,9 @@ class LLMResultValidator:
             promotion and not grounded_personal_commitment
         )
         if (
-            result.final_classification in {"informational", "promotion"}
+            result.final_classification in {
+                "informational", "promotion", "ignored", "transactional"
+            }
             and result.user_commitment_detected
             and commitment_grounded
             and not security
@@ -349,38 +354,51 @@ class LLMResultValidator:
         candidate_allowed = candidate_requested and not candidate_blockers
         classification: FinalClassification
         rejected_reason = None
+        transactional_evidence = detect_important_notification_evidence(
+            text, base_year=self.base_year
+        ).detected
+        grounded_transaction = detect_transactional_evidence(text).detected
+        transactional_evidence = transactional_evidence or grounded_transaction
+        transactional_category = result.category in {
+            "payment", "tax", "insurance", "contract", "investment",
+            "delivery",
+        }
         if candidate_allowed:
             classification = "calendar_candidate"
         elif security:
             classification = "security_notification"
         elif generic_promotion:
-            classification = "promotion"
+            classification = "ignored"
         elif generic_ad and not result.user_commitment_detected:
-            classification = (
-                "informational"
-                if result.category == "informational"
-                else "promotion"
-            )
+            classification = "ignored"
         elif fact_invalid:
             classification = "invalid"
+        elif result.final_classification == "transactional" or transactional_category:
+            classification = "transactional" if transactional_evidence else "ignored"
         elif (
             result.category == "informational"
             and not result.user_commitment_detected
             and not result.should_create_calendar_candidate
             and result.candidate_type == "none"
         ):
-            classification = "informational"
+            classification = (
+                "transactional" if transactional_evidence else "ignored"
+            )
         elif candidate_requested:
             classification = "clarification_required"
         elif result.clarification_required or result.final_classification == "clarification_required":
             realistic = result.is_important or result.user_commitment_detected
-            classification = "clarification_required" if realistic else "informational"
-        elif result.final_classification in {
-            "informational", "ignored", "invalid",
-        }:
+            classification = "clarification_required" if realistic else "ignored"
+        elif result.final_classification in {"ignored", "invalid"}:
             classification = result.final_classification
+        elif result.final_classification in {"informational", "promotion"}:
+            classification = (
+                "transactional" if transactional_evidence else "ignored"
+            )
         else:
-            classification = "informational"
+            classification = (
+                "transactional" if transactional_evidence else "ignored"
+            )
         if candidate_requested and not candidate_allowed:
             rejected_reason = ", ".join(sorted(set(issues))) or classification
         corrections: list[str] = list(semantic_corrections)
@@ -407,8 +425,29 @@ class LLMResultValidator:
             corrections.append(
                 f"final_classification:{proposed_classification}->{classification}"
             )
+        if classification == "transactional" and not result.is_important:
+            corrections.append(
+                "is_important:false->true_from_grounded_transactional_policy"
+            )
+        if classification == "transactional" and not result.should_notify_user:
+            corrections.append(
+                "should_notify_user:false->true_from_grounded_transactional_policy"
+            )
+        if classification == "ignored" and result.should_notify_user:
+            corrections.append(
+                "should_notify_user:true->false_from_ignored_policy"
+            )
         normalized = replace(
             result,
+            is_important=(
+                True if classification == "transactional" else result.is_important
+            ),
+            should_notify_user=(
+                True
+                if classification == "transactional"
+                else False if classification == "ignored"
+                else result.should_notify_user
+            ),
             date=normalized_date,
             start=normalized_start,
             end=normalized_end,

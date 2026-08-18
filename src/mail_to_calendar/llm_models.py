@@ -6,14 +6,16 @@ from typing import Any, Literal
 
 Category = Literal[
     "meeting", "deadline", "appointment", "task", "informational",
-    "promotion", "security_notification", "unknown",
+    "promotion", "security_notification", "payment", "tax", "insurance",
+    "reservation", "delivery", "contract", "investment", "unknown",
 ]
-CandidateType = Literal["event", "deadline", "task", "none"]
+CandidateType = Literal[
+    "event", "appointment", "deadline", "reminder", "task", "none"
+]
 FinalClassification = Literal[
     "calendar_candidate",
+    "transactional",
     "clarification_required",
-    "informational",
-    "promotion",
     "security_notification",
     "ignored",
     "invalid",
@@ -111,14 +113,19 @@ class LLMAnalysisResult:
         _number(value["confidence"], "confidence", 0, 1)
         if value["category"] not in {
             "meeting", "deadline", "appointment", "task", "informational",
-            "promotion", "security_notification", "unknown",
+            "promotion", "security_notification", "payment", "tax",
+            "insurance", "reservation", "delivery", "contract",
+            "investment", "unknown",
         }:
             raise LLMResultValidationError("invalid category")
-        if value["candidate_type"] not in {"event", "deadline", "task", "none"}:
+        if value["candidate_type"] not in {
+            "event", "appointment", "deadline", "reminder", "task", "none"
+        }:
             raise LLMResultValidationError("invalid candidate_type")
         if value["final_classification"] not in {
-            "calendar_candidate", "clarification_required", "informational",
-            "promotion", "security_notification", "ignored", "invalid",
+            "calendar_candidate", "transactional", "clarification_required",
+            "informational", "promotion", "security_notification", "ignored",
+            "invalid",
         }:
             raise LLMResultValidationError("invalid final_classification")
         duration = value["duration_minutes"]
@@ -190,8 +197,8 @@ class LLMAnalysisResult:
         properties: dict[str, Any] = {
             "is_important": {"type": "boolean"},
             "importance_score": {"type": "number", "minimum": 0, "maximum": 1},
-            "category": {"type": "string", "enum": ["meeting", "deadline", "appointment", "task", "informational", "promotion", "security_notification", "unknown"]},
-            "candidate_type": {"type": "string", "enum": ["event", "deadline", "task", "none"]},
+            "category": {"type": "string", "enum": ["meeting", "deadline", "appointment", "task", "informational", "promotion", "security_notification", "payment", "tax", "insurance", "reservation", "delivery", "contract", "investment", "unknown"]},
+            "candidate_type": {"type": "string", "enum": ["event", "appointment", "deadline", "reminder", "task", "none"]},
             "title": nullable_string,
             "date": nullable_string,
             "start": nullable_string,
@@ -200,7 +207,7 @@ class LLMAnalysisResult:
             "timezone": {"type": "string", "minLength": 1, "maxLength": 100},
             "location": nullable_string,
             "clarification_required": {"type": "boolean"},
-            "final_classification": {"type": "string", "enum": ["calendar_candidate", "clarification_required", "informational", "promotion", "security_notification", "ignored", "invalid"]},
+            "final_classification": {"type": "string", "enum": ["calendar_candidate", "transactional", "security_notification", "ignored", "invalid", "clarification_required"]},
             "user_commitment_detected": {"type": "boolean"},
             "user_commitment_evidence": _string_array_schema(5, 100),
             "generic_event_advertisement": {"type": "boolean"},

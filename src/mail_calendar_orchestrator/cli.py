@@ -43,6 +43,7 @@ from .review_provider import OpenAIReviewClient, OpenAIReviewConfig
 from .review_service import ClassificationReviewService, parse_since
 from .review_sources import MessageResolver, ReviewSourceConfig
 from .review_web import serve_review_ui
+from .feedback_synthesis import FeedbackSynthesisService, OpenAIFeedbackClient
 from .approvals import APPROVAL_STATUSES, ApprovalService
 from calendar_execution.google_auth import (
     DEFAULT_CREDENTIALS, DEFAULT_TOKEN, GoogleCalendarAuth,
@@ -272,6 +273,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     scheduled.add_argument("--folder", default="inbox")
     scheduled.add_argument("--max-messages", type=int, default=50)
+    scheduled.add_argument(
+        "--batch-limit", type=int,
+        default=int(os.environ.get("AGENTLEDGER_SCHEDULED_BATCH_LIMIT", "10")),
+        help="Maximum messages analyzed in one scheduled run across providers.",
+    )
     scheduled.add_argument("--poll-overlap-minutes", type=int, default=5)
     scheduled.add_argument("--start-from", default=None)
     scheduled.add_argument("--reset-start-from", action="store_true")
@@ -491,7 +497,10 @@ def _parser() -> argparse.ArgumentParser:
         "--state-db", type=Path,
         default=Path(os.environ.get("AGENTLEDGER_STATE_DB", str(DEFAULT_STATE_DB))),
     )
-    review.add_argument("--client-id")
+    review.add_argument(
+        "--client-id",
+        default=os.environ.get("AGENTLEDGER_MICROSOFT_CLIENT_ID"),
+    )
     review.add_argument(
         "--authority",
         default="https://login.microsoftonline.com/consumers",
@@ -518,14 +527,27 @@ def _parser() -> argparse.ArgumentParser:
     review_run.add_argument("--since")
     review_run.add_argument("--include-reviewed", action="store_true")
     review_run.add_argument("--limit", type=int)
+    review_run.add_argument("--debug-selection", action="store_true")
     review_list = review_commands.add_parser("list")
     review_list.add_argument("--all", action="store_true")
+    review_versions = review_list.add_mutually_exclusive_group()
+    review_versions.add_argument("--version")
+    review_versions.add_argument("--all-versions", action="store_true")
     review_list.add_argument("--limit", type=int, default=50)
     review_show = review_commands.add_parser("show")
     review_show.add_argument("review_case_id")
     review_serve = review_commands.add_parser("serve")
     review_serve.add_argument("--host", default="127.0.0.1")
     review_serve.add_argument("--port", type=int, default=8791)
+    review_synthesize = review_commands.add_parser("synthesize")
+    review_synthesize.add_argument("--since", default="30d")
+    review_synthesize.add_argument("--limit", type=int, default=50)
+    review_synthesize.add_argument("--evidence-version", default="v1")
+    review_synthesize.add_argument("--synthesis-version", default="v1")
+    review_export = review_commands.add_parser("export-feedback")
+    review_export.add_argument("--latest", action="store_true")
+    review_export.add_argument("--synthesis-id")
+    review_export.add_argument("--format", choices=("markdown", "json"), default="markdown")
     return parser
 
 
@@ -633,12 +655,19 @@ def _review_service(
     store: MailStateStore, args: argparse.Namespace, *, require_client: bool
 ) -> ClassificationReviewService:
     class _NoopReviewClient:
-        model_name = ""
+        model_name = (
+            os.environ.get("AGENTLEDGER_REVIEW_MODEL", "").strip()
+            or "<review-model-not-configured>"
+        )
 
         def review_case(self, _context: object) -> object:
             raise RuntimeError("review model is not configured")
 
-        def chat(self, _context: object, _history: object, _user_message: str) -> str:
+        def chat(
+            self, _context: object, _history: object, _user_message: str,
+            human_context: object | None = None,
+        ) -> str:
+            del human_context
             raise RuntimeError("review model is not configured")
 
     if require_client:
@@ -766,11 +795,52 @@ def main() -> None:
                 service = _review_service(
                     store,
                     args,
-                    require_client=args.review_command in {"run", "serve"},
+                    require_client=(
+                        args.review_command in {"run", "serve", "synthesize"}
+                        and not getattr(args, "debug_selection", False)
+                    ),
                 )
                 if args.review_command == "run":
+                    since = parse_since(args.since)
+                    if args.debug_selection:
+                        diagnostics = service.selection_diagnostics(
+                            since=since,
+                            include_reviewed=args.include_reviewed,
+                            limit=args.limit,
+                        )
+                        print(
+                            "Provider\tMessage ID\tStatus\tLast processed\t"
+                            "source_jsonl_path\tJSONL available\t"
+                            "message_source_ref\tProvider retrieval\t"
+                            "Already reviewed\tSince eligible\tSelection"
+                        )
+                        for item in diagnostics:
+                            selection = (
+                                "selected" if item.selected else
+                                "excluded:" + ",".join(item.exclusion_reasons)
+                            )
+                            print(
+                                f"{item.provider}\t{item.message_id}\t"
+                                f"{item.processing_status}\t"
+                                f"{item.last_processed_at or '-'}\t"
+                                f"{item.source_jsonl_path or '-'}\t"
+                                f"{'yes' if item.source_jsonl_available else 'no'}\t"
+                                f"{item.message_source_ref or '-'}\t"
+                                f"{item.provider_retrieval_reason}\t"
+                                f"{'yes' if item.already_reviewed else 'no'}\t"
+                                f"{'yes' if item.since_eligible else 'no'}\t"
+                                f"{selection}"
+                            )
+                        selected_count = sum(
+                            item.selected for item in diagnostics
+                        )
+                        print(
+                            f"Selection debug: {selected_count} selected / "
+                            f"{len(diagnostics)} total"
+                        )
+                        return
                     result = service.run(
-                        since=parse_since(args.since),
+                        since=since,
                         include_reviewed=args.include_reviewed,
                         limit=args.limit,
                     )
@@ -785,15 +855,23 @@ def main() -> None:
                     records = service.list_cases(
                         queue_only=not args.all,
                         limit=args.limit,
+                        version=args.version,
+                        all_versions=args.all_versions,
                     )
-                    print("Review ID\tStatus\tFinal\tSuggested\tHuman\tMessage")
+                    print(
+                        "Review ID\tVersion\tStatus\tFinal\tSuggested\tHuman\tSubject"
+                    )
                     for record in records:
+                        label = record.subject or (
+                            f"{record.provider}:{record.message_id[:12]}"
+                        )
                         print(
-                            f"{record.review_case_id}\t{record.review_status}\t"
+                            f"{record.review_case_id}\t{record.review_version}\t"
+                            f"{record.review_status}\t"
                             f"{record.final_classification or '-'}\t"
                             f"{record.suggested_classification or '-'}\t"
                             f"{record.human_review_status}\t"
-                            f"{record.provider}:{record.message_id}"
+                            f"{label}"
                         )
                 elif args.review_command == "show":
                     detail = service.get_case_detail(args.review_case_id)
@@ -813,6 +891,34 @@ def main() -> None:
                     print(f"Reason: {case['reason_summary']}")
                     print("Analysis text:")
                     print(context["analysis_text"])
+                elif args.review_command == "synthesize":
+                    reviewer = service.reviewer
+                    feedback = FeedbackSynthesisService(
+                        store, service,
+                        OpenAIFeedbackClient(
+                            reviewer.client, reviewer.model_name  # type: ignore[attr-defined]
+                        ),
+                        evidence_version=args.evidence_version,
+                        synthesis_version=args.synthesis_version,
+                    )
+                    result = feedback.synthesize(
+                        since=parse_since(args.since), limit=args.limit,
+                    )
+                    print(f"Synthesis ID: {result.synthesis_id}")
+                    print(f"Selected feedback: {result.selected}")
+                    print(f"Evidence created: {result.evidence_created}")
+                    print(f"Evidence reused: {result.evidence_reused}")
+                    print(f"Policy candidates: {result.policy_candidates}")
+                elif args.review_command == "export-feedback":
+                    feedback = FeedbackSynthesisService(
+                        store, service, service.reviewer,  # type: ignore[arg-type]
+                    )
+                    synthesis_id = None if args.latest else args.synthesis_id
+                    if not args.latest and not synthesis_id:
+                        parser.error("export-feedback requires --latest or --synthesis-id")
+                    print(feedback.export(
+                        synthesis_id=synthesis_id, format=args.format,
+                    ))
                 else:
                     print(f"Review UI: http://{args.host}:{args.port}")
                     serve_review_ui(service, host=args.host, port=args.port)
@@ -1411,6 +1517,7 @@ def main() -> None:
                 overlap_minutes=args.poll_overlap_minutes,
                 generate_explorer=args.generate_explorer,
                 now=datetime.now(ZoneInfo(args.timezone)),
+                batch_limit=args.batch_limit,
             )
             result = scheduled_result.orchestration
             print("Mode: scheduled read-only Outlook / pending local proposals")
@@ -1555,8 +1662,8 @@ def main() -> None:
         f"Generated events: {result.generated_events}\n"
         f"Rule-only decisions: {result.rule_only_decisions}\n"
         f"LLM-assisted decisions: {result.llm_assisted_decisions}\n"
-        f"Informational: {result.informational_messages}\n"
-        f"Promotions: {result.promotion_messages}\n"
+        f"Transactional: {result.transactional_messages}\n"
+        f"Ignored classification: {result.taxonomy_ignored_messages}\n"
         f"Security notifications: {result.security_notifications}\n"
         f"Invalid: {result.invalid_messages}\n"
         f"Retryable failures: {result.retryable_failures}\n"

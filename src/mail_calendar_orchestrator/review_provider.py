@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from openai import OpenAI
 
 from .review_models import ReviewChatMessage, ReviewContext, ReviewResult
+from mail_to_calendar.taxonomy import CLASSIFICATIONS
 
 
 REVIEW_SYSTEM_PROMPT = """You audit a mail-classification pipeline.
@@ -17,12 +18,46 @@ Do not reveal chain-of-thought. Return only the requested JSON object.
 If the final judgment is materially sound, use review_status=agree.
 If it is materially wrong, use review_status=disagreement.
 If evidence is mixed or incomplete, use review_status=uncertain.
+Use agree only when suggested_classification and the system's final classification
+match after taxonomy normalization. Use disagreement for a definite mismatch.
 reason_summary must be short and concrete."""
+REVIEW_SYSTEM_PROMPT += """
+Explore missed user meaning broadly, but suggested_classification must be exactly one
+of: calendar_candidate, transactional, security_notification, ignored, invalid,
+clarification_required. Never invent another classification name. transactional means
+a user-specific transaction, confirmed fact, financial/contractual state, delivery, or
+obligation. Advertising, campaigns, newsletters, and general information are ignored.
+Legacy informational and promotion both normalize to ignored, so that alias-only change
+is agreement, not a semantic disagreement. Under the private-mailbox policy, grounded
+transactional mail is important and user-notifiable; if the original system classified
+such a message as ignored, treat that as a meaningful disagreement. Do not classify a
+generic newsletter, market update, product introduction, or promotion as transactional."""
 
 
 CHAT_SYSTEM_PROMPT = """You discuss one review case with a human reviewer.
 Use only the provided case context and visible chat history.
 Do not expose chain-of-thought. Answer briefly and directly."""
+
+REVIEW_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "review_status": {
+            "type": "string", "enum": ["agree", "disagreement", "uncertain"]
+        },
+        "suggested_classification": {
+            "type": "string", "enum": list(CLASSIFICATIONS)
+        },
+        "issue_type": {"type": "string", "maxLength": 80},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "reason_summary": {"type": "string", "maxLength": 500},
+        "needs_human_review": {"type": "boolean"},
+    },
+    "required": [
+        "review_status", "suggested_classification", "issue_type",
+        "confidence", "reason_summary", "needs_human_review",
+    ],
+    "additionalProperties": False,
+}
 
 
 class ReviewClient(Protocol):
@@ -35,6 +70,7 @@ class ReviewClient(Protocol):
         context: ReviewContext,
         history: list[ReviewChatMessage],
         user_message: str,
+        human_context: dict[str, Any] | None = None,
     ) -> str: ...
 
 
@@ -74,21 +110,20 @@ class OpenAIReviewClient:
             {
                 "task": "audit_final_mail_classification",
                 "case": context.to_prompt_payload(),
-                "output_schema": {
-                    "review_status": "agree | disagreement | uncertain",
-                    "suggested_classification": "string",
-                    "issue_type": "string",
-                    "confidence": 0.0,
-                    "reason_summary": "short string",
-                    "needs_human_review": True,
-                },
+                "output_schema": REVIEW_RESULT_SCHEMA,
             },
             ensure_ascii=False,
         )
         response = self.client.chat.completions.create(
             model=self.model_name,
-            temperature=0,
-            response_format={"type": "json_object"},
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "classification_review",
+                    "strict": True,
+                    "schema": REVIEW_RESULT_SCHEMA,
+                },
+            },
             messages=[
                 {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
                 {"role": "user", "content": payload},
@@ -102,6 +137,7 @@ class OpenAIReviewClient:
         context: ReviewContext,
         history: list[ReviewChatMessage],
         user_message: str,
+        human_context: dict[str, Any] | None = None,
     ) -> str:
         messages = [
             {"role": "system", "content": CHAT_SYSTEM_PROMPT},
@@ -110,6 +146,7 @@ class OpenAIReviewClient:
                 "content": json.dumps(
                     {
                         "case": context.to_prompt_payload(),
+                        "current_human_review": human_context or {},
                         "instruction": "Use this as the fixed case context for the discussion.",
                     },
                     ensure_ascii=False,
@@ -121,7 +158,6 @@ class OpenAIReviewClient:
         messages.append({"role": "user", "content": user_message})
         response = self.client.chat.completions.create(
             model=self.model_name,
-            temperature=0,
             messages=messages,
         )
         return (response.choices[0].message.content or "").strip()

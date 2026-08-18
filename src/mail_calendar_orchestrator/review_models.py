@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from mail_to_calendar.taxonomy import CLASSIFICATION_SET
+
 
 ReviewStatus = Literal["agree", "disagreement", "uncertain"]
 HumanVerdict = Literal[
@@ -33,11 +35,12 @@ class ReviewResult:
         confidence = value.get("confidence")
         if type(confidence) not in (int, float) or not 0 <= confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
+        suggested = str(value.get("suggested_classification") or "")
+        if suggested not in CLASSIFICATION_SET:
+            raise ValueError("invalid suggested_classification")
         return cls(
             review_status=status,  # type: ignore[arg-type]
-            suggested_classification=str(
-                value.get("suggested_classification") or ""
-            )[:80],
+            suggested_classification=suggested,
             issue_type=str(value.get("issue_type") or "")[:80],
             confidence=float(confidence),
             reason_summary=str(value.get("reason_summary") or "")[:500],
@@ -110,6 +113,8 @@ class ReviewCaseRecord:
     human_review_status: str
     human_verdict: str | None
     human_final_classification: str | None
+    subject: str | None
+    human_comment: str | None
     lesson_summary: str | None
     recommended_change_target: str | None
     created_at: datetime
@@ -130,6 +135,7 @@ class HumanVerdictInput:
     final_classification: str
     lesson_summary: str
     recommended_change_target: RecommendedChangeTarget
+    human_comment: str = ""
 
 
 @dataclass(frozen=True)
@@ -139,3 +145,20 @@ class ReviewRunResult:
     skipped_existing: int
     queue_items: int
     case_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ReviewSelectionDiagnostic:
+    provider: str
+    message_id: str
+    processing_status: str
+    last_processed_at: str | None
+    source_jsonl_path: str | None
+    source_jsonl_available: bool
+    message_source_ref: str | None
+    provider_retrieval_available: bool
+    provider_retrieval_reason: str
+    already_reviewed: bool
+    since_eligible: bool
+    selected: bool
+    exclusion_reasons: list[str] = field(default_factory=list)

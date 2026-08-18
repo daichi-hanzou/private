@@ -86,6 +86,37 @@ def test_retry_failed_retryable_and_stale_transitions(tmp_path) -> None:
         assert store.decision(item).reason == "stale"
 
 
+def test_stale_processing_recovery_is_atomic_and_leaves_fresh_work(tmp_path) -> None:
+    stale = message("stale")
+    fresh = message("fresh")
+    current = datetime(2026, 8, 18, 0, 0, tzinfo=timezone.utc)
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        for item in (stale, fresh):
+            store.mark_processing(
+                item, run_id="interrupted", analysis_mode="llm-first",
+                model_name="qwen",
+            )
+        with store.connection:
+            store.connection.execute(
+                "UPDATE processed_messages SET processing_started_at=? "
+                "WHERE message_id=?",
+                ((current - timedelta(minutes=31)).isoformat(), stale.message_id),
+            )
+            store.connection.execute(
+                "UPDATE processed_messages SET processing_started_at=? "
+                "WHERE message_id=?",
+                ((current - timedelta(minutes=5)).isoformat(), fresh.message_id),
+            )
+
+        assert store.recover_stale_processing(now=current) == 1
+        stale_row = store.processed_message("outlook", stale.message_id)
+        fresh_row = store.processed_message("outlook", fresh.message_id)
+        assert stale_row["processing_status"] == "retryable"
+        assert stale_row["processing_started_at"] is None
+        assert stale_row["last_error_type"] == "StaleProcessingRecovered"
+        assert fresh_row["processing_status"] == "processing"
+
+
 def test_llm_failure_classification_distinguishes_temporary_and_permanent() -> None:
     classify = MailCalendarOrchestrator._is_retryable_llm_failure
     assert classify("Ollama request timed out")

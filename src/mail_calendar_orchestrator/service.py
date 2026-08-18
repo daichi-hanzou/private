@@ -344,6 +344,8 @@ class MailCalendarOrchestrator:
                 clarification_required=mail_result.clarification_required,
                 promotions=mail_result.classification_counts.get("promotion", 0),
                 informational=mail_result.classification_counts.get("informational", 0),
+                transactional=mail_result.classification_counts.get("transactional", 0),
+                taxonomy_ignored=mail_result.classification_counts.get("ignored", 0),
                 security_notifications=mail_result.classification_counts.get("security_notification", 0),
                 invalid=mail_result.classification_counts.get("invalid", 0),
                 status=(
@@ -376,6 +378,12 @@ class MailCalendarOrchestrator:
             ),
             promotion_messages=mail_result.classification_counts.get(
                 "promotion", 0
+            ),
+            transactional_messages=mail_result.classification_counts.get(
+                "transactional", 0
+            ),
+            taxonomy_ignored_messages=mail_result.classification_counts.get(
+                "ignored", 0
             ),
             security_notifications=mail_result.classification_counts.get(
                 "security_notification", 0

@@ -297,6 +297,93 @@ def test_retryable_message_is_reinjected_outside_cursor_window(tmp_path) -> None
         assert row["processing_status"] == "processed"
 
 
+def test_large_backlog_interruption_recovers_in_bounded_batches(tmp_path) -> None:
+    backlog = [
+        EmailMessage(**{
+            **message(f"backlog-{index:02d}").__dict__,
+            "received_at": (
+                NOW - timedelta(hours=50 - index)
+            ).isoformat(),
+        })
+        for index in range(50)
+    ]
+
+    class TerminatingOrchestrator(MailCalendarOrchestrator):
+        def _process_selected(self, *_args, **_kwargs):
+            raise KeyboardInterrupt("simulated systemd termination")
+
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
+        terminating = TerminatingOrchestrator(
+            base_year=2026, timezone="Asia/Tokyo", state_store=store,
+            analysis_mode="llm-first", model_name="qwen",
+        )
+        with pytest.raises(KeyboardInterrupt):
+            run_scheduled_batch(
+                provider=FakeProvider(backlog), orchestrator=terminating,
+                state_store=store, output_dir=tmp_path / "runs", now=NOW,
+                batch_limit=10,
+            )
+        counts = dict(store.connection.execute(
+            "SELECT processing_status,COUNT(*) FROM processed_messages "
+            "GROUP BY processing_status"
+        ).fetchall())
+        assert counts == {"processing": 10}
+        # mark_processing uses the wall clock. Anchor the simulated abandoned
+        # lease to this test's clock before advancing past the stale threshold.
+        with store.connection:
+            store.connection.execute(
+                "UPDATE processed_messages SET processing_started_at=? "
+                "WHERE processing_status='processing'",
+                (NOW.isoformat(),),
+            )
+
+        recovered_at = NOW + timedelta(minutes=31)
+        result = run_scheduled_batch(
+            provider=FakeProvider(backlog), orchestrator=orchestrator(store),
+            state_store=store, output_dir=tmp_path / "runs",
+            now=recovered_at, batch_limit=10,
+        )
+        assert result.orchestration.new_messages == 10
+        counts = dict(store.connection.execute(
+            "SELECT processing_status,COUNT(*) FROM processed_messages "
+            "GROUP BY processing_status"
+        ).fetchall())
+        assert counts == {"processed": 10}
+        assert store.connection.execute(
+            "SELECT MAX(retry_count) FROM processed_messages"
+        ).fetchone()[0] == 1
+
+
+def test_large_backlog_is_drained_oldest_first_without_duplicates(tmp_path) -> None:
+    backlog = [
+        EmailMessage(**{
+            **message(f"queued-{index:02d}").__dict__,
+            "received_at": (NOW + timedelta(minutes=index)).isoformat(),
+        })
+        for index in range(25)
+    ]
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
+        for run_index, expected in enumerate((10, 10, 5)):
+            result = run_scheduled_batch(
+                provider=FakeProvider(backlog), orchestrator=orchestrator(store),
+                state_store=store, output_dir=tmp_path / "runs",
+                now=NOW + timedelta(hours=run_index), batch_limit=10,
+            )
+            assert result.orchestration.new_messages == expected
+        rows = store.connection.execute(
+            "SELECT message_id,processing_status FROM processed_messages "
+            "ORDER BY received_at"
+        ).fetchall()
+        assert len(rows) == 25
+        assert all(row["processing_status"] == "processed" for row in rows)
+        assert len({row["message_id"] for row in rows}) == 25
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM approval_queue"
+        ).fetchone()[0] == 25
+
+
 def test_scheduled_lock_rejects_overlap_and_recovers_stale(tmp_path) -> None:
     with MailStateStore(tmp_path / "state.sqlite3") as store:
         assert store.acquire_scheduled_lock("first", now=NOW)

@@ -105,7 +105,9 @@ class HybridMailAnalyzer:
             rule_derived_datetime_used = False
             if (
                 reservation.detected
-                and llm.final_classification in {"promotion", "informational"}
+                and llm.final_classification in {
+                    "promotion", "informational", "ignored", "transactional"
+                }
             ):
                 original_classification = llm.final_classification
                 derived_date = llm.date or reservation.derived_date
@@ -154,7 +156,7 @@ class HybridMailAnalyzer:
                 notification.detected
                 and checked.result.is_important
                 and checked.final_classification
-                not in {"calendar_candidate", "promotion", "security_notification"}
+                not in {"calendar_candidate", "ignored", "security_notification"}
                 and not checked.result.generic_event_advertisement
                 and not checked.result.should_notify_user
             )
@@ -415,11 +417,13 @@ class HybridMailAnalyzer:
         candidate: CalendarCandidate | None,
     ):
         if importance.category == "promotion":
-            return "promotion"
+            return "ignored"
         if candidate is not None and candidate.clarification_required:
             return "clarification_required"
         if candidate is not None:
             return "calendar_candidate"
         if importance.category == "informational":
-            return "informational"
+            return "ignored"
+        if importance.category in {"deadline", "task"}:
+            return "transactional"
         return "ignored"
