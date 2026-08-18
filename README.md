@@ -1202,3 +1202,151 @@ LINE
 The webhook service may be active and healthy while LINE still cannot reach it
 if the separate Quick Tunnel has stopped. Running Quick Tunnel under systemd or
 using a fixed custom domain is intentionally left for a later phase.
+## Phase 1 automatic watering
+
+The Phase 1 watering system is deliberately separate from mail/calendar code:
+
+```text
+Mini PC (watering scheduler / CLI / JSONL history)
+  -> Wi-Fi HTTP + bearer token
+ESP32-WROOM (MicroPython + uasyncio HTTP server)
+  -> configurable GPIO
+MOSFET trigger module (common GND)
+  -> separate regulated 5-6 V supply
+Adafruit ADA-3910-class peristaltic pump
+```
+
+Never power the pump from an ESP32 GPIO. The GPIO only drives the MOSFET input;
+the pump uses a suitable external 5-6 V supply capable of its startup/current
+load, and ESP32/MOSF grounds must be common. Add appropriate flyback protection
+if it is not already present on the selected MOSFET module.
+
+### Layout
+
+```text
+src/watering/                 Mini PC configuration, HTTP client, scheduler,
+                              SQLite daily claim, JSONL history, simulator, CLI
+firmware/esp32_watering/      MicroPython firmware and example private config
+tests/test_watering.py        Fast unit and local HTTP integration tests
+.env.example                  Safe configuration template
+```
+
+### Mini PC setup and configuration
+
+Install/update the project with uv, generate a random token, and copy only the
+watering settings from `.env.example` into your private `.env` or shell/service
+environment. The CLI reads environment variables; it does not automatically
+publish or log secrets.
+
+```bash
+uv sync
+cp .env.example .env.example.local
+export ESP32_BASE_URL=http://127.0.0.1:8788
+export ESP32_API_TOKEN='replace-with-a-long-random-token'
+export WATERING_TIME=07:00
+export WATERING_DURATION_SECONDS=30
+export REQUEST_TIMEOUT_SECONDS=5
+export TIMEZONE=Asia/Tokyo
+export SIMULATION_MODE=false
+```
+
+Supported settings:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `ESP32_BASE_URL` | `http://127.0.0.1:8788` | ESP32 or simulator URL |
+| `ESP32_API_TOKEN` | none | Shared bearer token; required outside simulation |
+| `WATERING_TIME` | `07:00` | Daily local schedule (`HH:MM`) |
+| `WATERING_DURATION_SECONDS` | `30` | Scheduled duration |
+| `REQUEST_TIMEOUT_SECONDS` | `5` | HTTP timeout |
+| `TIMEZONE` | `Asia/Tokyo` | Scheduler timezone |
+| `SIMULATION_MODE` | `false` | Skip all network watering calls |
+| `WATERING_MAX_DURATION_SECONDS` | `60` | Mini PC safety limit |
+| `WATERING_STATE_DB` | `~/.local/share/agentledger/watering_state.sqlite3` | Daily dedupe state |
+| `WATERING_LOG_PATH` | `~/.local/share/agentledger/watering_history.jsonl` | Structured history |
+
+Start the local ESP32-compatible simulator, then use another terminal for health,
+status, manual watering, and emergency stop:
+
+```bash
+uv run watering run-simulator --host 127.0.0.1 --port 8788
+uv run watering health
+uv run watering status
+uv run watering water --seconds 3
+uv run watering stop
+```
+
+Pure simulation performs no network access:
+
+```bash
+uv run watering simulate --seconds 30
+```
+
+Run the long-lived scheduler with a short polling loop. SQLite atomically claims
+the local calendar date before sending, so process restarts or overlapping
+schedulers cannot water twice on the same day:
+
+```bash
+uv run watering run-scheduler
+```
+
+Each attempt appends a JSON object containing request ID, start time, duration,
+method (`manual`, `scheduled`, or `simulation`), safe response, success state, and
+safe error information. Tokens are never included.
+
+Run tests without real ESP32, pump, Wi-Fi, or long sleeps:
+
+```bash
+uv run pytest tests/test_watering.py
+uv run pytest
+```
+
+### ESP32 MicroPython installation
+
+Flash a current ESP32 MicroPython build using the official MicroPython tooling.
+Copy `firmware/esp32_watering/config.example.py` to `config.py`, set Wi-Fi,
+the same API token, GPIO, polarity, and maximum duration, then upload
+`config.py`, `pump.py`, and `main.py` to the board root. `config.py` is ignored by
+Git.
+
+```python
+WIFI_SSID = "private-wifi"
+WIFI_PASSWORD = "private-password"
+API_TOKEN = "same-long-random-token"
+PUMP_GPIO = 23
+PUMP_ACTIVE_HIGH = True       # change to False if the module is active-low
+MAX_RUN_SECONDS = 60
+HTTP_PORT = 80
+```
+
+MicroPython was selected because Phase 1 only needs GPIO, Wi-Fi, JSON, and a
+small asynchronous HTTP server. `uasyncio` keeps the watchdog, `/status`, and
+`/stop` responsive during pumping. Boot, unhandled-request exceptions, elapsed
+duration, and program shutdown all drive the pump OFF. A request in progress is
+rejected, and repeated request IDs cannot start another run.
+
+### Hardware arrival checklist and first live test
+
+Before connecting a pump, confirm the exact Freenove board pin labels, MOSFET
+module input polarity/voltage compatibility, onboard flyback protection, power
+supply current capacity, tubing direction, and common ground. Then proceed in
+this order:
+
+1. Leave the pump disconnected and verify GPIO ON/OFF with an LED or meter.
+2. Verify MOSFET output with a meter and confirm `PUMP_ACTIVE_HIGH`.
+3. Prepare water and tubing; never dry-run the peristaltic pump unnecessarily.
+4. Test 1 second, then 3 seconds, then 5 seconds.
+5. Measure the actual water volume delivered in 10 seconds.
+6. Repeat at the intended height/head pressure.
+7. Confirm power-on and ESP32 reset never pulse the pump ON.
+8. Disconnect Wi-Fi during a run and confirm the ESP32 still stops on time.
+9. Stop the Mini PC during a run and confirm the ESP32 still stops on time.
+10. Derive seconds-to-volume calibration from measurements and update duration.
+
+Keep the first live tests attended, use a tray/leak containment, keep electronics
+above water, and provide a physical power cutoff. HTTP bearer authentication is
+appropriate only on a trusted private LAN for Phase 1; it is not a substitute for
+TLS or network isolation. Soil sensors, photos, cameras, weather, and AI decisions
+are intentionally deferred to Phase 2. The present separation between decision,
+scheduling, HTTP command, history, and hardware control allows those inputs to be
+added without rewriting the GPIO safety controller.
