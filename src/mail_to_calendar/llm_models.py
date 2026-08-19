@@ -7,7 +7,8 @@ from typing import Any, Literal
 Category = Literal[
     "meeting", "deadline", "appointment", "task", "informational",
     "promotion", "security_notification", "payment", "tax", "insurance",
-    "reservation", "delivery", "contract", "investment", "unknown",
+    "reservation", "delivery", "order", "contract", "investment", "trade",
+    "unknown",
 ]
 CandidateType = Literal[
     "event", "appointment", "deadline", "reminder", "task", "none"
@@ -114,8 +115,8 @@ class LLMAnalysisResult:
         if value["category"] not in {
             "meeting", "deadline", "appointment", "task", "informational",
             "promotion", "security_notification", "payment", "tax",
-            "insurance", "reservation", "delivery", "contract",
-            "investment", "unknown",
+            "insurance", "reservation", "delivery", "order", "contract",
+            "investment", "trade", "unknown",
         }:
             raise LLMResultValidationError("invalid category")
         if value["candidate_type"] not in {
@@ -197,7 +198,7 @@ class LLMAnalysisResult:
         properties: dict[str, Any] = {
             "is_important": {"type": "boolean"},
             "importance_score": {"type": "number", "minimum": 0, "maximum": 1},
-            "category": {"type": "string", "enum": ["meeting", "deadline", "appointment", "task", "informational", "promotion", "security_notification", "payment", "tax", "insurance", "reservation", "delivery", "contract", "investment", "unknown"]},
+            "category": {"type": "string", "enum": ["meeting", "deadline", "appointment", "task", "informational", "promotion", "security_notification", "payment", "tax", "insurance", "reservation", "delivery", "order", "contract", "investment", "trade", "unknown"]},
             "candidate_type": {"type": "string", "enum": ["event", "appointment", "deadline", "reminder", "task", "none"]},
             "title": nullable_string,
             "date": nullable_string,

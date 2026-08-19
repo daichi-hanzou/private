@@ -225,7 +225,8 @@ def test_important_mail_notification_is_button_free_private_and_deduplicated(
         assert "承認" not in payload["text"]
         assert "拒否" not in payload["text"]
         assert "口座振替予定のお知らせ" in payload["text"]
-        assert "deadline" in payload["text"]
+        assert "💳 支払い" in payload["text"]
+        assert "種類:" not in payload["text"]
         assert "2026-08-27" in payload["text"]
         assert "58,240円" in payload["text"]
         row = store.connection.execute(
@@ -236,6 +237,45 @@ def test_important_mail_notification_is_button_free_private_and_deduplicated(
         assert row["notified_at"]
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "category,subject,expected",
+    [
+        ("delivery", "本日、お荷物をお届けいたします", "📦 配送通知"),
+        ("investment", "投資信託の約定通知", "💰 投資取引"),
+        ("payment", "カード請求のお知らせ", "💳 支払い"),
+        ("order", "ご注文を承りました", "🛍️ 注文"),
+        ("contract", "契約更新のお知らせ", "📄 契約"),
+        ("tax", "税金の納付期限", "🧾 税金"),
+        ("insurance", "保険更新のお知らせ", "🛡️ 保険"),
+        ("security_notification", "セキュリティ通知", "🔐 セキュリティ"),
+    ],
+)
+def test_important_payload_uses_human_readable_category(
+    category, subject, expected,
+):
+    payload = LineApprovalService.important_notification_payload({
+        "category": category, "subject": subject,
+        "notification_date": None, "amount": None,
+        "summary": None, "action_hint": None,
+    })
+    assert expected in payload["text"]
+    assert f"種類: {category}" not in payload["text"]
+
+
+def test_important_payload_omits_missing_fields_and_uses_grounded_details():
+    payload = LineApprovalService.important_notification_payload({
+        "category": "delivery", "subject": "お荷物お届けのお知らせ",
+        "notification_date": "2026-08-19", "amount": None,
+        "summary": "本日、お荷物をお届けいたします。",
+        "action_hint": "受取日時をご確認ください。",
+    })
+    text = payload["text"]
+    assert "本日、お荷物をお届けいたします。" in text
+    assert "お届け予定日: 2026-08-19" in text
+    assert "対応: 受取日時をご確認ください。" in text
+    assert "金額:" not in text
 
 
 def test_important_mail_line_failure_is_recorded_safely_and_retryable(tmp_path):

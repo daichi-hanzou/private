@@ -272,6 +272,11 @@ class MailCalendarOrchestrator:
                         or analysis.llm_result.date
                     ),
                     amount=self._safe_amount(message.body_text),
+                    final_classification=analysis.final_classification,
+                    summary=self._safe_notification_summary(
+                        message.body_text, analysis.llm_result.category
+                    ),
+                    action_hint=self._safe_action_hint(message.body_text),
                 ):
                     important_notifications_created += 1
         failed_analyses = {
@@ -411,6 +416,35 @@ class MailCalendarOrchestrator:
             r"(?<!\d)(\d{1,3}(?:,\d{3})+|\d+)\s*円", body_text
         )
         return f"{match.group(1)}円" if match else None
+
+    @staticmethod
+    def _safe_notification_summary(body_text: str, category: str) -> str | None:
+        keywords = {
+            "delivery": ("お届け", "配達", "配送", "発送"),
+            "investment": ("約定", "購入が完了", "取引が完了"),
+            "trade": ("約定", "取引が完了"),
+            "payment": ("口座振替", "引き落と", "引落", "請求", "支払"),
+            "order": ("注文",), "tax": ("税", "納付"),
+            "insurance": ("保険",), "contract": ("契約",),
+        }.get(category, ("約定", "お届け", "口座振替", "請求", "納付", "更新"))
+        return MailCalendarOrchestrator._grounded_sentence(body_text, keywords)
+
+    @staticmethod
+    def _safe_action_hint(body_text: str) -> str | None:
+        return MailCalendarOrchestrator._grounded_sentence(
+            body_text,
+            ("ご確認ください", "確認してください", "指定してください",
+             "お手続きください", "手続きしてください", "お支払いください",
+             "納付してください", "受け取り", "受取"),
+        )
+
+    @staticmethod
+    def _grounded_sentence(body_text: str, keywords: tuple[str, ...]) -> str | None:
+        for sentence in re.split(r"(?<=[。！？!?])|\n+", body_text):
+            value = " ".join(sentence.split()).strip()
+            if value and any(keyword in value for keyword in keywords):
+                return value[:300]
+        return None
 
     @staticmethod
     def _message_source_ref(provider: MailProvider) -> str | None:

@@ -360,6 +360,15 @@ class MailStateStore:
                 "important_mail_notifications", "retryable",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            self._ensure_column(
+                "important_mail_notifications", "final_classification", "TEXT"
+            )
+            self._ensure_column(
+                "important_mail_notifications", "summary", "TEXT"
+            )
+            self._ensure_column(
+                "important_mail_notifications", "action_hint", "TEXT"
+            )
             self._ensure_column("processed_messages", "source_jsonl_path", "TEXT")
             self._ensure_column("processed_messages", "message_source_ref", "TEXT")
             self._ensure_column("review_cases", "subject", "TEXT")
@@ -370,18 +379,23 @@ class MailStateStore:
     def register_important_notification(
         self, *, provider: str, message_id: str, category: str,
         subject: str, notification_date: str | None, amount: str | None,
+        final_classification: str | None = None, summary: str | None = None,
+        action_hint: str | None = None,
     ) -> bool:
         with self.connection:
             cursor = self.connection.execute(
                 """
                 INSERT OR IGNORE INTO important_mail_notifications(
                     provider,message_id,notification_type,category,subject,
-                    notification_date,amount,should_notify_user,status
-                ) VALUES(?,?,'important_mail',?,?,?,?,1,'pending')
+                    notification_date,amount,should_notify_user,status,
+                    final_classification,summary,action_hint
+                ) VALUES(?,?,'important_mail',?,?,?,?,1,'pending',?,?,?)
                 """,
                 (
                     provider, message_id, category[:80], subject[:200],
-                    notification_date, amount,
+                    notification_date, amount, final_classification,
+                    summary[:300] if summary else None,
+                    action_hint[:300] if action_hint else None,
                 ),
             )
         return cursor.rowcount == 1

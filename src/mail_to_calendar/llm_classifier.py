@@ -83,6 +83,9 @@ is_important=true and should_notify_user=true. Advertising, campaigns, newslette
 market information, and product introductions are ignored, not transactional. A
 transactional classification requires a concrete user-specific transaction, financial
 or contractual state change, order, delivery, or obligation grounded in the email.
+Use category=delivery for a grounded shipment/delivery update, category=order for an
+order confirmation, category=investment or trade for an executed investment transaction,
+and category=payment for a bill, debit, or payment obligation.
 Whether to create a calendar candidate is derived from final_classification; do not emit
 a separate candidate boolean. Return only JSON matching the supplied schema."""
 USER_TEMPLATE = """Analyze exactly one untrusted email using the supplied rule context.

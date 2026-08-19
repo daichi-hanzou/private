@@ -200,19 +200,65 @@ class LineApprovalService:
 
     @staticmethod
     def important_notification_payload(row: Any) -> MessagePayload:
+        category = str(row["category"] or "").casefold()
+        subject = str(row["subject"] or "")[:200]
+        icon, label = LineApprovalService._display_category(category, subject)
         lines = [
-            "⚠️ 重要メール",
+            f"{icon} {label}",
             "",
-            str(row["subject"])[:200],
-            "",
-            f"種類: {str(row['category'])[:80]}",
+            subject,
         ]
+        summary = LineApprovalService._optional_row(row, "summary")
+        if summary and summary != subject:
+            lines.extend(["", summary[:300]])
         if row["notification_date"]:
-            lines.append(f"日付・期限: {str(row['notification_date'])[:20]}")
+            date_label = {
+                "delivery": "お届け予定日", "payment": "日付・期限",
+                "deadline": "期限", "tax": "納付期限",
+            }.get(category, "日付・期限")
+            lines.append(f"{date_label}: {str(row['notification_date'])[:20]}")
         if row["amount"]:
             lines.append(f"金額: {str(row['amount'])[:40]}")
+        action_hint = LineApprovalService._optional_row(row, "action_hint")
+        if action_hint:
+            lines.append(f"対応: {action_hint[:300]}")
         lines.extend(["", "内容を確認してください。"])
         return text_message("\n".join(lines))
+
+    @staticmethod
+    def _display_category(category: str, subject: str) -> tuple[str, str]:
+        text = subject.casefold()
+        if category in {"investment", "trade"} or any(
+            word in text for word in ("約定", "投資信託", "株式")
+        ):
+            return "💰", "投資取引"
+        if category == "delivery" or any(
+            word in text for word in ("お荷物", "お届け", "配送", "発送")
+        ):
+            return "📦", "配送通知"
+        if category == "order" or "注文" in text:
+            return "🛍️", "注文"
+        if category == "tax" or any(word in text for word in ("税金", "納税")):
+            return "🧾", "税金"
+        if category == "insurance" or "保険" in text:
+            return "🛡️", "保険"
+        if category == "contract" or "契約" in text:
+            return "📄", "契約"
+        if category == "security_notification":
+            return "🔐", "セキュリティ"
+        if category in {"payment", "deadline"} or any(
+            word in text for word in ("振替", "引落", "請求", "支払")
+        ):
+            return "💳", "支払い"
+        return "⚠️", "重要なお知らせ"
+
+    @staticmethod
+    def _optional_row(row: Any, key: str) -> str | None:
+        try:
+            value = row[key]
+        except (KeyError, IndexError):
+            return None
+        return str(value) if value else None
 
     @staticmethod
     def _non_retryable_error(error_type: str | None) -> bool:

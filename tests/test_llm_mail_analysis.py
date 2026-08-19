@@ -1075,6 +1075,44 @@ def test_order_confirmation_is_transactional_and_generic_investment_news_is_igno
     assert newsletter.final_candidate is None
 
 
+@pytest.mark.parametrize(
+    "subject,body,proposed_category,expected_category",
+    [
+        (
+            "本日、お荷物をお届けいたします",
+            "本日、お荷物をお届けいたします。受取日時をご確認ください。",
+            "informational", "delivery",
+        ),
+        (
+            "投資信託 約定通知", "投資信託の約定内容をご確認ください。",
+            "informational", "investment",
+        ),
+        (
+            "口座振替予定", "8月27日に500円を口座振替予定です。",
+            "informational", "payment",
+        ),
+    ],
+)
+def test_grounded_transaction_normalizes_human_domain_category(
+    subject, body, proposed_category, expected_category,
+):
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body),
+        _noncandidate(
+            "transactional", category=proposed_category,
+            is_important=False, should_notify_user=False,
+        ),
+    ).analysis_results[0]
+
+    assert analysis.final_classification == "transactional"
+    assert analysis.llm_result.category == expected_category
+    assert analysis.final_candidate is None
+    assert (
+        f"category:{proposed_category}->{expected_category}"
+        "_from_grounded_transaction"
+    ) in analysis.classification_corrections
+
+
 def test_transactional_mail_enters_important_queue_without_calendar_approval(
     tmp_path,
 ):
@@ -1097,8 +1135,28 @@ def test_transactional_mail_enters_important_queue_without_calendar_approval(
         ).fetchone()
         assert row["status"] == "pending"
         assert row["message_id"] == "transaction-notification"
+        assert row["final_classification"] == "transactional"
+        assert row["category"] == "investment"
+        assert row["summary"] in message.body_text
+        assert row["action_hint"] in message.body_text
     finally:
         store.close()
+
+
+def test_notification_summary_and_action_hint_are_literal_body_sentences():
+    body = (
+        "本日、お荷物をお届けいたします。"
+        "受取日時をご確認ください。広告も掲載しています。"
+    )
+    summary = MailCalendarOrchestrator._safe_notification_summary(body, "delivery")
+    action = MailCalendarOrchestrator._safe_action_hint(body)
+
+    assert summary == "本日、お荷物をお届けいたします。"
+    assert action == "受取日時をご確認ください。"
+    assert summary in body and action in body
+    assert MailCalendarOrchestrator._safe_action_hint(
+        "本日、お荷物をお届けいたします。"
+    ) is None
 
 
 def test_personal_commitment_without_datetime_requires_clarification():

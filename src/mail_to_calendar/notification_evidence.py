@@ -28,7 +28,18 @@ _TRANSACTION_PATTERNS = (
     "発送しました", "発送完了", "配達予定", "お届け予定", "配送状況",
     "trade executed", "purchase completed", "payment due", "debit scheduled",
     "order confirmed", "order number", "has shipped", "delivery scheduled",
+    "お届けいたします", "お荷物をお届け", "配達いたします",
 )
+_TRANSACTION_CATEGORY_PATTERNS = {
+    "delivery": ("お届け", "配達", "配送", "発送", "has shipped", "delivery"),
+    "investment": ("約定", "投資信託", "株式", "trade executed"),
+    "payment": ("口座振替", "引き落と", "引落", "カード請求", "請求額",
+                "支払期限", "payment", "billing", "debit"),
+    "order": ("注文確定", "注文を承りました", "注文番号", "order confirmed"),
+    "tax": ("税金", "納付期限", "納税"),
+    "insurance": ("保険料", "保険契約", "保険更新"),
+    "contract": ("契約更新", "契約変更"),
+}
 _GENERIC_CONTENT_PATTERNS = (
     "ニュースレター", "メールマガジン", "市況", "マーケット情報",
     "投資情報", "おすすめ商品", "キャンペーン", "セール", "広告",
@@ -92,3 +103,14 @@ def detect_transactional_evidence(text: str) -> TransactionalEvidence:
         )
     )
     return TransactionalEvidence(not generic_only, matched if not generic_only else None)
+
+
+def detect_transactional_category(text: str) -> str | None:
+    """Return a grounded user-transaction category from literal mail text."""
+    if not detect_transactional_evidence(text).detected:
+        return None
+    folded = text.casefold()
+    for category, patterns in _TRANSACTION_CATEGORY_PATTERNS.items():
+        if any(pattern.casefold() in folded for pattern in patterns):
+            return category
+    return None

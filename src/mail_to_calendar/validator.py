@@ -10,7 +10,8 @@ from .models import EmailMessage
 from .time_normalization import normalize_calendar_datetime, normalize_calendar_time
 from .text_normalization import date_detection_text, title_grounding_status
 from .notification_evidence import (
-    detect_important_notification_evidence, detect_transactional_evidence,
+    detect_important_notification_evidence, detect_transactional_category,
+    detect_transactional_evidence,
 )
 
 
@@ -358,10 +359,11 @@ class LLMResultValidator:
             text, base_year=self.base_year
         ).detected
         grounded_transaction = detect_transactional_evidence(text).detected
+        grounded_transaction_category = detect_transactional_category(text)
         transactional_evidence = transactional_evidence or grounded_transaction
         transactional_category = result.category in {
             "payment", "tax", "insurance", "contract", "investment",
-            "delivery",
+            "delivery", "order", "trade",
         }
         if candidate_allowed:
             classification = "calendar_candidate"
@@ -433,12 +435,24 @@ class LLMResultValidator:
             corrections.append(
                 "should_notify_user:false->true_from_grounded_transactional_policy"
             )
+        normalized_category = result.category
+        if (
+            classification == "transactional"
+            and grounded_transaction_category
+            and result.category in {"informational", "unknown"}
+        ):
+            normalized_category = grounded_transaction_category
+            corrections.append(
+                f"category:{result.category}->{normalized_category}"
+                "_from_grounded_transaction"
+            )
         if classification == "ignored" and result.should_notify_user:
             corrections.append(
                 "should_notify_user:true->false_from_ignored_policy"
             )
         normalized = replace(
             result,
+            category=normalized_category,
             is_important=(
                 True if classification == "transactional" else result.is_important
             ),
