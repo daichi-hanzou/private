@@ -1,6 +1,7 @@
 import gc
 import json
 import network
+import time
 import uasyncio as asyncio
 
 import config
@@ -18,9 +19,24 @@ def connect_wifi():
     station.active(True)
     if not station.isconnected():
         station.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
+        timeout_seconds = getattr(config, "WIFI_CONNECT_TIMEOUT_SECONDS", 30)
+        deadline = time.ticks_add(time.ticks_ms(), timeout_seconds * 1000)
         while not station.isconnected():
-            pass
-    return station.ifconfig()[0]
+            if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+                station.disconnect()
+                raise RuntimeError("wifi_connection_timeout")
+            time.sleep_ms(100)
+    ip_address = station.ifconfig()[0]
+    print("Wi-Fi connected; IP address:", ip_address)
+    return ip_address
+
+
+def safe_error(exc):
+    message = str(exc)
+    for secret in (config.WIFI_SSID, config.WIFI_PASSWORD, config.API_TOKEN):
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    return type(exc).__name__ + ": " + message
 
 
 async def send(writer, status, body):
@@ -29,7 +45,12 @@ async def send(writer, status, body):
     writer.write(("HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % (status, reasons.get(status, "Error"), len(encoded))).encode())
     writer.write(encoded)
     await writer.drain()
-    await writer.wait_closed()
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except AttributeError:
+        # Older MicroPython StreamWriter variants close without wait_closed().
+        pass
 
 
 async def handle(reader, writer):
@@ -42,7 +63,7 @@ async def handle(reader, writer):
             if line == b"\r\n":
                 break
             key, value = line.decode().split(":", 1)
-            headers[key.casefold()] = value.strip()
+            headers[key.strip().lower()] = value.strip()
         if headers.get("authorization") != "Bearer " + config.API_TOKEN:
             return await send(writer, 401, {"error": "unauthorized"})
         length = int(headers.get("content-length", "0"))
@@ -62,25 +83,30 @@ async def handle(reader, writer):
             code = 409 if error in ("pump_already_running", "duplicate_request") else 400
             return await send(writer, code, {"accepted": False, "error": error})
         await send(writer, 404, {"error": "not_found"})
-    except Exception:
+    except Exception as exc:
+        print("HTTP request error:", safe_error(exc))
         pump.stop()
         try:
             await send(writer, 400, {"error": "invalid_request"})
-        except Exception:
-            pass
+        except Exception as send_exc:
+            print("HTTP error response failed:", safe_error(send_exc))
     finally:
         gc.collect()
 
 
 async def main():
-    connect_wifi()
+    ip_address = connect_wifi()
     asyncio.create_task(pump.watchdog())
     server = await asyncio.start_server(handle, "0.0.0.0", config.HTTP_PORT)
+    print("Watering API listening on http://%s:%d" % (ip_address, config.HTTP_PORT))
     while True:
         await asyncio.sleep(3600)
 
 
 try:
     asyncio.run(main())
+except Exception as exc:
+    print("Fatal watering service error:", safe_error(exc))
+    raise
 finally:
     pump.stop()

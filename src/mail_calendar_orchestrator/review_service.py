@@ -421,6 +421,35 @@ class ClassificationReviewService:
             )
         return self.get_case(review_case_id)
 
+    def accept_reviewer(
+        self, review_case_id: str, *, human_comment: str = ""
+    ) -> ReviewCaseRecord:
+        """Explicitly accept the initial reviewer result without requiring prose."""
+        record = self.get_case(review_case_id)
+        return self.save_verdict(
+            review_case_id,
+            HumanVerdictInput(
+                human_verdict="reviewer_correct",
+                final_classification=record.suggested_classification,
+                lesson_summary="",
+                recommended_change_target="none",
+                human_comment=human_comment,
+            ),
+        )
+
+    def accept_reviewers(self, review_case_ids: list[str]) -> list[ReviewCaseRecord]:
+        """Explicitly accept unresolved reviewer results selected by the UI."""
+        unique_ids = list(dict.fromkeys(review_case_ids))
+        if len(unique_ids) > 500:
+            raise ValueError("at most 500 review cases can be accepted at once")
+        accepted: list[ReviewCaseRecord] = []
+        for review_case_id in unique_ids:
+            record = self.get_case(review_case_id)
+            if record.human_review_status != "pending":
+                continue
+            accepted.append(self.accept_reviewer(review_case_id))
+        return accepted
+
     def _create_case(
         self,
         row: sqlite3.Row,
@@ -678,7 +707,8 @@ class ClassificationReviewService:
             ),
             subject=str(row["subject"]) if row["subject"] else None,
             human_comment=(
-                str(row["human_comment"]) if row["human_comment"] else None
+                str(row["human_comment"])
+                if row["human_comment"] is not None else None
             ),
             lesson_summary=(
                 str(row["lesson_summary"]) if row["lesson_summary"] else None

@@ -211,16 +211,17 @@ class LineApprovalService:
         summary = LineApprovalService._optional_row(row, "summary")
         if summary and summary != subject:
             lines.extend(["", summary[:300]])
-        if row["notification_date"]:
+        summary_text = summary or ""
+        if row["notification_date"] and str(row["notification_date"]) not in summary_text:
             date_label = {
                 "delivery": "お届け予定日", "payment": "日付・期限",
                 "deadline": "期限", "tax": "納付期限",
             }.get(category, "日付・期限")
             lines.append(f"{date_label}: {str(row['notification_date'])[:20]}")
-        if row["amount"]:
+        if row["amount"] and str(row["amount"]) not in summary_text:
             lines.append(f"金額: {str(row['amount'])[:40]}")
         action_hint = LineApprovalService._optional_row(row, "action_hint")
-        if action_hint:
+        if action_hint and action_hint not in summary_text:
             lines.append(f"対応: {action_hint[:300]}")
         lines.extend(["", "内容を確認してください。"])
         return text_message("\n".join(lines))

@@ -29,12 +29,14 @@ _TRANSACTION_PATTERNS = (
     "trade executed", "purchase completed", "payment due", "debit scheduled",
     "order confirmed", "order number", "has shipped", "delivery scheduled",
     "お届けいたします", "お荷物をお届け", "配達いたします",
+    "チャージ日時", "チャージ金額", "発送の手続きをおこないました",
+    "ご注文情報を受け付けた", "お支払い金額(税込)",
 )
 _TRANSACTION_CATEGORY_PATTERNS = {
     "delivery": ("お届け", "配達", "配送", "発送", "has shipped", "delivery"),
     "investment": ("約定", "投資信託", "株式", "trade executed"),
     "payment": ("口座振替", "引き落と", "引落", "カード請求", "請求額",
-                "支払期限", "payment", "billing", "debit"),
+                "支払期限", "チャージ", "payment", "billing", "debit"),
     "order": ("注文確定", "注文を承りました", "注文番号", "order confirmed"),
     "tax": ("税金", "納付期限", "納税"),
     "insurance": ("保険料", "保険契約", "保険更新"),
@@ -44,6 +46,14 @@ _GENERIC_CONTENT_PATTERNS = (
     "ニュースレター", "メールマガジン", "市況", "マーケット情報",
     "投資情報", "おすすめ商品", "キャンペーン", "セール", "広告",
     "newsletter", "market update", "product introduction", "special offer",
+    "[pr]", "ーprー", "無料で使ってみる", "無料トライアル",
+    "無料でお試し", "おすすめ求人", "商品をご紹介",
+)
+_GENERAL_SERVICE_NOTICE_PATTERNS = (
+    "アクセス集中によるシステム不具合を防ぐため",
+    "サロン検索・予約がご利用いただけません",
+    "一時的にサービスを停止", "メンテナンスのお知らせ",
+    "temporary service interruption", "scheduled maintenance",
 )
 
 
@@ -103,6 +113,18 @@ def detect_transactional_evidence(text: str) -> TransactionalEvidence:
         )
     )
     return TransactionalEvidence(not generic_only, matched if not generic_only else None)
+
+
+def detect_generic_content(text: str) -> bool:
+    """Detect explicit promotional/newsletter markers without semantic inference."""
+    folded = text.casefold()
+    return any(item.casefold() in folded for item in _GENERIC_CONTENT_PATTERNS)
+
+
+def detect_general_service_notice(text: str) -> bool:
+    """Detect broad maintenance/outage notices that are not security events."""
+    folded = text.casefold()
+    return any(item.casefold() in folded for item in _GENERAL_SERVICE_NOTICE_PATTERNS)
 
 
 def detect_transactional_category(text: str) -> str | None:

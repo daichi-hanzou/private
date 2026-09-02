@@ -31,7 +31,23 @@ Legacy informational and promotion both normalize to ignored, so that alias-only
 is agreement, not a semantic disagreement. Under the private-mailbox policy, grounded
 transactional mail is important and user-notifiable; if the original system classified
 such a message as ignored, treat that as a meaningful disagreement. Do not classify a
-generic newsletter, market update, product introduction, or promotion as transactional."""
+generic newsletter, market update, product introduction, or promotion as transactional.
+Apply these canonical examples consistently:
+- A PR label, free registration/trial, sales CTA, public seminar invitation, or product
+  introduction without a user-specific commitment is ignored.
+- An executed investment purchase, card debit, invoice, order confirmation, shipment,
+  delivery-state update, or user-specific contract state is transactional.
+- A new login, suspicious access, new app connection, security code, password change, or
+  account-security warning is security_notification, even when the message recommends an
+  action such as resetting a password.
+- A generic service outage or maintenance newsletter is ignored unless it represents a
+  concrete user-specific transaction, security event, or personal calendar commitment.
+Never return or recommend legacy labels such as informational, promotion, promotional,
+newsletter, security_alert, or transactional_notice. Map their meaning to the canonical
+six-class taxonomy before choosing suggested_classification.
+Classification priority is: security_notification; grounded personal calendar commitment;
+grounded user-specific transaction/state/obligation; ignored; then invalid or
+clarification_required only when their existing definitions truly apply."""
 
 
 CHAT_SYSTEM_PROMPT = """You discuss one review case with a human reviewer.
@@ -88,7 +104,7 @@ class OpenAIReviewConfig:
             raise ValueError("AGENTLEDGER_REVIEW_MODEL is required")
         return cls(
             model_name=model_name,
-            review_version=os.environ.get("AGENTLEDGER_REVIEW_VERSION", "v1"),
+            review_version=os.environ.get("AGENTLEDGER_REVIEW_VERSION", "v2"),
             api_key=os.environ.get("AGENTLEDGER_REVIEW_API_KEY"),
             base_url=os.environ.get("AGENTLEDGER_REVIEW_BASE_URL"),
         )

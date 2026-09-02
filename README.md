@@ -520,22 +520,34 @@ elimination. Change the overlap with `--poll-overlap-minutes 0..60`. The cursor
 advances only after Graph fetch, analysis, atomic JSONL output, and SQLite state
 updates succeed. Individual retryable LLM errors may produce
 `completed_with_errors` and advance the cursor because their messages remain
-`retryable`. Failed Graph/output/state operations do not advance it. When the
-50-message safety cap is reached, the cursor advances only to the newest
-returned message so later runs can drain the remainder.
+`retryable`. Failed Graph/output/state operations do not advance it. Messages
+are claimed and completed in bounded batches (10 by default), oldest first. A
+single scheduled run continues with another batch while backlog and its soft
+runtime budget remain. The cursor advances only to the newest selected message
+when more provider results remain, so a provider API page limit does not skip
+later mail.
 
 ```bash
 uv run mail-calendar-orchestrator state cursor
 uv run mail-calendar-orchestrator run-scheduled --generate-explorer
 ```
 
-Each non-empty run writes distinct JSONL (and optionally Explorer HTML) under
+Each non-empty batch writes distinct JSONL (and optionally Explorer HTML) under
 `~/.local/share/agentledger/runs/`. Empty runs create no JSONL. Scheduled mode
 first performs a lightweight localhost Ollama/model check without inference.
 Defaults are LLM-first, Qwen `qwen3:8b`, thinking disabled, approval required,
-and at most 50 messages. The unit enforces a 30-minute limit. A SQLite lock
-rejects overlapping runs and recovers a stale lock. Failures return non-zero,
-preserve the cursor, and do not disable the timer.
+batch size 10, and a 55-minute soft time budget. The unit enforces a 60-minute
+hard limit. Time is checked only after a claimed batch finishes; when another
+batch is unlikely to fit, the run exits successfully and leaves it unclaimed
+for the next run. A SQLite lock rejects overlapping runs and recovers a stale
+lock. Failures return non-zero, preserve the cursor, and do not disable the
+timer.
+
+Use `--batch-size` and `--time-budget-minutes` to override these values. The
+environment equivalents are `AGENTLEDGER_SCHEDULED_BATCH_SIZE` and
+`AGENTLEDGER_SCHEDULED_TIME_BUDGET_MINUTES`. The legacy
+`AGENTLEDGER_SCHEDULED_BATCH_LIMIT` and `--batch-limit` remain fallback aliases;
+their value now means batch size, not the total run limit.
 
 Install and manage the user units explicitly:
 
@@ -554,8 +566,9 @@ Installation creates `~/.config/systemd/user/agentledger-mail.service`,
 `~/.config/agentledger/mail-calendar.env`. Set
 `AGENTLEDGER_MICROSOFT_CLIENT_ID` there. Optional settings are
 `AGENTLEDGER_OLLAMA_MODEL`, `AGENTLEDGER_OLLAMA_BASE_URL`,
-`AGENTLEDGER_STATE_DB`, `AGENTLEDGER_OUTPUT_DIR`, and
-`AGENTLEDGER_TIMEZONE`. Gmail remains disabled by default. After `gmail auth`
+`AGENTLEDGER_STATE_DB`, `AGENTLEDGER_OUTPUT_DIR`, `AGENTLEDGER_TIMEZONE`,
+`AGENTLEDGER_SCHEDULED_BATCH_SIZE`, and
+`AGENTLEDGER_SCHEDULED_TIME_BUDGET_MINUTES`. Gmail remains disabled by default. After `gmail auth`
 succeeds, enable it with `AGENTLEDGER_GMAIL_ENABLED=true` in this env file or
 pass `--enable-gmail` to `run-scheduled`. Gmail credentials and its independent
 token cache continue to use their existing defaults; `--gmail-credentials`,
@@ -949,6 +962,19 @@ Calendar Agent or to clarification. Clarification is reserved for cases such
 as a personal meeting whose date or participation details remain genuinely
 ambiguous.
 
+After an Important Mail decision is final, a separate presentation-only local
+Qwen prompt creates a one- or two-sentence LINE summary. It receives the
+subject, the same cleaned `analysis_text`, final classification, category, and
+already-grounded date, amount, and action hint. It cannot change classification,
+importance, notification routing, or Calendar decisions. Dates, times, amounts,
+named organizations, state claims, and actions are deterministically checked
+against the mail-derived input. Invalid schema, ungrounded facts, timeout, or an
+unavailable Ollama instance retain the existing deterministic summary, so LINE
+delivery remains best-effort. Only newly inserted Important Mail notifications
+invoke this prompt. SQLite stores the bounded summary/action plus `summary_source`,
+model, and prompt version; it does not store `analysis_text`, raw model output,
+or reasoning.
+
 Validator distinguishes the model's `llm_proposed_classification` from the
 normalized `final_classification` and records `classification_corrections`.
 Sentinel security types such as `"none"` are treated as null. A security
@@ -1327,6 +1353,7 @@ PUMP_GPIO = 23
 PUMP_ACTIVE_HIGH = True       # change to False if the module is active-low
 MAX_RUN_SECONDS = 60
 HTTP_PORT = 80
+WIFI_CONNECT_TIMEOUT_SECONDS = 30
 ```
 
 MicroPython was selected because Phase 1 only needs GPIO, Wi-Fi, JSON, and a
@@ -1334,6 +1361,12 @@ small asynchronous HTTP server. `uasyncio` keeps the watchdog, `/status`, and
 `/stop` responsive during pumping. Boot, unhandled-request exceptions, elapsed
 duration, and program shutdown all drive the pump OFF. A request in progress is
 rejected, and repeated request IDs cannot start another run.
+Wi-Fi startup fails safely after the configured timeout instead of waiting
+forever, and a successful connection prints the assigned IP address to the
+serial console. `/status` reports `last_watering_uptime_seconds`; this is an
+uptime value, not a wall-clock timestamp. Request and watchdog errors print a
+redacted exception type/message without printing Wi-Fi credentials or the API
+token. These firmware paths are kept compatible with MicroPython v1.28.0.
 
 ### Hardware arrival checklist and first live test
 
@@ -1377,11 +1410,29 @@ then continue with **Save & Next**. Decision traces and long technical IDs stay
 collapsed by default. Human comments are retained in the current review record
 and an append-only revision history for later policy synthesis.
 
+When the Reviewer judgment is correct, **Accept Reviewer & Next** records an
+explicit `reviewer_correct` verdict and resolves the case without requiring a
+comment. Merely opening a case does not resolve it. A written correction or
+comment remains the higher-priority feedback signal. To approve a reviewed
+batch at once, **Accept All Visible** accepts only the unresolved cases matching
+the current version and status filters. The UI shows the target count and asks
+for confirmation before saving; already-resolved and hidden cases are not
+changed.
+
 ### Human Feedback Synthesis POC
 
-Resolved Human Reviews with a non-empty `human_comment` can be converted into
-grounded, proposed policy knowledge. This does not modify Qwen prompts,
-validators, rules, code, Git, or deployments.
+All Reviewer `disagreement` cases in the current review version can be converted
+into grounded, proposed policy knowledge, including cases that have not yet been
+human-resolved. Unconfirmed disagreements are explicitly marked as lower-authority
+Reviewer evidence. Human corrections/comments have the highest authority;
+comment-free **Accept Reviewer** decisions are marked as confirmed disagreement
+evidence. Accepted agreements remain confirmation data, and accepted uncertain
+cases remain outside automatic policy synthesis. Synthesis receives the system,
+Reviewer, and human-final classifications separately and asks the Reviewer model
+for Codex-ready implementation and validation plans. Exported Markdown also lists
+the grounded disagreement inputs when no generalized policy survives safety
+filtering. This does not modify Qwen prompts, validators, rules, code, Git, or
+deployments.
 
 ```bash
 uv run mail-calendar-orchestrator review synthesize --since 30d --limit 50
@@ -1395,3 +1446,9 @@ Ungrounded snippets are discarded, unresolved Human Reviews are excluded, and
 single-case policy proposals are not persisted. SQLite retains versioned
 evidence, proposed policies, conflicts, preference changes, and supporting
 Review IDs without storing another copy of the full email body.
+
+The current Reviewer taxonomy version is `v2`. Its structured output accepts
+only `calendar_candidate`, `transactional`, `security_notification`, `ignored`,
+`invalid`, and `clarification_required`. Legacy labels such as `promotional`,
+`newsletter`, and `security_alert` remain visible only in older Review Cases;
+they are not rewritten or mixed into the default v2 queue.

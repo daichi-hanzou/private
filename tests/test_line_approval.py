@@ -235,6 +235,7 @@ def test_important_mail_notification_is_button_free_private_and_deduplicated(
         assert row["status"] == "sent"
         assert row["attempt_count"] == 1
         assert row["notified_at"]
+        assert row["summary_source"] == "deterministic_fallback"
     finally:
         store.close()
 
@@ -276,6 +277,22 @@ def test_important_payload_omits_missing_fields_and_uses_grounded_details():
     assert "お届け予定日: 2026-08-19" in text
     assert "対応: 受取日時をご確認ください。" in text
     assert "金額:" not in text
+
+
+def test_important_payload_does_not_repeat_date_amount_or_action_in_summary():
+    payload = LineApprovalService.important_notification_payload({
+        "category": "payment", "subject": "口座振替のお知らせ",
+        "notification_date": "2026-08-31", "amount": "50,000円",
+        "summary": (
+            "2026-08-31に50,000円が口座振替されます。"
+            "前日までに残高をご確認ください。"
+        ),
+        "action_hint": "前日までに残高をご確認ください。",
+    })
+    text = payload["text"]
+    assert text.count("2026-08-31") == 1
+    assert text.count("50,000円") == 1
+    assert text.count("前日までに残高をご確認ください。") == 1
 
 
 def test_important_mail_line_failure_is_recorded_safely_and_retryable(tmp_path):

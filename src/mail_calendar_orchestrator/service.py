@@ -13,10 +13,16 @@ from mail_to_calendar.models import CalendarCandidate
 from mail_to_calendar.hybrid_analyzer import HybridMailAnalyzer
 from mail_to_calendar.provider import MailProvider
 from mail_to_calendar.service import MailToCalendarService
+from mail_to_calendar.text_normalization import without_transport_headers
 
 from .audit import write_jsonl_atomic
 from .approvals import ApprovalService
 from .models import OrchestrationResult
+from .notification_summarizer import (
+    PROMPT_VERSION as NOTIFICATION_SUMMARY_PROMPT_VERSION,
+    NotificationSummarizer,
+    NotificationSummaryInput,
+)
 from .state import MailStateStore
 
 
@@ -40,6 +46,7 @@ class MailCalendarOrchestrator:
         state_store: MailStateStore | None = None,
         analysis_mode: str = "rule-only",
         model_name: str | None = None,
+        notification_summarizer: NotificationSummarizer | None = None,
     ) -> None:
         self.base_year = base_year
         self.timezone = timezone
@@ -47,6 +54,7 @@ class MailCalendarOrchestrator:
         self.state_store = state_store
         self.analysis_mode = analysis_mode
         self.model_name = model_name
+        self.notification_summarizer = notification_summarizer
 
     def process(
         self,
@@ -262,23 +270,57 @@ class MailCalendarOrchestrator:
                     and analysis.final_classification != "calendar_candidate"
                 ):
                     continue
+                notification_date = (
+                    analysis.notification_grounded_date
+                    or analysis.llm_result.date
+                )
+                amount = self._safe_amount(message.body_text)
+                analysis_text = without_transport_headers(message.body_text)
+                fallback_summary = self._safe_notification_summary(
+                    analysis_text, analysis.llm_result.category
+                )
+                fallback_action = self._safe_action_hint(analysis_text)
                 if self.state_store.register_important_notification(
                     provider=message.provider,
                     message_id=message.message_id,
                     category=analysis.llm_result.category,
                     subject=message.subject,
-                    notification_date=(
-                        analysis.notification_grounded_date
-                        or analysis.llm_result.date
-                    ),
-                    amount=self._safe_amount(message.body_text),
+                    notification_date=notification_date,
+                    amount=amount,
                     final_classification=analysis.final_classification,
-                    summary=self._safe_notification_summary(
-                        message.body_text, analysis.llm_result.category
+                    summary=fallback_summary,
+                    action_hint=fallback_action,
+                    summary_source="deterministic_fallback",
+                    summarizer_model=(
+                        getattr(self.notification_summarizer.client, "model", None)
+                        if self.notification_summarizer else None
                     ),
-                    action_hint=self._safe_action_hint(message.body_text),
+                    summarizer_prompt_version=NOTIFICATION_SUMMARY_PROMPT_VERSION,
                 ):
                     important_notifications_created += 1
+                    if self.notification_summarizer is not None:
+                        summarized = self.notification_summarizer.summarize(
+                            NotificationSummaryInput(
+                                subject=message.subject,
+                                analysis_text=analysis_text,
+                                final_classification=analysis.final_classification,
+                                category=analysis.llm_result.category,
+                                grounded_date=notification_date,
+                                grounded_amount=amount,
+                                existing_action_hint=fallback_action,
+                            ),
+                            fallback_summary=fallback_summary,
+                            fallback_action_hint=fallback_action,
+                        )
+                        self.state_store.update_important_notification_summary(
+                            provider=message.provider,
+                            message_id=message.message_id,
+                            summary=summarized.summary,
+                            action_hint=summarized.action_hint,
+                            summary_source=summarized.source,
+                            summarizer_model=summarized.model,
+                            summarizer_prompt_version=summarized.prompt_version,
+                        )
         failed_analyses = {
             message.message_id: analysis
             for message, analysis in zip(

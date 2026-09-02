@@ -344,12 +344,13 @@ def test_large_backlog_interruption_recovers_in_bounded_batches(tmp_path) -> Non
             state_store=store, output_dir=tmp_path / "runs",
             now=recovered_at, batch_limit=10,
         )
-        assert result.orchestration.new_messages == 10
+        assert result.orchestration.new_messages == 50
+        assert result.batches_processed == 5
         counts = dict(store.connection.execute(
             "SELECT processing_status,COUNT(*) FROM processed_messages "
             "GROUP BY processing_status"
         ).fetchall())
-        assert counts == {"processed": 10}
+        assert counts == {"processed": 50}
         assert store.connection.execute(
             "SELECT MAX(retry_count) FROM processed_messages"
         ).fetchone()[0] == 1
@@ -365,13 +366,15 @@ def test_large_backlog_is_drained_oldest_first_without_duplicates(tmp_path) -> N
     ]
     with MailStateStore(tmp_path / "state.sqlite3") as store:
         store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
-        for run_index, expected in enumerate((10, 10, 5)):
-            result = run_scheduled_batch(
-                provider=FakeProvider(backlog), orchestrator=orchestrator(store),
-                state_store=store, output_dir=tmp_path / "runs",
-                now=NOW + timedelta(hours=run_index), batch_limit=10,
-            )
-            assert result.orchestration.new_messages == expected
+        result = run_scheduled_batch(
+            provider=FakeProvider(backlog), orchestrator=orchestrator(store),
+            state_store=store, output_dir=tmp_path / "runs",
+            now=NOW, batch_limit=10,
+        )
+        assert result.orchestration.new_messages == 25
+        assert result.batches_processed == 3
+        assert result.stop_reason == "backlog_empty"
+        assert result.backlog_remaining == 0
         rows = store.connection.execute(
             "SELECT message_id,processing_status FROM processed_messages "
             "ORDER BY received_at"
@@ -382,6 +385,135 @@ def test_large_backlog_is_drained_oldest_first_without_duplicates(tmp_path) -> N
         assert store.connection.execute(
             "SELECT COUNT(*) FROM approval_queue"
         ).fetchone()[0] == 25
+
+
+@pytest.mark.parametrize(
+    ("count", "expected_batches"), ((7, 1), (25, 3), (100, 10))
+)
+def test_one_scheduled_run_drains_backlog_in_batches(
+    tmp_path, count, expected_batches
+) -> None:
+    backlog = [
+        EmailMessage(**{
+            **message(f"drain-{index:03d}").__dict__,
+            "received_at": (NOW + timedelta(minutes=index)).isoformat(),
+        })
+        for index in range(count)
+    ]
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
+        result = run_scheduled_batch(
+            provider=FakeProvider(backlog), orchestrator=orchestrator(store),
+            state_store=store, output_dir=tmp_path / "runs", now=NOW,
+            batch_limit=10,
+        )
+        assert result.orchestration.new_messages == count
+        assert result.orchestration.processed_messages == count
+        assert result.batches_processed == expected_batches
+        assert result.stop_reason == "backlog_empty"
+        assert len(result.jsonl_paths) == expected_batches
+
+
+def test_only_current_batch_is_claimed_and_after_batch_runs(tmp_path) -> None:
+    backlog = [
+        EmailMessage(**{
+            **message(f"claim-{index:02d}").__dict__,
+            "received_at": (NOW + timedelta(minutes=index)).isoformat(),
+        }) for index in range(25)
+    ]
+    processing_counts: list[int] = []
+    callbacks: list[int] = []
+
+    class InspectingOrchestrator(MailCalendarOrchestrator):
+        def _process_selected(self, *args, **kwargs):
+            processing_counts.append(self.state_store.connection.execute(
+                "SELECT COUNT(*) FROM processed_messages "
+                "WHERE processing_status='processing'"
+            ).fetchone()[0])
+            return super()._process_selected(*args, **kwargs)
+
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
+        service = InspectingOrchestrator(
+            base_year=2026, timezone="Asia/Tokyo", state_store=store,
+            analysis_mode="rule-only",
+        )
+        result = run_scheduled_batch(
+            provider=FakeProvider(backlog), orchestrator=service,
+            state_store=store, output_dir=tmp_path / "runs", now=NOW,
+            batch_limit=10,
+            after_batch=lambda batch: callbacks.append(
+                batch.orchestration.new_messages
+            ),
+        )
+        assert result.orchestration.new_messages == 25
+        assert processing_counts == [10, 10, 5]
+        assert callbacks == [10, 10, 5]
+
+
+def test_time_budget_stops_between_batches_and_next_run_continues(tmp_path) -> None:
+    backlog = [
+        EmailMessage(**{
+            **message(f"budget-{index:02d}").__dict__,
+            "received_at": (NOW + timedelta(minutes=index)).isoformat(),
+        })
+        for index in range(25)
+    ]
+    ticks = iter((0.0, 1500.0, 1500.0))
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
+        partial = run_scheduled_batch(
+            provider=FakeProvider(backlog), orchestrator=orchestrator(store),
+            state_store=store, output_dir=tmp_path / "runs", now=NOW,
+            batch_limit=10, time_budget_minutes=25,
+            monotonic=lambda: next(ticks),
+        )
+        assert partial.orchestration.new_messages == 10
+        assert partial.batches_processed == 1
+        assert partial.stop_reason == "time_budget"
+        assert partial.backlog_remaining is None
+        assert partial.average_batch_seconds == 1500
+        assert store.summary()["counts"] == {"processed": 10}
+
+        resumed = run_scheduled_batch(
+            provider=FakeProvider(backlog), orchestrator=orchestrator(store),
+            state_store=store, output_dir=tmp_path / "runs",
+            now=NOW + timedelta(hours=1), batch_limit=10,
+        )
+        assert resumed.orchestration.new_messages == 15
+        assert resumed.batches_processed == 2
+        assert resumed.stop_reason == "backlog_empty"
+        assert store.summary()["counts"] == {"processed": 25}
+
+
+def test_mixed_provider_batches_are_fair_and_use_spare_capacity(tmp_path) -> None:
+    outlook = [
+        EmailMessage(**{
+            **message(f"outlook:o-{index:02d}").__dict__,
+            "received_at": (NOW + timedelta(minutes=index)).isoformat(),
+        }) for index in range(15)
+    ]
+    gmail = [
+        EmailMessage(**{
+            **message(f"gmail:g-{index:02d}").__dict__,
+            "provider": "gmail",
+            "received_at": (NOW + timedelta(minutes=index)).isoformat(),
+        }) for index in range(5)
+    ]
+    with MailStateStore(tmp_path / "state.sqlite3") as store:
+        store.ensure_bootstrap(timezone_name="Asia/Tokyo", now=NOW)
+        result = run_scheduled_batch(
+            providers={
+                "outlook": FakeProvider(outlook),
+                "gmail": FakeProvider(gmail),
+            },
+            orchestrator=orchestrator(store), state_store=store,
+            output_dir=tmp_path / "runs", now=NOW, batch_limit=10,
+        )
+        assert result.orchestration.new_messages == 20
+        assert result.batches_processed == 2
+        assert result.provider_results["outlook"]["fetched_messages"] == 15
+        assert result.provider_results["gmail"]["fetched_messages"] == 5
 
 
 def test_scheduled_lock_rejects_overlap_and_recovers_stale(tmp_path) -> None:
@@ -404,7 +536,7 @@ def test_units_are_user_scoped_private_and_scheduled() -> None:
     timer = timer_unit()
     env = environment_template()
     assert "Type=oneshot" in service
-    assert "TimeoutStartSec=30min" in service
+    assert "TimeoutStartSec=60min" in service
     assert "systemctl" not in service
     assert "/home/daichi" not in service
     for value in ("07:30:00", "12:30:00", "18:30:00", "Persistent=true"):
@@ -412,6 +544,8 @@ def test_units_are_user_scoped_private_and_scheduled() -> None:
     assert "TOKEN" not in service.upper()
     assert "TOKEN" not in env.upper()
     assert "AGENTLEDGER_MICROSOFT_CLIENT_ID=" in env
+    assert "AGENTLEDGER_SCHEDULED_BATCH_SIZE=10" in env
+    assert "AGENTLEDGER_SCHEDULED_TIME_BUDGET_MINUTES=55" in env
 
 
 def test_scheduler_install_status_and_management_are_fakeable(tmp_path) -> None:
@@ -460,6 +594,14 @@ def test_environment_file_is_not_overwritten(tmp_path) -> None:
 def test_scheduler_cli_commands_and_state_cursor(tmp_path, monkeypatch, capsys) -> None:
     parser = _parser()
     assert parser.parse_args(["run-scheduled"]).gmail_enabled is False
+    assert parser.parse_args(["run-scheduled"]).batch_size == 10
+    assert parser.parse_args(["run-scheduled"]).time_budget_minutes == 55
+    assert parser.parse_args(
+        ["run-scheduled", "--batch-limit", "7"]
+    ).batch_size == 7
+    assert parser.parse_args(
+        ["run-scheduled", "--batch-size", "8"]
+    ).batch_size == 8
     assert parser.parse_args(
         ["run-scheduled", "--enable-gmail"]
     ).gmail_enabled is True
@@ -478,3 +620,11 @@ def test_scheduler_cli_commands_and_state_cursor(tmp_path, monkeypatch, capsys) 
     assert "Processing started from: 2026-08-08T00:00:00+09:00" in output
     assert "Overlap: 5 minutes" in output
     assert "Next fetch from:" in output
+
+
+def test_scheduled_batch_size_env_prefers_new_name(monkeypatch) -> None:
+    monkeypatch.setenv("AGENTLEDGER_SCHEDULED_BATCH_LIMIT", "7")
+    monkeypatch.delenv("AGENTLEDGER_SCHEDULED_BATCH_SIZE", raising=False)
+    assert _parser().parse_args(["run-scheduled"]).batch_size == 7
+    monkeypatch.setenv("AGENTLEDGER_SCHEDULED_BATCH_SIZE", "9")
+    assert _parser().parse_args(["run-scheduled"]).batch_size == 9

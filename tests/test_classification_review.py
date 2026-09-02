@@ -26,7 +26,7 @@ from mail_calendar_orchestrator.review_web import _INDEX_HTML
 from mail_calendar_orchestrator.state import MailStateStore
 from mail_to_calendar.local_provider import LocalMailProvider
 from mail_to_calendar.taxonomy import (
-    classifications_equivalent, normalize_classification,
+    CLASSIFICATION_SET, classifications_equivalent, normalize_classification,
 )
 
 
@@ -86,6 +86,20 @@ def test_review_status_matches_normalized_taxonomy_or_preserves_uncertainty(
 
     assert reconciled.review_status == expected_status
     assert reconciled.needs_human_review is needs_human
+
+
+def test_reviewer_prompt_uses_only_current_private_mailbox_taxonomy() -> None:
+    from mail_calendar_orchestrator.review_provider import (
+        REVIEW_RESULT_SCHEMA, REVIEW_SYSTEM_PROMPT,
+    )
+
+    suggested = REVIEW_RESULT_SCHEMA["properties"]["suggested_classification"]
+    assert set(suggested["enum"]) == CLASSIFICATION_SET
+    assert "legacy labels such as informational" in REVIEW_SYSTEM_PROMPT
+    assert "executed investment purchase" in REVIEW_SYSTEM_PROMPT
+    assert "shipment" in REVIEW_SYSTEM_PROMPT
+    assert "suspicious access" in REVIEW_SYSTEM_PROMPT
+    assert "generic service outage" in REVIEW_SYSTEM_PROMPT
 
 
 def test_openai_review_requests_use_model_default_temperature() -> None:
@@ -761,6 +775,69 @@ def test_unresolved_verdict_stays_in_human_review_queue(tmp_path: Path) -> None:
     store.close()
 
 
+def test_accept_reviewer_resolves_without_comment_and_records_history(
+    tmp_path: Path,
+) -> None:
+    store, service = _seed_review_data(tmp_path)
+    service.run()
+    case = next(
+        item for item in service.list_cases(queue_only=True, limit=10)
+        if item.message_id == "msg-disagree"
+    )
+
+    updated = service.accept_reviewer(case.review_case_id)
+
+    assert updated.human_review_status == "resolved"
+    assert updated.human_verdict == "reviewer_correct"
+    assert updated.human_final_classification == case.suggested_classification
+    assert updated.human_comment == ""
+    assert updated.recommended_change_target == "none"
+    assert case.review_case_id not in {
+        item.review_case_id for item in service.list_cases(queue_only=True, limit=10)
+    }
+    history = list(store.connection.execute(
+        "SELECT * FROM human_review_history WHERE review_case_id=?",
+        (case.review_case_id,),
+    ))
+    assert len(history) == 1
+    assert history[0]["human_verdict"] == "reviewer_correct"
+    assert history[0]["human_comment"] == ""
+    store.close()
+
+
+def test_bulk_accept_reviewer_only_resolves_selected_pending_cases(
+    tmp_path: Path,
+) -> None:
+    store, service = _seed_review_data(tmp_path)
+    service.run()
+    cases = service.list_cases(limit=10)
+    selected = cases[:2]
+    service.accept_reviewer(selected[0].review_case_id)
+
+    accepted = service.accept_reviewers([
+        selected[0].review_case_id,
+        selected[1].review_case_id,
+        selected[1].review_case_id,
+    ])
+
+    assert [item.review_case_id for item in accepted] == [
+        selected[1].review_case_id,
+    ]
+    assert all(item.human_verdict == "reviewer_correct" for item in accepted)
+    history_counts = {
+        row["review_case_id"]: row["count"]
+        for row in store.connection.execute(
+            "SELECT review_case_id, count(*) count FROM human_review_history "
+            "GROUP BY review_case_id"
+        )
+    }
+    assert history_counts[selected[0].review_case_id] == 1
+    assert history_counts[selected[1].review_case_id] == 1
+    untouched = service.get_case(cases[2].review_case_id)
+    assert untouched.human_review_status == "pending"
+    store.close()
+
+
 def test_human_review_ui_is_subject_first_and_chat_free() -> None:
     assert "Reviewer status" in _INDEX_HTML
     assert "Human review status" in _INDEX_HTML
@@ -777,6 +854,12 @@ def test_human_review_ui_is_subject_first_and_chat_free() -> None:
     assert "Human Review" in _INDEX_HTML
     assert "Human comment" in _INDEX_HTML
     assert "Save & Next" in _INDEX_HTML
+    assert "Accept Reviewer & Next" in _INDEX_HTML
+    assert "acceptReviewerNext" in _INDEX_HTML
+    assert "/accept-reviewer" in _INDEX_HTML
+    assert "Accept All Visible" in _INDEX_HTML
+    assert "acceptAllVisible" in _INDEX_HTML
+    assert "/api/cases/accept-reviewer-bulk" in _INDEX_HTML
     assert "Ask Reviewer" in _INDEX_HTML
     assert "sendReviewer" in _INDEX_HTML
     assert "human_comment" in _INDEX_HTML
@@ -854,6 +937,8 @@ def test_human_feedback_synthesis_is_grounded_versioned_and_exportable(
                 "summary": "Grounded personal confirmations require explicit handling.",
                 "supporting_cases": ids, "supporting_evidence": evidence,
                 "confidence": "high", "recommended_targets": ["qwen_prompt", "test"],
+                "implementation_plan": ["Refine the grounded confirmation rule."],
+                "validation_plan": ["Add regression fixtures for both classifications."],
             }], "conflicts": [{"summary": "No material conflict", "supporting_cases": ids}],
                 "preference_changes": [{"older_policy": "notify less",
                     "newer_policy": "handle confirmed reservations", "supporting_cases": ids}]}
@@ -869,6 +954,11 @@ def test_human_feedback_synthesis_is_grounded_versioned_and_exportable(
     assert len(client.extractions) == 2
     assert all(len(call["analysis_text"]) > 0 for call in client.extractions)
     assert all(len(item["evidence_snippets"]) == 1 for item in client.synthesis_inputs[0])
+    assert all("system_final_classification" in item
+               for item in client.synthesis_inputs[0])
+    assert all("reviewer_suggested_classification" in item
+               for item in client.synthesis_inputs[0])
+    assert all("review_status" in item for item in client.synthesis_inputs[0])
     assert all("invented secret token" not in item["evidence_snippets"]
                for item in client.synthesis_inputs[0])
     assert cases["msg-uncertain"].review_case_id not in {
@@ -889,9 +979,148 @@ def test_human_feedback_synthesis_is_grounded_versioned_and_exportable(
     assert "personal_confirmation_policy" in markdown
     assert cases["msg-agree"].review_case_id in markdown
     assert "Human comments:" in markdown
+    assert "Implementation plan:" in markdown
+    assert "Validation plan:" in markdown
+    assert "Reviewer disagreement evidence" in markdown
     assert "invented secret token" not in markdown
     assert "analysis_text" not in exported_json
     assert "OAuth" not in exported_json
+    store.close()
+
+
+def test_synthesis_includes_explicit_reviewer_acceptance_without_comment(
+    tmp_path: Path,
+) -> None:
+    store, reviews = _seed_review_data(tmp_path)
+    reviews.run()
+    case = next(
+        item for item in reviews.list_cases()
+        if item.message_id == "msg-disagree"
+    )
+    reviews.accept_reviewer(case.review_case_id)
+
+    class FakeFeedbackClient:
+        model_name = "frontier-feedback-test"
+
+        def __init__(self) -> None:
+            self.extractions = []
+            self.synthesis_inputs = []
+
+        def extract_evidence(self, payload):
+            self.extractions.append(payload)
+            return {
+                "evidence_snippets": ["Your appointment is confirmed"],
+                "evidence_summary": "Confirmed personal appointment.",
+            }
+
+        def synthesize(self, payload):
+            self.synthesis_inputs.append(payload)
+            return {
+                "policy_candidates": [], "conflicts": [],
+                "preference_changes": [],
+            }
+
+    client = FakeFeedbackClient()
+    result = FeedbackSynthesisService(store, reviews, client).synthesize(limit=50)
+
+    assert result.selected == 1
+    assert len(client.extractions) == 1
+    extraction = client.extractions[0]
+    assert extraction["human_comment"] == ""
+    assert extraction["feedback_signal"] == "accepted_reviewer_disagreement"
+    assert extraction["reviewer_initial_assessment"][
+        "suggested_classification"
+    ] == case.suggested_classification
+    assert extraction["reviewer_initial_assessment"]["reason_summary"]
+    assert client.synthesis_inputs[0][0]["feedback_signal"] == (
+        "accepted_reviewer_disagreement"
+    )
+    assert client.synthesis_inputs[0][0]["reviewer_reason_summary"]
+    assert client.synthesis_inputs[0][0]["system_final_classification"] == (
+        case.final_classification
+    )
+    assert client.synthesis_inputs[0][0]["reviewer_suggested_classification"] == (
+        case.suggested_classification
+    )
+    store.close()
+
+
+def test_synthesis_selects_all_disagreements_and_marks_human_authority(
+    tmp_path: Path,
+) -> None:
+    store, reviews = _seed_review_data(tmp_path)
+    reviews.run()
+    cases = {case.message_id: case for case in reviews.list_cases()}
+    reviews.accept_reviewer(cases["msg-agree"].review_case_id)
+    reviews.accept_reviewer(cases["msg-disagree"].review_case_id)
+    reviews.accept_reviewer(cases["msg-uncertain"].review_case_id)
+
+    class UnusedFeedbackClient:
+        model_name = "unused"
+
+    selected = FeedbackSynthesisService(
+        store, reviews, UnusedFeedbackClient()
+    )._select_cases(since=None, limit=50)
+
+    assert {case.review_case_id for case in selected} == {
+        cases["msg-disagree"].review_case_id,
+    }
+    store.close()
+
+
+def test_empty_policy_export_explains_that_no_change_was_proposed(
+    tmp_path: Path,
+) -> None:
+    store, reviews = _seed_review_data(tmp_path)
+    reviews.run()
+    case = next(case for case in reviews.list_cases() if case.message_id == "msg-disagree")
+    reviews.accept_reviewer(case.review_case_id)
+
+    class NoPolicyClient:
+        model_name = "frontier-feedback-test"
+
+        def extract_evidence(self, payload):
+            del payload
+            return {"evidence_snippets": ["Your appointment is confirmed"],
+                    "evidence_summary": "Confirmed personal appointment."}
+
+        def synthesize(self, payload):
+            del payload
+            return {"policy_candidates": [], "conflicts": [],
+                    "preference_changes": []}
+
+    synthesis = FeedbackSynthesisService(store, reviews, NoPolicyClient())
+    result = synthesis.synthesize(limit=50)
+    markdown = synthesis.export(synthesis_id=result.synthesis_id)
+
+    assert f"Synthesis ID: {result.synthesis_id}" in markdown
+    assert "Policy candidates: 0" in markdown
+    assert "No policy changes were proposed" in markdown
+    assert "Reviewer disagreement evidence" in markdown
+    assert case.review_case_id in markdown
+    store.close()
+
+
+def test_synthesis_includes_unresolved_reviewer_disagreement(
+    tmp_path: Path,
+) -> None:
+    store, reviews = _seed_review_data(tmp_path)
+    reviews.run()
+    cases = {case.message_id: case for case in reviews.list_cases()}
+
+    selected = FeedbackSynthesisService(
+        store, reviews, type("UnusedClient", (), {"model_name": "unused"})()
+    )._select_cases(since=None, limit=50)
+
+    assert cases["msg-disagree"].review_case_id in {
+        case.review_case_id for case in selected
+    }
+    assert FeedbackSynthesisService._feedback_signal(
+        cases["msg-disagree"]
+    ) == "reviewer_disagreement_unconfirmed"
+    assert cases["msg-agree"].review_case_id not in {
+        case.review_case_id for case in selected
+    }
     store.close()
 
 

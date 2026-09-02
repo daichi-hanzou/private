@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from datetime import datetime
 from http.server import ThreadingHTTPServer
 from zoneinfo import ZoneInfo
@@ -51,6 +52,17 @@ def test_simulator_normal_water_status_and_emergency_stop(simulator):
     assert not client.status()["pump_running"]
 
 
+def test_stop_returns_complete_json_response(simulator):
+    _, url = simulator
+    response = requests.post(
+        url + "/stop", json={},
+        headers={"Authorization": f"Bearer {TOKEN}"}, timeout=2,
+    )
+    assert response.status_code == 200
+    assert response.headers["Content-Type"].startswith("application/json")
+    assert response.json() == {"stopped": False, "pump_running": False}
+
+
 def test_simulator_auto_stops_without_real_sleep():
     clock = Clock()
     state = SimulatorState(TOKEN, clock=clock)
@@ -58,6 +70,31 @@ def test_simulator_auto_stops_without_real_sleep():
     assert code == 202 and state.status()["pump_running"]
     clock.value += 31
     assert not state.status()["pump_running"]
+    assert state.status()["last_watering_uptime_seconds"] == 100.0
+    assert "last_watering_at" not in state.status()
+
+
+def test_esp32_firmware_uses_micropython_compatible_safety_paths():
+    root = Path(__file__).parents[1]
+    main_source = (root / "firmware/esp32_watering/main.py").read_text()
+    pump_source = (root / "firmware/esp32_watering/pump.py").read_text()
+    config_source = (
+        root / "firmware/esp32_watering/config.example.py"
+    ).read_text()
+
+    assert ".casefold(" not in main_source
+    assert "key.strip().lower()" in main_source
+    assert "WIFI_CONNECT_TIMEOUT_SECONDS" in main_source
+    assert "time.ticks_diff" in main_source
+    assert "time.sleep_ms(100)" in main_source
+    assert 'print("Wi-Fi connected; IP address:", ip_address)' in main_source
+    assert "except Exception as exc:" in main_source
+    assert 'message.replace(secret, "[redacted]")' in main_source
+    assert "await writer.drain()" in main_source
+    assert 'await send(writer, 200, {"stopped": pump.stop()' in main_source
+    assert "WIFI_CONNECT_TIMEOUT_SECONDS = 30" in config_source
+    assert "last_watering_uptime_seconds" in pump_source
+    assert "last_watering_at" not in pump_source
 
 
 @pytest.mark.parametrize("duration", [0, -1, 61, 1.5, True])

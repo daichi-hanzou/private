@@ -11,6 +11,7 @@ from agentledger.html import render_explorer
 from agentledger.ingestion import read_jsonl
 from agentledger.normalizer import normalize_events
 from mail_calendar_orchestrator.service import MailCalendarOrchestrator
+from mail_calendar_orchestrator.notification_summarizer import NotificationSummarizer
 from mail_calendar_orchestrator.state import MailStateStore
 from mail_calendar_orchestrator.cli import _parser, main
 from mail_to_calendar.hybrid_analyzer import HybridMailAnalyzer
@@ -567,12 +568,15 @@ def test_nonreservation_mail_never_receives_strong_reservation_correction(
     )
 
 
-def _orchestrate_notification_case(tmp_path, message, raw):
+def _orchestrate_notification_case(
+    tmp_path, message, raw, *, notification_summarizer=None
+):
     store = MailStateStore(tmp_path / "state.sqlite3")
     result = MailCalendarOrchestrator(
         base_year=2026, timezone="Asia/Tokyo",
         analyzer=_analyzer(FakeOllamaClient(raw), mode="llm-first"),
         state_store=store, analysis_mode="llm-first", model_name="qwen3:8b",
+        notification_summarizer=notification_summarizer,
     ).process_provider(Provider([message]), tmp_path / "result.jsonl")
     return store, result
 
@@ -1076,6 +1080,81 @@ def test_order_confirmation_is_transactional_and_generic_investment_news_is_igno
 
 
 @pytest.mark.parametrize(
+    "subject,body,expected,expected_category",
+    [
+        (
+            "チャージ完了のお知らせ",
+            "チャージ日時 2026/08/15 01:47 チャージ方法 楽天カード "
+            "チャージ金額 50,000円",
+            "transactional", "payment",
+        ),
+        (
+            "商品の発送について",
+            "ご注文いただきました商品の発送の手続きをおこないました。"
+            "注文番号 ABC-123",
+            "transactional", "delivery",
+        ),
+        (
+            "Special [PR]",
+            "メールマガジン [PR] 無料トライアルをぜひこの機会にお試しください。",
+            "ignored", None,
+        ),
+    ],
+)
+def test_review_feedback_patterns_correct_invalid_classifications(
+    subject, body, expected, expected_category,
+):
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body),
+        _noncandidate("invalid", category="unknown", is_important=False),
+    ).analysis_results[0]
+
+    assert analysis.final_classification == expected
+    if expected_category:
+        assert analysis.llm_result.category == expected_category
+
+
+@pytest.mark.parametrize(
+    "subject,body",
+    [
+        (
+            "ログインのお知らせ",
+            "楽天証券のアプリにログインがありました。ログイン日時：2026年9月2日 09:41。"
+            "第三者のログインの可能性があります。",
+        ),
+        (
+            "アプリ接続のお知らせ",
+            "あなたが「Google でログイン」機能を使用してアプリにログインしました。"
+            "アプリがプロフィール情報を受け取りました。",
+        ),
+    ],
+)
+def test_review_feedback_security_phrases_are_deterministically_detected(subject, body):
+    analysis = _llm_first_result(
+        _message(subject=subject, body=body),
+        _noncandidate("informational", category="informational"),
+    ).analysis_results[0]
+
+    assert analysis.final_classification == "security_notification"
+
+
+def test_general_booking_service_outage_is_not_security_notification():
+    analysis = _llm_first_result(
+        _message(
+            subject="一時停止のお知らせ",
+            body="アクセス集中によるシステム不具合を防ぐため、"
+            "サロン検索・予約がご利用いただけません。",
+        ),
+        _noncandidate(
+            "security_notification", category="security_notification",
+            security_notification_type="none",
+        ),
+    ).analysis_results[0]
+
+    assert analysis.final_classification == "ignored"
+
+
+@pytest.mark.parametrize(
     "subject,body,proposed_category,expected_category",
     [
         (
@@ -1157,6 +1236,94 @@ def test_notification_summary_and_action_hint_are_literal_body_sentences():
     assert MailCalendarOrchestrator._safe_action_hint(
         "本日、お荷物をお届けいたします。"
     ) is None
+
+
+def test_notification_summarizer_runs_only_for_new_important_mail(tmp_path):
+    message = _message(
+        subject="お荷物お届けのお知らせ",
+        body="本日、お荷物をお届けいたします。受取日時をご確認ください。",
+        message_id="summarized-delivery",
+    )
+    summary_client = FakeOllamaClient({
+        "summary": "本日、お荷物が配達される予定です。",
+        "action_hint": "受取日時をご確認ください。",
+    })
+    store, result = _orchestrate_notification_case(
+        tmp_path,
+        message,
+        _noncandidate(
+            "transactional", category="delivery", is_important=True,
+            should_notify_user=True,
+        ),
+        notification_summarizer=NotificationSummarizer(summary_client),
+    )
+    try:
+        assert result.important_notifications_created == 1
+        assert len(summary_client.calls) == 1
+        row = store.connection.execute(
+            "SELECT * FROM important_mail_notifications"
+        ).fetchone()
+        assert row["summary"] == "本日、お荷物が配達される予定です。"
+        assert row["action_hint"] == "受取日時をご確認ください。"
+        assert row["summary_source"] == "llm"
+        assert row["summarizer_model"] == "qwen3:8b"
+        assert row["summarizer_prompt_version"] == (
+            "important-mail-notification-summary-v1"
+        )
+
+        orchestrator = MailCalendarOrchestrator(
+            base_year=2026,
+            analyzer=_analyzer(FakeOllamaClient(_noncandidate(
+                "transactional", category="delivery", is_important=True,
+                should_notify_user=True,
+            )), mode="llm-first"),
+            state_store=store,
+            analysis_mode="llm-first",
+            notification_summarizer=NotificationSummarizer(summary_client),
+        )
+        duplicate = orchestrator.process_provider(
+            Provider([message]), tmp_path / "duplicate.jsonl", reprocess=True
+        )
+        assert duplicate.important_notifications_created == 0
+        assert len(summary_client.calls) == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "kind", ["ignored", "calendar_candidate", "security_notification"],
+)
+def test_non_important_routes_do_not_call_notification_summarizer(tmp_path, kind):
+    if kind == "calendar_candidate":
+        raw = _raw()
+    elif kind == "security_notification":
+        raw = _raw(
+            final_classification="security_notification",
+            category="security_notification", is_important=True,
+            should_create_calendar_candidate=False, candidate_type="none",
+            should_notify_user=False,
+            security_notification_type="account_activity",
+        )
+    else:
+        raw = _raw(
+            final_classification="ignored", category="informational",
+            is_important=False, should_create_calendar_candidate=False,
+            candidate_type="none", should_notify_user=False,
+        )
+    summary_client = FakeOllamaClient({
+        "summary": "呼ばれてはいけません。", "action_hint": None
+    })
+    store, result = _orchestrate_notification_case(
+        tmp_path,
+        _message(),
+        raw,
+        notification_summarizer=NotificationSummarizer(summary_client),
+    )
+    try:
+        assert result.important_notifications_created == 0
+        assert summary_client.calls == []
+    finally:
+        store.close()
 
 
 def test_personal_commitment_without_datetime_requires_clarification():

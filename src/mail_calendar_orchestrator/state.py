@@ -252,6 +252,11 @@ class MailStateStore:
                     notified_at TEXT,
                     last_error_type TEXT,
                     retryable INTEGER NOT NULL DEFAULT 0,
+                    summary TEXT,
+                    action_hint TEXT,
+                    summary_source TEXT,
+                    summarizer_model TEXT,
+                    summarizer_prompt_version TEXT,
                     PRIMARY KEY (provider,message_id,notification_type)
                 );
                 CREATE TABLE IF NOT EXISTS review_case_id_sequence (
@@ -343,7 +348,25 @@ class MailStateStore:
                     PRIMARY KEY (synthesis_id, policy_id),
                     FOREIGN KEY (synthesis_id) REFERENCES review_policy_syntheses(synthesis_id)
                 );
+                CREATE TABLE IF NOT EXISTS review_synthesis_cases (
+                    synthesis_id TEXT NOT NULL,
+                    review_case_id TEXT NOT NULL,
+                    feedback_signal TEXT NOT NULL,
+                    grounding_status TEXT NOT NULL,
+                    evidence_version TEXT NOT NULL,
+                    PRIMARY KEY (synthesis_id, review_case_id),
+                    FOREIGN KEY (synthesis_id) REFERENCES review_policy_syntheses(synthesis_id),
+                    FOREIGN KEY (review_case_id) REFERENCES review_cases(review_case_id)
+                );
                 """
+            )
+            self._ensure_column(
+                "review_policy_candidates", "implementation_plan_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                "review_policy_candidates", "validation_plan_json",
+                "TEXT NOT NULL DEFAULT '[]'",
             )
             self._ensure_column(
                 "approval_queue", "execution_started_at", "TEXT"
@@ -369,6 +392,15 @@ class MailStateStore:
             self._ensure_column(
                 "important_mail_notifications", "action_hint", "TEXT"
             )
+            self._ensure_column(
+                "important_mail_notifications", "summary_source", "TEXT"
+            )
+            self._ensure_column(
+                "important_mail_notifications", "summarizer_model", "TEXT"
+            )
+            self._ensure_column(
+                "important_mail_notifications", "summarizer_prompt_version", "TEXT"
+            )
             self._ensure_column("processed_messages", "source_jsonl_path", "TEXT")
             self._ensure_column("processed_messages", "message_source_ref", "TEXT")
             self._ensure_column("review_cases", "subject", "TEXT")
@@ -381,6 +413,9 @@ class MailStateStore:
         subject: str, notification_date: str | None, amount: str | None,
         final_classification: str | None = None, summary: str | None = None,
         action_hint: str | None = None,
+        summary_source: str = "deterministic_fallback",
+        summarizer_model: str | None = None,
+        summarizer_prompt_version: str | None = None,
     ) -> bool:
         with self.connection:
             cursor = self.connection.execute(
@@ -388,17 +423,44 @@ class MailStateStore:
                 INSERT OR IGNORE INTO important_mail_notifications(
                     provider,message_id,notification_type,category,subject,
                     notification_date,amount,should_notify_user,status,
-                    final_classification,summary,action_hint
-                ) VALUES(?,?,'important_mail',?,?,?,?,1,'pending',?,?,?)
+                    final_classification,summary,action_hint,summary_source,
+                    summarizer_model,summarizer_prompt_version
+                ) VALUES(?,?,'important_mail',?,?,?,?,1,'pending',?,?,?,?,?,?)
                 """,
                 (
                     provider, message_id, category[:80], subject[:200],
                     notification_date, amount, final_classification,
                     summary[:300] if summary else None,
                     action_hint[:300] if action_hint else None,
+                    summary_source,
+                    summarizer_model[:100] if summarizer_model else None,
+                    summarizer_prompt_version[:100]
+                    if summarizer_prompt_version else None,
                 ),
             )
         return cursor.rowcount == 1
+
+    def update_important_notification_summary(
+        self, *, provider: str, message_id: str, summary: str | None,
+        action_hint: str | None, summary_source: str,
+        summarizer_model: str | None, summarizer_prompt_version: str,
+    ) -> None:
+        if summary_source not in {"llm", "deterministic_fallback"}:
+            raise ValueError("unsupported important notification summary source")
+        with self.connection:
+            self.connection.execute(
+                "UPDATE important_mail_notifications SET summary=?,action_hint=?,"
+                "summary_source=?,summarizer_model=?,summarizer_prompt_version=? "
+                "WHERE provider=? AND message_id=? "
+                "AND notification_type='important_mail' AND status='pending'",
+                (
+                    summary[:300] if summary else None,
+                    action_hint[:300] if action_hint else None,
+                    summary_source,
+                    summarizer_model[:100] if summarizer_model else None,
+                    summarizer_prompt_version[:100], provider, message_id,
+                ),
+            )
 
     def pending_important_notifications(self, *, limit: int = 50) -> list[sqlite3.Row]:
         if not 1 <= limit <= 500:

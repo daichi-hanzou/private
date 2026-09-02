@@ -13,13 +13,30 @@ from .state import MailStateStore
 
 
 EVIDENCE_PROMPT = """Extract only the minimal email excerpts needed to understand the
-human comment. Snippets must be short verbatim substrings of analysis_text. Do not
+Reviewer disagreement, explicit human review decision, and any human comment. Snippets must be
+short verbatim substrings of analysis_text. An accepted_reviewer_disagreement is human-confirmed;
+a reviewer_disagreement_unconfirmed is still review evidence but has lower authority. Use the
+reviewer assessment only to identify relevant email evidence; do not treat reviewer prose itself
+as evidence. Do not
 summarize the whole email, infer missing text, expose chain-of-thought, or return prose
 outside the schema."""
-POLICY_PROMPT = """Generalize reviewed human feedback into conservative policy candidates.
+POLICY_PROMPT = """Turn Reviewer disagreements and reviewed human feedback into conservative,
+Codex-ready modification plans.
 Merge similar feedback, retain supporting review IDs and evidence, identify conflicts and
 time-ordered preference changes, and respect the existing taxonomy. Do not overgeneralize
-a single case or propose unsupported policy. Return only the schema; do not expose
+a single case or propose unsupported policy. A human-written correction/comment has higher
+priority than accepted_reviewer_disagreement; the latter means the human deliberately confirmed
+that the Reviewer's disagreement identifies an original-system correction. An unconfirmed
+Reviewer disagreement is eligible but lower-confidence evidence. A human verdict rejecting or
+modifying the Reviewer overrides the Reviewer proposal. Reviewer agreements without human
+correction are confirmation data, not policy-change candidates. For each disagreement, compare
+system_final_classification with
+human_final_classification when present; for an unresolved case, use
+reviewer_suggested_classification as the explicitly unconfirmed proposed destination. Use grounded
+evidence to describe the correction direction. Produce concrete implementation_plan and validation_plan
+items that Codex can evaluate; do not claim that changes were already applied. When two or more
+grounded cases support the same correction, produce a policy candidate unless their evidence
+conflicts; do not silently treat them as mere confirmation. Return only the schema; do not expose
 chain-of-thought or modify code, prompts, validators, or deployments."""
 
 EVIDENCE_SCHEMA = {
@@ -41,8 +58,11 @@ POLICY_SCHEMA = {
                 "supporting_evidence": {"type": "array", "items": {"type": "string"}},
                 "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                 "recommended_targets": {"type": "array", "items": {"type": "string"}},
+                "implementation_plan": {"type": "array", "items": {"type": "string"}},
+                "validation_plan": {"type": "array", "items": {"type": "string"}},
             }, "required": ["policy_id", "summary", "supporting_cases",
-                "supporting_evidence", "confidence", "recommended_targets"],
+                "supporting_evidence", "confidence", "recommended_targets",
+                "implementation_plan", "validation_plan"],
             "additionalProperties": False,
         }},
         "conflicts": {"type": "array", "items": {"type": "object", "properties": {
@@ -140,27 +160,47 @@ class FeedbackSynthesisService:
                  json.dumps(result.get("conflicts", []), ensure_ascii=False),
                  json.dumps(result.get("preference_changes", []), ensure_ascii=False), now),
             )
+            for case in cases:
+                evidence = next(
+                    (item for item in inputs if item["review_id"] == case.review_case_id),
+                    None,
+                )
+                self.state.connection.execute(
+                    "INSERT INTO review_synthesis_cases("
+                    "synthesis_id,review_case_id,feedback_signal,grounding_status,"
+                    "evidence_version) VALUES(?,?,?,?,?)",
+                    (synthesis_id, case.review_case_id, self._feedback_signal(case),
+                     evidence["grounding_status"] if evidence else "evidence_uncertain",
+                     self.evidence_version),
+                )
             for candidate in result.get("policy_candidates", []):
                 self.state.connection.execute(
                     "INSERT INTO review_policy_candidates(synthesis_id,policy_id,summary,"
                     "confidence,recommended_targets_json,supporting_review_ids_json,"
-                    "supporting_evidence_json,status) VALUES(?,?,?,?,?,?,?,?)",
+                    "supporting_evidence_json,implementation_plan_json,validation_plan_json,"
+                    "status) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (synthesis_id, str(candidate["policy_id"])[:120],
                      str(candidate["summary"])[:2000], candidate["confidence"],
                      json.dumps(candidate["recommended_targets"], ensure_ascii=False),
                      json.dumps(candidate["supporting_cases"], ensure_ascii=False),
                      json.dumps(candidate["supporting_evidence"], ensure_ascii=False),
+                     json.dumps(candidate["implementation_plan"], ensure_ascii=False),
+                     json.dumps(candidate["validation_plan"], ensure_ascii=False),
                      "proposed"),
                 )
         return SynthesisResult(synthesis_id, len(cases), evidence_created,
                                evidence_reused, len(result.get("policy_candidates", [])))
 
     def _select_cases(self, *, since: str | None, limit: int) -> list[ReviewCaseRecord]:
-        clauses = ["review_version=?", "human_review_status='resolved'",
-                   "human_comment IS NOT NULL", "trim(human_comment)<>''"]
+        clauses = [
+            "review_version=?",
+            "(review_status='disagreement' OR (human_review_status='resolved' AND ("
+            "(human_comment IS NOT NULL AND trim(human_comment)<>'') "
+            "OR human_verdict IN ('original_correct','modified'))))",
+        ]
         params: list[Any] = [self.reviews.review_version]
         if since:
-            clauses.append("human_reviewed_at>=?")
+            clauses.append("COALESCE(human_reviewed_at,updated_at,created_at)>=?")
             params.append(since)
         params.append(limit)
         rows = self.state.connection.execute(
@@ -192,6 +232,14 @@ class FeedbackSynthesisService:
             "human_verdict": case.human_verdict,
             "human_final_classification": case.human_final_classification,
             "human_comment": case.human_comment,
+            "feedback_signal": self._feedback_signal(case),
+            "reviewer_initial_assessment": {
+                "review_status": case.review_status,
+                "suggested_classification": case.suggested_classification,
+                "issue_type": case.issue_type,
+                "confidence": case.confidence,
+                "reason_summary": case.reason_summary,
+            },
             "recommended_change_target": case.recommended_change_target,
             "reviewed_at": case.human_reviewed_at.isoformat() if case.human_reviewed_at else None,
         }
@@ -214,12 +262,29 @@ class FeedbackSynthesisService:
     def _policy_input(case: ReviewCaseRecord, snippets: list[str], summary: str,
                       grounding_status: str) -> dict[str, Any]:
         return {"review_id": case.review_case_id, "human_verdict": case.human_verdict,
+                "review_status": case.review_status,
+                "system_final_classification": case.final_classification,
+                "reviewer_suggested_classification": case.suggested_classification,
                 "final_classification": case.human_final_classification,
                 "human_comment": case.human_comment, "reviewed_at": (
                     case.human_reviewed_at.isoformat() if case.human_reviewed_at else None),
                 "recommended_change_target": case.recommended_change_target,
+                "feedback_signal": FeedbackSynthesisService._feedback_signal(case),
+                "reviewer_reason_summary": case.reason_summary,
                 "evidence_snippets": snippets, "evidence_summary": summary,
                 "grounding_status": grounding_status}
+
+    @staticmethod
+    def _feedback_signal(case: ReviewCaseRecord) -> str:
+        if (case.human_comment or "").strip():
+            return "human_comment"
+        if case.human_verdict in {"original_correct", "modified"}:
+            return "explicit_human_correction"
+        if case.human_verdict == "reviewer_correct" and case.review_status == "disagreement":
+            return "accepted_reviewer_disagreement"
+        if case.review_status == "disagreement":
+            return "reviewer_disagreement_unconfirmed"
+        return "explicit_human_correction"
 
     def export(self, *, synthesis_id: str | None = None, format: str = "markdown") -> str:
         if synthesis_id is None:
@@ -252,16 +317,49 @@ class FeedbackSynthesisService:
             safe_candidates.append({"policy_id": row["policy_id"], "summary": row["summary"],
                 "confidence": row["confidence"], "status": row["status"],
                 "recommended_targets": json.loads(row["recommended_targets_json"]),
+                "implementation_plan": json.loads(row["implementation_plan_json"]),
+                "validation_plan": json.loads(row["validation_plan_json"]),
                 "supporting_cases": supporting_cases, "human_comments": human_comments,
                 "supporting_evidence": json.loads(row["supporting_evidence_json"])})
+        review_inputs = []
+        rows = self.state.connection.execute(
+            "SELECT sc.feedback_signal,sc.grounding_status,r.review_case_id,"
+            "r.review_status,r.final_classification,r.suggested_classification,"
+            "r.human_final_classification,r.human_verdict,e.evidence_summary,"
+            "e.evidence_snippets_json FROM review_synthesis_cases sc "
+            "JOIN review_cases r ON r.review_case_id=sc.review_case_id "
+            "LEFT JOIN review_feedback_evidence e ON e.review_case_id=sc.review_case_id "
+            "AND e.evidence_version=sc.evidence_version WHERE sc.synthesis_id=? "
+            "ORDER BY r.review_case_id",
+            (synthesis_id,),
+        )
+        for row in rows:
+            review_inputs.append({
+                "review_id": row["review_case_id"],
+                "feedback_signal": row["feedback_signal"],
+                "grounding_status": row["grounding_status"],
+                "review_status": row["review_status"],
+                "system_final_classification": row["final_classification"],
+                "reviewer_suggested_classification": row["suggested_classification"],
+                "human_final_classification": row["human_final_classification"],
+                "human_verdict": row["human_verdict"],
+                "evidence_summary": row["evidence_summary"],
+                "evidence_snippets": json.loads(row["evidence_snippets_json"] or "[]"),
+            })
         safe = {"synthesis_id": synthesis_id, "synthesis_version": synthesis["synthesis_version"],
                 "review_version": synthesis["review_version"], "created_at": synthesis["created_at"],
                 "policy_candidates": safe_candidates,
+                "review_inputs": review_inputs,
                 "conflicts": json.loads(synthesis["conflicts_json"]),
                 "preference_changes": json.loads(synthesis["preference_changes_json"])}
         if format == "json":
             return json.dumps(safe, ensure_ascii=False, indent=2)
-        lines = ["# AgentLedger Human Feedback Policy Proposal", ""]
+        lines = ["# AgentLedger Human Feedback Policy Proposal", "",
+                 f"- Synthesis ID: {synthesis_id}",
+                 f"- Review version: {synthesis['review_version']}",
+                 f"- Policy candidates: {len(safe_candidates)}", ""]
+        if not safe_candidates:
+            lines += ["No policy changes were proposed from the selected human feedback.", ""]
         for index, item in enumerate(safe["policy_candidates"], 1):
             lines += [f"## Policy {index}: {item['policy_id']}", "", "Summary:",
                       str(item["summary"]), "", "Supporting cases:"]
@@ -269,6 +367,27 @@ class FeedbackSynthesisService:
             lines += ["", "Human comments:"] + [f"- {value}" for value in item["human_comments"]]
             lines += ["", "Evidence:"] + [f"- {value}" for value in item["supporting_evidence"]]
             lines += ["", "Suggested targets:"] + [f"- {value}" for value in item["recommended_targets"]]
+            lines += ["", "Implementation plan:"] + [
+                f"- {value}" for value in item["implementation_plan"]
+            ]
+            lines += ["", "Validation plan:"] + [
+                f"- {value}" for value in item["validation_plan"]
+            ]
+            lines.append("")
+        lines += ["## Reviewer disagreement evidence", ""]
+        if not review_inputs:
+            lines += ["No synthesis inputs were recorded for this legacy result.", ""]
+        for item in review_inputs:
+            final_value = item["human_final_classification"] or item[
+                "reviewer_suggested_classification"
+            ]
+            lines += [f"### {item['review_id']}", "",
+                      f"- Signal: {item['feedback_signal']}",
+                      f"- Grounding: {item['grounding_status']}",
+                      f"- Classification: {item['system_final_classification']} → {final_value}"]
+            if item["evidence_summary"]:
+                lines.append(f"- Evidence summary: {item['evidence_summary']}")
+            lines += [f"- Evidence: {value}" for value in item["evidence_snippets"]]
             lines.append("")
         return "\n".join(lines)
 

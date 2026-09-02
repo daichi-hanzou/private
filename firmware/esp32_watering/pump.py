@@ -11,7 +11,7 @@ class PumpController:
         self.max_run_seconds = max_run_seconds
         self.pump_running = False
         self.last_request_id = None
-        self.last_watering_at = None
+        self.last_watering_uptime_seconds = None
         self.stop_at_ms = None
         self.seen_request_ids = set()
         self._set(False)  # fail-safe OFF immediately at boot
@@ -33,7 +33,7 @@ class PumpController:
             return False, "pump_already_running"
         self.pump_running = True
         self.last_request_id = request_id
-        self.last_watering_at = time.time()
+        self.last_watering_uptime_seconds = time.ticks_ms() // 1000
         self.stop_at_ms = time.ticks_add(time.ticks_ms(), duration * 1000)
         self._set(True)
         return True, None
@@ -59,7 +59,7 @@ class PumpController:
         return {
             "pump_running": self.pump_running,
             "last_request_id": self.last_request_id,
-            "last_watering_at": self.last_watering_at,
+            "last_watering_uptime_seconds": self.last_watering_uptime_seconds,
             "remaining_seconds": remaining,
         }
 
@@ -67,6 +67,7 @@ class PumpController:
         while True:
             try:
                 self.refresh()
-            except Exception:
+            except Exception as exc:
+                print("Pump watchdog error:", type(exc).__name__ + ": " + str(exc))
                 self.stop()
             await asyncio.sleep_ms(100)

@@ -34,6 +34,7 @@ from mail_to_calendar.extractor import RuleBasedCalendarExtractor
 from mail_to_calendar.text_normalization import without_transport_headers
 
 from .service import MailCalendarOrchestrator
+from .notification_summarizer import NotificationSummarizer
 from .scheduler import (
     DEFAULT_OUTPUT_DIR,
     SystemdUserScheduler,
@@ -70,6 +71,13 @@ def _env_enabled(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _scheduled_batch_size_default() -> int:
+    return int(os.environ.get(
+        "AGENTLEDGER_SCHEDULED_BATCH_SIZE",
+        os.environ.get("AGENTLEDGER_SCHEDULED_BATCH_LIMIT", "10"),
+    ))
 
 
 def _print_gmail_debug_body(message: object) -> None:
@@ -274,9 +282,16 @@ def _parser() -> argparse.ArgumentParser:
     scheduled.add_argument("--folder", default="inbox")
     scheduled.add_argument("--max-messages", type=int, default=50)
     scheduled.add_argument(
-        "--batch-limit", type=int,
-        default=int(os.environ.get("AGENTLEDGER_SCHEDULED_BATCH_LIMIT", "10")),
-        help="Maximum messages analyzed in one scheduled run across providers.",
+        "--batch-size", "--batch-limit", dest="batch_size", type=int,
+        default=_scheduled_batch_size_default(),
+        help="Messages processed per batch (legacy: --batch-limit).",
+    )
+    scheduled.add_argument(
+        "--time-budget-minutes", type=float,
+        default=float(os.environ.get(
+            "AGENTLEDGER_SCHEDULED_TIME_BUDGET_MINUTES", "55"
+        )),
+        help="Soft runtime budget checked between completed batches.",
     )
     scheduled.add_argument("--poll-overlap-minutes", type=int, default=5)
     scheduled.add_argument("--start-from", default=None)
@@ -676,7 +691,7 @@ def _review_service(
         review_version = review_config.review_version
     else:
         reviewer = _NoopReviewClient()
-        review_version = os.environ.get("AGENTLEDGER_REVIEW_VERSION", "v1")
+        review_version = os.environ.get("AGENTLEDGER_REVIEW_VERSION", "v2")
     return ClassificationReviewService(
         store,
         reviewer,
@@ -1461,9 +1476,6 @@ def main() -> None:
                 timezone_name=args.timezone, start_from=args.start_from,
                 reset=args.reset_start_from,
             )
-            cursor = state_store.cursor(
-                overlap_minutes=args.poll_overlap_minutes, provider="outlook"
-            )
             client = OllamaClient(
                 base_url=args.ollama_base_url, model=args.ollama_model,
                 timeout_seconds=args.ollama_timeout_seconds, thinking=False,
@@ -1475,49 +1487,66 @@ def main() -> None:
                 LLMCalendarClassifier(client), base_year=args.base_year,
                 timezone=args.timezone, mode="llm-first",
             )
-            config = OutlookProviderConfig(
-                client_id=client_id, authority=args.authority, scopes=["Mail.Read"],
-                token_cache_path=args.token_cache, folder=args.folder,
-                max_messages=args.max_messages, unread_only=False,
-                received_after=cursor["next_fetch_from"], include_body=True,
-            )
-            authenticator = MicrosoftAuthenticator(
-                client_id=config.client_id, authority=config.authority,
-                scopes=config.scopes, token_cache_path=config.token_cache_path,
-            )
-            provider = OutlookProvider(config, authenticator=authenticator)
-            scheduled_providers = {"outlook": provider}
+            def outlook_factory() -> OutlookProvider:
+                cursor = state_store.cursor(
+                    overlap_minutes=args.poll_overlap_minutes,
+                    provider="outlook",
+                )
+                config = OutlookProviderConfig(
+                    client_id=client_id, authority=args.authority,
+                    scopes=["Mail.Read"], token_cache_path=args.token_cache,
+                    folder=args.folder, max_messages=args.max_messages,
+                    unread_only=False,
+                    received_after=cursor["next_fetch_from"], include_body=True,
+                )
+                authenticator = MicrosoftAuthenticator(
+                    client_id=config.client_id, authority=config.authority,
+                    scopes=config.scopes,
+                    token_cache_path=config.token_cache_path,
+                )
+                return OutlookProvider(config, authenticator=authenticator)
+
+            scheduled_provider_factories = {"outlook": outlook_factory}
             if args.gmail_enabled:
                 if not 1 <= args.gmail_max_messages <= 100:
                     raise ValueError(
                         "gmail_max_messages must be between 1 and 100"
                     )
-                gmail_cursor = state_store.cursor(
-                    overlap_minutes=args.poll_overlap_minutes,
-                    provider="gmail",
-                )
-                gmail_auth = GmailReadOnlyAuth(
-                    args.gmail_credentials, args.gmail_token_cache
-                )
-                scheduled_providers["gmail"] = ScheduledGmailProvider(
-                    gmail_auth,
-                    GmailProviderConfig(
-                        max_messages=args.gmail_max_messages,
-                        received_after=gmail_cursor["next_fetch_from"],
-                    ),
-                )
+                def gmail_factory() -> ScheduledGmailProvider:
+                    gmail_cursor = state_store.cursor(
+                        overlap_minutes=args.poll_overlap_minutes,
+                        provider="gmail",
+                    )
+                    gmail_auth = GmailReadOnlyAuth(
+                        args.gmail_credentials, args.gmail_token_cache
+                    )
+                    return ScheduledGmailProvider(
+                        gmail_auth,
+                        GmailProviderConfig(
+                            max_messages=args.gmail_max_messages,
+                            received_after=gmail_cursor["next_fetch_from"],
+                        ),
+                    )
+
+                scheduled_provider_factories["gmail"] = gmail_factory
             orchestrator = MailCalendarOrchestrator(
                 base_year=args.base_year, timezone=args.timezone,
                 analyzer=analyzer, state_store=state_store,
                 analysis_mode="llm-first", model_name=args.ollama_model,
+                notification_summarizer=NotificationSummarizer(client),
             )
             scheduled_result = run_scheduled_batch(
-                providers=scheduled_providers, orchestrator=orchestrator,
+                provider_factories=scheduled_provider_factories,
+                orchestrator=orchestrator,
                 state_store=state_store, output_dir=args.output_dir,
                 overlap_minutes=args.poll_overlap_minutes,
                 generate_explorer=args.generate_explorer,
                 now=datetime.now(ZoneInfo(args.timezone)),
-                batch_limit=args.batch_limit,
+                batch_limit=args.batch_size,
+                time_budget_minutes=args.time_budget_minutes,
+                after_batch=lambda _batch: _notify_pending_line_best_effort(
+                    args.state_db
+                ),
             )
             result = scheduled_result.orchestration
             print("Mode: scheduled read-only Outlook / pending local proposals")
@@ -1534,6 +1563,31 @@ def main() -> None:
                 print(line)
             if scheduled_result.html_path:
                 print(f"Explorer: {scheduled_result.html_path}")
+            remaining = (
+                str(scheduled_result.backlog_remaining)
+                if scheduled_result.backlog_remaining is not None
+                else "at least 1 (deferred)"
+            )
+            minutes, seconds = divmod(int(scheduled_result.elapsed_seconds), 60)
+            average_minutes, average_seconds = divmod(
+                int(scheduled_result.average_batch_seconds), 60
+            )
+            completion = (
+                "yes"
+                if scheduled_result.stop_reason == "backlog_empty"
+                else f"no ({scheduled_result.stop_reason})"
+            )
+            print(
+                f"Batches processed: {scheduled_result.batches_processed}\n"
+                f"Emails selected: {result.new_messages}\n"
+                f"Emails processed: {result.processed_messages}\n"
+                f"Backlog remaining: {remaining}\n"
+                f"Elapsed: {minutes}m {seconds:02d}s\n"
+                f"Average batch time: "
+                f"{average_minutes}m {average_seconds:02d}s\n"
+                f"Backlog completed in this run: {completion}\n"
+                f"Stop reason: {scheduled_result.stop_reason}"
+            )
             provider = None
         else:
             provider = None
@@ -1556,6 +1610,7 @@ def main() -> None:
                 confidence_threshold=args.llm_confidence_threshold,
                 require_llm=args.require_llm,
             )
+            notification_summarizer = NotificationSummarizer(client)
         elif args.command != "run-scheduled":
             analyzer = HybridMailAnalyzer(
                 None,
@@ -1563,12 +1618,14 @@ def main() -> None:
                 timezone=args.timezone,
                 mode="rule-only",
             )
+            notification_summarizer = None
         if args.command != "run-scheduled":
             state_store = None if args.no_state else MailStateStore(args.state_db)
             orchestrator = MailCalendarOrchestrator(
             base_year=args.base_year, timezone=args.timezone, analyzer=analyzer,
             state_store=state_store, analysis_mode=args.analysis_mode,
             model_name=args.ollama_model if args.analysis_mode != "rule-only" else None,
+            notification_summarizer=notification_summarizer,
             )
         if args.command == "process":
             result = orchestrator.process(
@@ -1641,8 +1698,6 @@ def main() -> None:
             f"{mask_account(provider.authenticated_account)}\n"
             f"Fetched messages: {result.fetched_messages}"
         )
-    if args.command == "run-scheduled" and result.state_db:
-        _notify_pending_line_best_effort(result.state_db)
     if result.new_messages == 0:
         print("No new messages to process.")
     print(

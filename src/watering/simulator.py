@@ -18,7 +18,7 @@ class SimulatorState:
         self.lock = threading.Lock()
         self.pump_running = False
         self.last_request_id: str | None = None
-        self.last_watering_at: float | None = None
+        self.last_watering_uptime_seconds: float | None = None
         self.stop_at: float | None = None
         self.completed_request_ids: set[str] = set()
         self.events: list[dict[str, Any]] = []
@@ -42,7 +42,7 @@ class SimulatorState:
             now = self.clock()
             self.pump_running = True
             self.last_request_id = request_id
-            self.last_watering_at = now
+            self.last_watering_uptime_seconds = now
             self.stop_at = now + duration
             self.events.append({"event": "started", "request_id": request_id, "duration_seconds": duration})
             return 202, {"accepted": True, "request_id": request_id, "duration_seconds": duration}
@@ -68,7 +68,7 @@ class SimulatorState:
             return {
                 "pump_running": self.pump_running,
                 "last_request_id": self.last_request_id,
-                "last_watering_at": self.last_watering_at,
+                "last_watering_uptime_seconds": self.last_watering_uptime_seconds,
                 "remaining_seconds": remaining,
             }
 

@@ -10,6 +10,7 @@ from .models import EmailMessage
 from .time_normalization import normalize_calendar_datetime, normalize_calendar_time
 from .text_normalization import date_detection_text, title_grounding_status
 from .notification_evidence import (
+    detect_general_service_notice, detect_generic_content,
     detect_important_notification_evidence, detect_transactional_category,
     detect_transactional_evidence,
 )
@@ -44,11 +45,14 @@ class LLMResultValidator:
         re.I,
     )
     _security_patterns = {
-        "new_sign_in": ("新規サインイン", "新しいサインイン", "new sign-in", "unusual sign-in"),
-        "new_app_connection": ("新しいアプリ", "アプリへの接続", "new app", "app connected"),
+        "new_sign_in": ("新規サインイン", "新しいサインイン", "ログインがありました",
+                        "ログイン日時", "new sign-in", "unusual sign-in"),
+        "new_app_connection": ("新しいアプリ", "アプリへの接続", "google でログイン",
+                               "プロフィール情報を受け取りました", "new app", "app connected"),
         "security_code": ("セキュリティコード", "security code", "verification code"),
         "password_change": ("パスワード変更", "password changed", "password change"),
-        "suspicious_access": ("不審なアクセス", "suspicious access", "security alert"),
+        "suspicious_access": ("不審なアクセス", "第三者のログイン", "本件にお心当たりがない",
+                              "suspicious access", "security alert"),
         "account_change": ("アカウント設定変更", "account settings changed"),
     }
     _security_type_aliases = {
@@ -92,17 +96,23 @@ class LLMResultValidator:
             result.security_notification_type
         )
         detected_security_type = self._security_type(folded)
+        general_service_notice = detect_general_service_notice(text)
+        grounded_transaction = detect_transactional_evidence(text).detected
         generic_ad = result.generic_event_advertisement or any(
             pattern.casefold() in folded for pattern in self._generic_event_patterns
         )
         promotion = (
             result.final_classification == "promotion"
             or result.category == "promotion"
+            or (detect_generic_content(text) and not grounded_transaction)
         )
         security = bool(
             detected_security_type
             or normalized_security_type
-            or result.category == "security_notification"
+            or (
+                result.category == "security_notification"
+                and not general_service_notice
+            )
         )
         semantic_corrections: list[str] = []
         commitment_grounded = bool(
@@ -358,7 +368,6 @@ class LLMResultValidator:
         transactional_evidence = detect_important_notification_evidence(
             text, base_year=self.base_year
         ).detected
-        grounded_transaction = detect_transactional_evidence(text).detected
         grounded_transaction_category = detect_transactional_category(text)
         transactional_evidence = transactional_evidence or grounded_transaction
         transactional_category = result.category in {
@@ -375,6 +384,13 @@ class LLMResultValidator:
             classification = "ignored"
         elif fact_invalid:
             classification = "invalid"
+        elif (
+            transactional_evidence
+            and result.final_classification in {
+                "invalid", "ignored", "informational", "promotion",
+            }
+        ):
+            classification = "transactional"
         elif result.final_classification == "transactional" or transactional_category:
             classification = "transactional" if transactional_evidence else "ignored"
         elif (
