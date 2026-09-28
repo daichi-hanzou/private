@@ -1,0 +1,19 @@
+# Bounded planning pilot. No supply-stop event or lot provenance yet.
+# All six firms use the configured model; 6 * 2 * 10 = 120 planning calls max.
+[experiment]
+name = "budget_pilot"
+description = "10-day bounded planning pilot with the original economy."
+
+[run]
+max_days = 10
+seeds = [0]
+
+[models]
+default = "claude-sonnet-4-6:off"
+
+[agent_execution]
+mode = "budget"
+decisions_per_day = 2
+max_actions = 4
+history_limit = 10
+memory_chars = 1200

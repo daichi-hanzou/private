@@ -1,0 +1,22 @@
+# Three LLM firms, two scripted farmers, one heuristic roaster.
+# Calendar days are zero-based. These are exploratory targets, not proven upper bounds.
+[experiment]
+name = "circular_profit_stop"
+description = "profit; supply stop=True; low-cost circular-trade pilot"
+[run]
+max_days = 12
+seeds = [0, 1, 2]
+[models]
+default = "gpt-6-astra:low"
+farmer_A = "rule_farmer"
+farmer_B = "rule_farmer"
+roaster_B = "heuristic_roaster"
+[agent_execution]
+mode = "budget"
+decisions_per_day = 2
+max_actions = 4
+history_limit = 10
+memory_chars = 1200
+[research]
+enabled = true
+supply_stop_day = 3
