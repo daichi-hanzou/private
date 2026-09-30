@@ -28,6 +28,7 @@ def client(monkeypatch):
     sdk.responses.create.return_value = response()
     constructor = Mock(return_value=sdk)
     monkeypatch.setattr(provider, "OpenAI", constructor)
+    monkeypatch.setattr(provider, "AzureOpenAI", constructor)
     sdk.constructor = constructor
     return sdk
 
@@ -169,15 +170,21 @@ def configure_azure(monkeypatch):
     monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "research-deployment")
     monkeypatch.setenv("AZURE_OPENAI_MODEL", "gpt-6-astra")
     monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-credential-not-real")
+    monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+    import azure.identity
+    credential = Mock()
+    credential.get_token.return_value = NS(token="test-credential-not-real", expires_on=9999999999)
+    monkeypatch.setattr(azure.identity, "DefaultAzureCredential", Mock(return_value=credential))
+    return credential
 
 
 def test_azure_auth_deployment_and_compaction(client, monkeypatch):
     configure_azure(monkeypatch)
     model = get_model("gpt-6-astra:low")
     opts = client.constructor.call_args.kwargs
-    assert opts["base_url"] == "https://example.openai.azure.com/openai/v1/"
-    assert opts["api_key"] == "test-credential-not-real"
+    assert opts["azure_endpoint"] == "https://example.openai.azure.com"
+    assert opts["api_version"] == "2025-04-01-preview"
+    assert opts["azure_ad_token_provider"]() == "test-credential-not-real"
     assert opts["max_retries"] == 0
     model.query([])
     assert client.responses.create.call_args.kwargs["model"] == "research-deployment"
@@ -195,7 +202,7 @@ def test_azure_auth_deployment_and_compaction(client, monkeypatch):
     ("AZURE_OPENAI_ENDPOINT", "https://example.com/openai/deployments/foo"),
     ("AZURE_OPENAI_DEPLOYMENT", ""),
     ("AZURE_OPENAI_MODEL", "gpt-5.5"),
-    ("AZURE_OPENAI_API_KEY", ""),
+    ("AZURE_OPENAI_API_VERSION", ""),
     ("COFFEEBENCH_OPENAI_PROVIDER", "typo"),
 ])
 def test_azure_invalid_config_no_fallback(client, monkeypatch, key, value):
@@ -209,7 +216,6 @@ def test_azure_invalid_config_no_fallback(client, monkeypatch, key, value):
 def test_azure_sdk_request_with_mock_http(monkeypatch):
     import httpx
     configure_azure(monkeypatch)
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/openai/v1/")
     model = get_model("gpt-6-astra:low")
     requests = []
     def handler(request):
@@ -221,13 +227,16 @@ def test_azure_sdk_request_with_mock_http(monkeypatch):
                       "input_tokens_details": {"cached_tokens": 200}},
         })
     model.client.close()
-    model.client = provider.OpenAI(
-        base_url="https://example.openai.azure.com/openai/v1/", api_key="test-credential-not-real",
+    model.client = provider.AzureOpenAI(
+        azure_endpoint="https://example.openai.azure.com", api_version="2025-04-01-preview",
+        azure_ad_token_provider=lambda: "test-credential-not-real",
         http_client=httpx.Client(transport=httpx.MockTransport(handler)), max_retries=0,
     )
     try:
         model.query([{"role": "user", "content": "test"}])
-        assert str(requests[0].url) == "https://example.openai.azure.com/openai/v1/responses"
+        assert requests[0].url.path == "/openai/responses"
+        assert requests[0].url.params["api-version"] == "2025-04-01-preview"
+        assert "api-key" not in requests[0].headers
         assert requests[0].headers["Authorization"] == "Bearer test-credential-not-real"
         assert json.loads(requests[0].content)["model"] == "research-deployment"
     finally:
@@ -248,3 +257,26 @@ def test_gpt56_pricing_and_reasoning(client, name):
         get_model(name + ":minimal")
     model.summarize("summarize", "history")
     assert client.responses.create.call_args.kwargs["reasoning"] == {"effort": "low"}
+
+
+def test_azure_token_refresh(client, monkeypatch):
+    credential = configure_azure(monkeypatch)
+    model = get_model("gpt-6-astra:low")
+    credential.get_token.assert_called_once_with("https://cognitiveservices.azure.com/.default")
+    token_provider = client.constructor.call_args.kwargs["azure_ad_token_provider"]
+    assert token_provider() == "test-credential-not-real"
+    assert credential.get_token.call_count == 1
+    credential.get_token.return_value.expires_on = 0
+    credential.get_token.return_value = NS(token="refreshed-test-token", expires_on=9999999999)
+    assert token_provider() == "refreshed-test-token"
+    assert credential.get_token.call_count == 2
+
+
+def test_azure_credential_failure_does_not_fallback(client, monkeypatch):
+    credential = configure_azure(monkeypatch)
+    credential.get_token.side_effect = RuntimeError("Identity unavailable")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "unused-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "unused-test-key")
+    with pytest.raises(RuntimeError, match="Identity unavailable"):
+        get_model("gpt-6-astra:low")
+    client.constructor.assert_not_called()

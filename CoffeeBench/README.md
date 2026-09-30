@@ -281,11 +281,13 @@ surcharges are excluded; provider billing is authoritative. Source:
 verified 2026-09-26. API access still requires a live smoke check; offline tests
 mock transport and do not establish model access or emergent circular trading.
 
-### Azure OpenAI v1 connection
+### Azure OpenAI token authentication
 
 Set `COFFEEBENCH_OPENAI_PROVIDER=azure`, `AZURE_OPENAI_ENDPOINT`,
 `AZURE_OPENAI_DEPLOYMENT`, and `AZURE_OPENAI_MODEL` (the underlying model matching
-experiment settings). Configure `AZURE_OPENAI_API_KEY`. The endpoint accepts the resource root or `/openai/v1/`.
+experiment settings), plus `AZURE_OPENAI_API_VERSION`. The endpoint must be the HTTPS resource root (no `/openai/v1/`).
+Authentication uses `DefaultAzureCredential().get_token("https://cognitiveservices.azure.com/.default")`; tokens refresh five minutes before expiry. Azure API keys are not used.
+Authenticate the local Azure CLI (`az login`) or configure another supported DefaultAzureCredential identity with access to the resource.
 Run `python -m coffeebench.openai_smoke` before an experiment. There is no automatic fallback to OpenAI.
 Set the provider back to `openai` to restore the original connection.
 

@@ -2,7 +2,7 @@
 
 import os
 
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 from dotenv import load_dotenv
 
 from coffeebench.models._retry import call_with_retry
@@ -51,27 +51,43 @@ class OpenAIModel:
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
             deployed_model = os.getenv("AZURE_OPENAI_MODEL", "").strip()
-            key = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+            api_version = os.getenv("AZURE_OPENAI_API_VERSION", "").strip()
             url = urlsplit(endpoint)
             if (url.scheme != "https" or not url.hostname or url.username or url.password
-                    or url.query or url.fragment or url.path not in ("", "/openai/v1")):
-                raise ValueError("AZURE_OPENAI_ENDPOINT must be an HTTPS resource URL or /openai/v1 URL")
+                    or url.query or url.fragment or url.path not in ("",)):
+                raise ValueError("AZURE_OPENAI_ENDPOINT must be an HTTPS resource URL without an API path")
             if not deployment:
                 raise ValueError("Set AZURE_OPENAI_DEPLOYMENT to the Azure deployment name")
             if deployed_model != model:
                 raise ValueError("AZURE_OPENAI_MODEL must match the configured underlying model")
-            if not key:
-                raise ValueError("Set AZURE_OPENAI_API_KEY")
+            if not api_version:
+                raise ValueError("Set AZURE_OPENAI_API_VERSION")
+            from azure.identity import DefaultAzureCredential
+            import time
+
+            self.azure_credential = DefaultAzureCredential()
+            scope = "https://cognitiveservices.azure.com/.default"
+            token = self.azure_credential.get_token(scope)
+
+            def token_provider():
+                nonlocal token
+                if token.expires_on <= time.time() + 300:
+                    token = self.azure_credential.get_token(scope)
+                return token.token
+
             self.api_model = deployment
-            client_options.update(
-                base_url=endpoint + ("/" if url.path else "/openai/v1/"),
-                api_key=key,
+            self.client = AzureOpenAI(
+                azure_endpoint=endpoint,
+                api_version=api_version,
+                azure_ad_token_provider=token_provider,
+                **client_options,
             )
         elif self.provider == "openai":
             client_options["api_key"] = os.getenv("OPENAI_API_KEY")
         else:
             raise ValueError("COFFEEBENCH_OPENAI_PROVIDER must be openai or azure")
-        self.client = OpenAI(**client_options)
+        if self.provider == "openai":
+            self.client = OpenAI(**client_options)
         # Temperature is always left at the provider default (never sent).
         # `effort` (e.g. "minimal"/"low"/"medium"/"high"/"xhigh", via the
         # `gpt-5.5:high` model-string suffix) is forwarded as `reasoning.effort`.
