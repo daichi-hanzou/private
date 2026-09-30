@@ -295,7 +295,7 @@ Set the provider back to `openai` to restore the original connection.
 
 Azure output costs use OpenAI prices as a reference estimate, not Azure billing.
 Availability of the configured model and Responses tools must be checked on the
-actual Azure deployment. No live Azure test has been performed.
+actual Azure deployment. Azure uses `client.chat.completions.create`; direct OpenAI continues to use Responses. No live Azure test has been performed.
 
 ## Local research setup
 

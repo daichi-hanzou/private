@@ -188,12 +188,75 @@ class OpenAIModel:
                 continue
         return items
 
+    def _chat_query(self, messages, tools=None, tool_choice=None, max_tokens=None):
+        import json
+
+        history = []
+        for message in messages:
+            role = message.get("role")
+            if role not in {"system", "developer", "user", "assistant", "tool"}:
+                continue
+            entry = {"role": role, "content": message.get("content") or ""}
+            if role == "tool":
+                entry["tool_call_id"] = message["tool_call_id"]
+            if role == "assistant" and message.get("tool_calls"):
+                calls = []
+                for call in message["tool_calls"]:
+                    if isinstance(call, ToolCall):
+                        calls.append({"id": call.id, "type": "function", "function": {
+                            "name": call.name, "arguments": json.dumps(call.input)}})
+                    elif "function" in call:
+                        calls.append(call)
+                    else:
+                        calls.append({"id": call["id"], "type": "function", "function": {
+                            "name": call["name"], "arguments": json.dumps(call["input"])}})
+                entry["tool_calls"] = calls
+            history.append(entry)
+        kwargs = {"model": self.api_model, "messages": history,
+                  "max_completion_tokens": max_tokens or self.max_tokens}
+        if not self._skip_reasoning:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": {
+                "name": t.name, "description": t.description,
+                "parameters": t.input_schema}} for t in tools]
+            kwargs["parallel_tool_calls"] = False
+            if tool_choice is not None:
+                if isinstance(tool_choice, dict) and "name" in tool_choice:
+                    tool_choice = {"type": "function", "function": {"name": tool_choice["name"]}}
+                kwargs["tool_choice"] = tool_choice
+        response = call_with_retry(lambda: self.client.chat.completions.create(**kwargs),
+                                   label=f"azure:{self.api_model}")
+        usage = response.usage
+        if usage is None:
+            raise ValueError("Azure Chat Completions response is missing token usage")
+        inputs, outputs = usage.prompt_tokens, usage.completion_tokens
+        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+        cost = self._completion_cost(inputs - cached, cached, outputs)
+        self.n_calls += 1
+        self.cost += cost
+        self.total_input_tokens += inputs
+        self.total_output_tokens += outputs
+        self.last_input_tokens = inputs
+        choice = response.choices[0]
+        result = choice.message
+        calls = []
+        for call in result.tool_calls or []:
+            arguments = json.loads(call.function.arguments or "{}")
+            if not isinstance(arguments, dict):
+                raise ValueError("Azure tool arguments must be an object")
+            calls.append(ToolCall(call.id, call.function.name, arguments))
+        return ModelResponse(content=result.content or "", tool_calls=calls,
+                             stop_reason=choice.finish_reason or "", cost=cost)
+
     def query(
         self,
         messages: list[dict],
         tools: list[ToolSpec] | None = None,
         tool_choice: str | dict | None = None,
     ) -> ModelResponse:
+        if self.provider == "azure":
+            return self._chat_query(messages, tools, tool_choice)
         kwargs: dict = {
             "model": self.api_model,
             "input": self._to_responses_input(messages),
@@ -325,6 +388,10 @@ class OpenAIModel:
         }
 
     def summarize(self, instructions: str, content: str, max_tokens: int = 4096) -> str:
+        if self.provider == "azure":
+            return self._chat_query([{"role": "system", "content": instructions},
+                                     {"role": "user", "content": content}],
+                                    max_tokens=max_tokens).content
         kwargs: dict = {
             "model": self.api_model,
             "input": [

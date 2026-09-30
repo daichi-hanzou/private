@@ -26,6 +26,16 @@ def response(name="submit_plan", arguments=None):
 def client(monkeypatch):
     sdk = Mock()
     sdk.responses.create.return_value = response()
+    def chat_create(**kwargs):
+        adapted = dict(kwargs)
+        if "tools" in adapted:
+            adapted["tools"] = [t["function"] for t in adapted["tools"]]
+        r = sdk.responses.create(**adapted)
+        calls = [NS(id=t.call_id, function=NS(name=t.name, arguments=t.arguments)) for t in r.output]
+        return NS(usage=NS(prompt_tokens=1000, completion_tokens=100,
+                          prompt_tokens_details=NS(cached_tokens=200)),
+                  choices=[NS(message=NS(content="summary", tool_calls=calls), finish_reason="tool_calls")])
+    sdk.chat.completions.create.side_effect = chat_create
     constructor = Mock(return_value=sdk)
     monkeypatch.setattr(provider, "OpenAI", constructor)
     monkeypatch.setattr(provider, "AzureOpenAI", constructor)
@@ -222,10 +232,11 @@ def test_azure_sdk_request_with_mock_http(monkeypatch):
     def handler(request):
         requests.append(request)
         return httpx.Response(200, json={
-            "id": "resp_test", "object": "response", "created_at": 0,
-            "model": "gpt-6-astra", "status": "completed", "output": [],
-            "usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100,
-                      "input_tokens_details": {"cached_tokens": 200}},
+            "id": "chat_test", "object": "chat.completion", "created": 0,
+            "model": "gpt-6-astra", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
+                      "prompt_tokens_details": {"cached_tokens": 200}},
         })
     model.client.close()
     model.client = provider.AzureOpenAI(
@@ -235,7 +246,7 @@ def test_azure_sdk_request_with_mock_http(monkeypatch):
     )
     try:
         model.query([{"role": "user", "content": "test"}])
-        assert requests[0].url.path == "/openai/responses"
+        assert requests[0].url.path == "/openai/deployments/research-deployment/chat/completions"
         assert requests[0].url.params["api-version"] == "2025-04-01-preview"
         assert "api-key" not in requests[0].headers
         assert requests[0].headers["Authorization"] == "Bearer test-credential-not-real"
@@ -303,3 +314,21 @@ def test_azure_pricing_model_is_optional_metadata(client, monkeypatch):
     assert client.responses.create.call_args.kwargs["model"] == "research-deployment"
     monkeypatch.setenv("AZURE_OPENAI_MODEL", "unknown-model")
     assert get_model("azure:low").get_usage_stats()["model_cost"] is None
+
+
+def test_azure_chat_tool_history(client, monkeypatch):
+    from coffeebench.models.types import ToolCall
+    configure_azure(monkeypatch)
+    model = get_model("azure:low")
+    spec = ToolSpec("submit_plan", "plan", {"type": "object"})
+    result = model.query([
+        {"role": "assistant", "content": "", "tool_calls": [ToolCall("c1", "submit_plan", {})]},
+        {"role": "tool", "tool_call_id": "c1", "content": "done"},
+    ], [spec], {"type": "function", "name": "submit_plan"})
+    k = client.chat.completions.create.call_args.kwargs
+    assert "input" not in k and "reasoning" not in k
+    assert k["messages"][0]["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert k["messages"][1]["tool_call_id"] == "c1"
+    assert k["tools"][0]["function"]["name"] == "submit_plan"
+    assert k["tool_choice"] == {"type": "function", "function": {"name": "submit_plan"}}
+    assert result.tool_calls[0].name == "submit_plan"
