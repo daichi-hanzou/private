@@ -12,7 +12,7 @@ from coffeebench.models.types import ToolSpec
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="gpt-6-astra:low")
+    parser.add_argument("--model", default="gpt-5.6-sol:low")
     args = parser.parse_args()
     from dotenv import load_dotenv
 

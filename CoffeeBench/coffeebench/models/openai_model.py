@@ -16,17 +16,23 @@ class OpenAIModel:
     # Standard USD / million tokens, verified 2026-09-26:
     # https://developers.openai.com/api/docs/models/gpt-6-astra
     PRICING = {
+        "gpt-5.6-sol": {"input": 4.00, "cached_input": 0.40, "output": 20.00},
+        "gpt-5.6": {"input": 4.00, "cached_input": 0.40, "output": 20.00},
         "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
         "gpt-6-astra": {"input": 10.00, "cached_input": 1.00, "output": 50.00},
     }
 
-    def __init__(self, model: str = "gpt-5.5", effort: str | None = None):
+    def __init__(self, model: str = "gpt-5.6-sol", effort: str | None = None):
         if model not in self.PRICING:
             raise ValueError(f"No verified pricing for OpenAI model {model!r}")
         if model == "gpt-6-astra":
             effort = effort or "low"
             if effort not in {"low", "medium", "high", "xhigh", "max"}:
                 raise ValueError("gpt-6-astra requires low/medium/high/xhigh/max reasoning")
+        if model in {"gpt-5.6", "gpt-5.6-sol"}:
+            effort = "none" if effort == "off" else (effort or "low")
+            if effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("gpt-5.6 requires none/low/medium/high/xhigh/max reasoning")
         self.cost = 0.0
         self.n_calls = 0
         self.total_input_tokens = 0
@@ -83,7 +89,7 @@ class OpenAIModel:
     ) -> float:
         p = self.pricing[self.model]
         long_context = (
-            self.model == "gpt-6-astra"
+            self.model in {"gpt-6-astra", "gpt-5.6", "gpt-5.6-sol"}
             and non_cached_input_tokens + cached_input_tokens > 272_000
         )
         input_multiplier = 2 if long_context else 1
@@ -310,7 +316,7 @@ class OpenAIModel:
             kwargs["temperature"] = self.temperature
         # Astra cannot disable reasoning. Pin the lowest supported level so
         # ReAct compaction does not inherit a more expensive provider default.
-        if self.model == "gpt-6-astra":
+        if self.model in {"gpt-6-astra", "gpt-5.6", "gpt-5.6-sol"}:
             kwargs["reasoning"] = {"effort": "low"}
 
         def _do_call():

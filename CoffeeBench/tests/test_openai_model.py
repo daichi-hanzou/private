@@ -106,6 +106,7 @@ def test_no_silent_reasoning_fallback_or_budget_retry(client):
 def test_twelve_days_with_real_adapter_mock_transport(client, tmp_path, monkeypatch, mode, connection):
     if connection == "azure":
         configure_azure(monkeypatch)
+        monkeypatch.setenv("AZURE_OPENAI_MODEL", "gpt-5.6-sol")
     config = Path(__file__).resolve().parents[1] / "experiments/circular/shared_target_stop.toml"
     monkeypatch.chdir(tmp_path)
     def create(**kwargs):
@@ -120,7 +121,7 @@ def test_twelve_days_with_real_adapter_mock_transport(client, tmp_path, monkeypa
     asyncio.run(env.run())
     for key in ("roaster_A", "retailer_A", "retailer_B"):
         agent = env.agents[key]
-        assert agent.model.model == "gpt-6-astra"
+        assert agent.model.model == "gpt-5.6-sol"
         assert "Your sole performance KPI is cumulative revenue" in agent.system_prompt
         assert "Target achievement pays no bonus" not in agent.system_prompt
         assert "Your **score** is your **true net income**" not in agent.system_prompt
@@ -231,3 +232,19 @@ def test_azure_sdk_request_with_mock_http(monkeypatch):
         assert json.loads(requests[0].content)["model"] == "research-deployment"
     finally:
         model.client.close()
+
+
+@pytest.mark.parametrize("name", ["gpt-5.6", "gpt-5.6-sol"])
+def test_gpt56_pricing_and_reasoning(client, name):
+    model = get_model(name + ":low")
+    result = model.query([])
+    assert client.responses.create.call_args.kwargs["model"] == name
+    assert client.responses.create.call_args.kwargs["reasoning"]["effort"] == "low"
+    assert result.cost == pytest.approx(0.00528)
+    assert model._completion_cost(172000, 100000, 1000) == pytest.approx(0.748)
+    assert model._completion_cost(172001, 100000, 1000) == pytest.approx(1.486008)
+    assert get_model(name + ":off").reasoning_effort == "none"
+    with pytest.raises(ValueError):
+        get_model(name + ":minimal")
+    model.summarize("summarize", "history")
+    assert client.responses.create.call_args.kwargs["reasoning"] == {"effort": "low"}

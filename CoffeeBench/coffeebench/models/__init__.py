@@ -13,7 +13,7 @@ class Model:
 
 
 VALID_EFFORTS = frozenset(
-    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+    {"none", "off", "minimal", "low", "medium", "high", "xhigh", "max"}
 )
 
 

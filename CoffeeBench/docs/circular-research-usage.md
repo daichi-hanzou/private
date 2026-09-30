@@ -266,3 +266,15 @@ uv run python -m coffeebench.main --config experiments/circular/coordination_ret
 66件のテスト成功。模擬APIによる12日間実行で各条件144回・判断エラー0件を確認。
 目標公開の更新、返品による達成判定の変化、非公開情報を公開しないことも検証。
 2つの設定は任命判定の説明と出力名・説明文以外が同一。有料実験はまだ実行していない。
+
+## 現在の実験モデル（2026-09-28更新）
+
+研究用の `experiments/circular/*.toml` と接続テストの既定モデルを
+`gpt-5.6-sol:low` に変更した。既存のGPT-6実験結果は変更していない。
+GPT-5.6 Solの料金推計は入力4ドル、キャッシュ入力0.40ドル、出力20ドル／100万トークン。
+キャッシュ書込み追加料金は含まない。Azureの料金は参考推計のまま。
+公式仕様：https://developers.openai.com/api/docs/models/gpt-5.6-sol
+
+Azureではデプロイの実モデルと `AZURE_OPENAI_MODEL=gpt-5.6-sol` を揃える必要がある。
+既存 `.env` のAzureデプロイ名・実モデル設定は実体を確認できないため自動変更していない。
+実験期間・KPI・需要条件・判断回数は変更なし。78件のテスト成功。実API未実行。
