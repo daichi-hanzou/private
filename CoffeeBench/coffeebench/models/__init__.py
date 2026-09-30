@@ -57,7 +57,7 @@ def get_model(model: str) -> Model:
             f"valid values: {sorted(VALID_EFFORTS)}"
         )
 
-    if base.startswith("gpt-"):
+    if base == "azure" or base.startswith("gpt-"):
         from coffeebench.models.openai_model import OpenAIModel
 
         return OpenAIModel(model=base, effort=effort)

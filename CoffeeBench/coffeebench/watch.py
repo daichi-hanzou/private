@@ -130,7 +130,7 @@ def _summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
                 "step": ev.get("step"),
             }
             if "cost_so_far" in ev:
-                state["cost_per_agent"][aid] = float(ev.get("cost_so_far") or 0.0)
+                state["cost_per_agent"][aid] = (None if ev.get("cost_so_far") is None else float(ev["cost_so_far"]))
             if "n_calls_so_far" in ev:
                 state["calls_per_agent"][aid] = int(ev.get("n_calls_so_far") or 0)
             ai = ev.get("action_input") or {}
@@ -185,7 +185,8 @@ def _render(state: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append("=" * 78)
     head = f"CoffeeBench | day {state['current_day']}/{state['max_days'] or '?'} | step {state['step_count']}"
-    total_cost = sum(state["cost_per_agent"].values())
+    total_cost = (None if any(v is None for v in state["cost_per_agent"].values())
+                  else sum(state["cost_per_agent"].values()))
     total_calls = sum(state["calls_per_agent"].values())
     if total_calls:
         head += f" | API cost {_money(total_cost)} ({total_calls} calls)"

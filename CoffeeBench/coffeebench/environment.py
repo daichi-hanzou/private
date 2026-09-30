@@ -1919,7 +1919,8 @@ class Environment:
             action_input=out.get("action_input"),
             observation=out.get("observation"),
             thought=out.get("thought") or "",
-            cost_so_far=round(float(getattr(model, "cost", 0.0) or 0.0), 6),
+            cost_so_far=(None if getattr(model, "cost_known", True) is False else
+                         round(float(getattr(model, "cost", 0.0) or 0.0), 6)),
             n_calls_so_far=int(getattr(model, "n_calls", 0) or 0),
             input_tokens_so_far=int(getattr(model, "total_input_tokens", 0) or 0),
             output_tokens_so_far=int(getattr(model, "total_output_tokens", 0) or 0),
@@ -2433,6 +2434,8 @@ class Environment:
             if hasattr(model, "provider"):
                 stats = model.get_usage_stats()
                 usage.update({k: stats[k] for k in ("provider", "deployment", "cost_basis")})
+                if stats.get("cost_known") is False:
+                    usage["cost"] = None
             if hasattr(agent_obj, "decision_calls"):
                 usage["decision_calls"] = agent_obj.decision_calls
                 usage["decision_errors"] = agent_obj.decision_errors

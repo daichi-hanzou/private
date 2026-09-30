@@ -7,12 +7,15 @@ COFFEEBENCH_OPENAI_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE.openai.azure.com
 AZURE_OPENAI_API_VERSION=YOUR-SUPPORTED-API-VERSION
 AZURE_OPENAI_DEPLOYMENT=YOUR-DEPLOYMENT
-AZURE_OPENAI_MODEL=gpt-5.6-sol
+# Optional, for reference pricing only
+AZURE_OPENAI_MODEL=
 ```
 
 APIバージョンはリソースがResponses APIをサポートする値を指定してください。
 エンドポイントはリソースのルートURLで、/openai/v1やクエリは付けません。
-MODELは実験で指定する基盤モデル（:lowなどを除いたもの）と一致させます。
+MODELは料金推計用の任意項目です。空欄・未対応のモデル名なら費用は不明（null）として保存します。
+TOMLのモデルを`azure:low`にするか、実行時に`--model azure:low`を指定してください。
+APIに送信するmodelは常にAZURE_OPENAI_DEPLOYMENTです。
 
 ローカルでは事前にAzure CLIの`az login`などで認証してください。
 DefaultAzureCredentialが利用するIDには、対象Azure OpenAIを呼び出せる権限が必要です。

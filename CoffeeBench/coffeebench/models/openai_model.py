@@ -23,7 +23,12 @@ class OpenAIModel:
     }
 
     def __init__(self, model: str = "gpt-5.6-sol", effort: str | None = None):
-        if model not in self.PRICING:
+        self.provider = ("azure" if model == "azure" else
+                         os.getenv("COFFEEBENCH_OPENAI_PROVIDER", "openai").strip().lower())
+        self.pricing_model = (os.getenv("AZURE_OPENAI_MODEL", "").strip()
+                              if self.provider == "azure" else model)
+        self.cost_known = self.pricing_model in self.PRICING
+        if self.provider != "azure" and model not in self.PRICING:
             raise ValueError(f"No verified pricing for OpenAI model {model!r}")
         if model == "gpt-6-astra":
             effort = effort or "low"
@@ -42,7 +47,6 @@ class OpenAIModel:
         self.model = model
         # Retry policy is owned by call_with_retry; avoid hidden SDK retries
         # bypassing the budget agent's one-attempt limit.
-        self.provider = os.getenv("COFFEEBENCH_OPENAI_PROVIDER", "openai").strip().lower()
         self.api_model = model
         client_options = {"timeout": 300.0, "max_retries": 0}
         if self.provider == "azure":
@@ -50,7 +54,6 @@ class OpenAIModel:
 
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
-            deployed_model = os.getenv("AZURE_OPENAI_MODEL", "").strip()
             api_version = os.getenv("AZURE_OPENAI_API_VERSION", "").strip()
             url = urlsplit(endpoint)
             if (url.scheme != "https" or not url.hostname or url.username or url.password
@@ -58,8 +61,6 @@ class OpenAIModel:
                 raise ValueError("AZURE_OPENAI_ENDPOINT must be an HTTPS resource URL without an API path")
             if not deployment:
                 raise ValueError("Set AZURE_OPENAI_DEPLOYMENT to the Azure deployment name")
-            if deployed_model != model:
-                raise ValueError("AZURE_OPENAI_MODEL must match the configured underlying model")
             if not api_version:
                 raise ValueError("Set AZURE_OPENAI_API_VERSION")
             from azure.identity import DefaultAzureCredential
@@ -103,9 +104,11 @@ class OpenAIModel:
     def _completion_cost(
         self, non_cached_input_tokens, cached_input_tokens, output_tokens
     ) -> float:
-        p = self.pricing[self.model]
+        if not self.cost_known:
+            return 0.0  # Internal accumulator only; exported costs are None.
+        p = self.pricing[self.pricing_model]
         long_context = (
-            self.model in {"gpt-6-astra", "gpt-5.6", "gpt-5.6-sol"}
+            self.pricing_model in {"gpt-6-astra", "gpt-5.6", "gpt-5.6-sol"}
             and non_cached_input_tokens + cached_input_tokens > 272_000
         )
         input_multiplier = 2 if long_context else 1
@@ -304,13 +307,17 @@ class OpenAIModel:
     def get_usage_stats(self) -> dict:
         return {
             "n_model_calls": self.n_calls,
-            "model_cost": self.cost,
+            "model_cost": self.cost if self.cost_known else None,
+            "cost_known": self.cost_known,
+            "pricing_model": self.pricing_model or None,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "last_input_tokens": self.last_input_tokens,
             "provider": self.provider,
             "deployment": self.api_model,
             "cost_basis": (
+                "unknown: Azure pricing model not supplied or unsupported"
+                if not self.cost_known else
                 "OpenAI standard reference estimate, NOT Azure billing; excludes cache-write surcharges"
                 if self.provider == "azure" else
                 "standard token estimate; excludes cache-write surcharges"

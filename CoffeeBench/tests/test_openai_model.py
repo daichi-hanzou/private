@@ -102,12 +102,12 @@ def test_no_silent_reasoning_fallback_or_budget_retry(client):
     assert client.responses.create.call_count == 1
 
 
-@pytest.mark.parametrize("connection", ["openai", "azure"])
+@pytest.mark.parametrize("connection", ["openai", "azure", "azure_deployment"])
 @pytest.mark.parametrize("mode", ["budget", "react"])
 def test_twelve_days_with_real_adapter_mock_transport(client, tmp_path, monkeypatch, mode, connection):
-    if connection == "azure":
+    if connection.startswith("azure"):
         configure_azure(monkeypatch)
-        monkeypatch.setenv("AZURE_OPENAI_MODEL", "gpt-5.6-sol")
+        monkeypatch.setenv("AZURE_OPENAI_MODEL", "" if connection == "azure_deployment" else "gpt-5.6-sol")
     config = Path(__file__).resolve().parents[1] / "experiments/circular/shared_target_stop.toml"
     monkeypatch.chdir(tmp_path)
     def create(**kwargs):
@@ -117,12 +117,14 @@ def test_twelve_days_with_real_adapter_mock_transport(client, tmp_path, monkeypa
     client.responses.create.side_effect = create
     args = NS(config=str(config), seed=0, max_days=None, model=None, models=None,
               main_agent=None, agent_mode=mode, run_name=f"adapter_{mode}", overwrite=False)
+    if connection == "azure_deployment":
+        args.model = "azure:low"
     env, _, _ = main.build_run(args)
     env.verbose = False
     asyncio.run(env.run())
     for key in ("roaster_A", "retailer_A", "retailer_B"):
         agent = env.agents[key]
-        assert agent.model.model == "gpt-5.6-sol"
+        assert agent.model.model == ("azure" if connection == "azure_deployment" else "gpt-5.6-sol")
         assert "Your sole performance KPI is cumulative revenue" in agent.system_prompt
         assert "Target achievement pays no bonus" not in agent.system_prompt
         assert "Your **score** is your **true net income**" not in agent.system_prompt
@@ -201,7 +203,6 @@ def test_azure_auth_deployment_and_compaction(client, monkeypatch):
     ("AZURE_OPENAI_ENDPOINT", "http://example.com"),
     ("AZURE_OPENAI_ENDPOINT", "https://example.com/openai/deployments/foo"),
     ("AZURE_OPENAI_DEPLOYMENT", ""),
-    ("AZURE_OPENAI_MODEL", "gpt-5.5"),
     ("AZURE_OPENAI_API_VERSION", ""),
     ("COFFEEBENCH_OPENAI_PROVIDER", "typo"),
 ])
@@ -280,3 +281,25 @@ def test_azure_credential_failure_does_not_fallback(client, monkeypatch):
     with pytest.raises(RuntimeError, match="Identity unavailable"):
         get_model("gpt-6-astra:low")
     client.constructor.assert_not_called()
+
+
+def test_azure_deployment_without_model_name(client, monkeypatch):
+    configure_azure(monkeypatch)
+    monkeypatch.delenv("AZURE_OPENAI_MODEL", raising=False)
+    model = get_model("azure:low")
+    model.query([])
+    model.summarize("summary", "history")
+    assert client.responses.create.call_args.kwargs["model"] == "research-deployment"
+    assert model.get_usage_stats()["model_cost"] is None
+    assert not model.get_usage_stats()["cost_known"]
+
+
+def test_azure_pricing_model_is_optional_metadata(client, monkeypatch):
+    configure_azure(monkeypatch)
+    monkeypatch.setenv("AZURE_OPENAI_MODEL", "gpt-5.5")
+    model = get_model("azure:low")
+    model.query([])
+    assert model.get_usage_stats()["model_cost"] > 0
+    assert client.responses.create.call_args.kwargs["model"] == "research-deployment"
+    monkeypatch.setenv("AZURE_OPENAI_MODEL", "unknown-model")
+    assert get_model("azure:low").get_usage_stats()["model_cost"] is None

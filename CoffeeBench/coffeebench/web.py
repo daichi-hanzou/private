@@ -217,7 +217,8 @@ def _render_header(state: dict, path: str) -> None:
             c = ev.get("cost_so_far")
             if c is not None:
                 latest_cost[aid] = float(c)
-        st.metric("Spend", _money(sum(latest_cost.values())))
+        unknown_cost = any("cost_so_far" in ev and ev["cost_so_far"] is None for ev in state["agent_steps"])
+        st.metric("Spend", "Unknown" if unknown_cost else _money(sum(latest_cost.values())))
 
     if state["models"]:
         st.caption(
@@ -403,8 +404,8 @@ def _build_timeseries_frames(state: dict):
         if aid is None:
             continue
         c = ev.get("cost_so_far")
-        if c is not None:
-            cost_by_day[d][aid] = float(c)
+        if "cost_so_far" in ev:
+            cost_by_day[d][aid] = float(c) if c is not None else float("nan")
         ctx = ev.get("last_input_tokens")
         if ctx is not None:
             ctx_by_day[d][aid] = int(ctx)

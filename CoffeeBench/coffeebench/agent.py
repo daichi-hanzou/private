@@ -79,7 +79,7 @@ class Agent:
             pass
         elif m.startswith("claude-"):
             self.model.system_prompt = self.system_prompt
-        elif m.startswith("gpt-"):
+        elif m == "azure" or m.startswith("gpt-"):
             self.add_message("developer", self.system_prompt)
         elif m.startswith("gemini-"):
             self.model.system_prompt = self.system_prompt

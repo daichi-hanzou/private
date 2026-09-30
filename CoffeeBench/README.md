@@ -284,8 +284,10 @@ mock transport and do not establish model access or emergent circular trading.
 ### Azure OpenAI token authentication
 
 Set `COFFEEBENCH_OPENAI_PROVIDER=azure`, `AZURE_OPENAI_ENDPOINT`,
-`AZURE_OPENAI_DEPLOYMENT`, and `AZURE_OPENAI_MODEL` (the underlying model matching
-experiment settings), plus `AZURE_OPENAI_API_VERSION`. The endpoint must be the HTTPS resource root (no `/openai/v1/`).
+`AZURE_OPENAI_DEPLOYMENT`, and `AZURE_OPENAI_API_VERSION`.
+Use `--model azure:low` or TOML `[models] default = "azure:low"`.
+`AZURE_OPENAI_MODEL` is optional metadata for reference pricing only; missing or
+unsupported values produce unknown costs, not free usage. The endpoint must be the HTTPS resource root (no `/openai/v1/`).
 Authentication uses `DefaultAzureCredential().get_token("https://cognitiveservices.azure.com/.default")`; tokens refresh five minutes before expiry. Azure API keys are not used.
 Authenticate the local Azure CLI (`az login`) or configure another supported DefaultAzureCredential identity with access to the resource.
 Run `python -m coffeebench.openai_smoke` before an experiment. There is no automatic fallback to OpenAI.
