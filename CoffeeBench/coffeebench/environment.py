@@ -1,5 +1,7 @@
 """Environment — CoffeeBench multi-agent supply-chain testbed."""
 
+from coffeebench.provenance import Provenance, analyze_cycles
+
 import json
 import os
 import uuid
@@ -415,6 +417,12 @@ class Environment:
         for ba in business_apps.values():
             ba.initial_equity = ba._compute_true_equity()
 
+        # Passive FIFO audit: never exposed in agent observations/tools.
+        self.provenance = Provenance(self.time_manager.get_virtual_min, self._emit)
+        for aid, ba in business_apps.items():
+            for item, qty in ba.inventory.items():
+                self.provenance.create(aid, item, qty, ba.inventory_total_cost.get(item, 0.0))
+
     # ----- truth ledger -----
     def _record_truth(
         self,
@@ -519,6 +527,8 @@ class Environment:
         stc = seller.inventory_total_cost.get(deal.item_id, 0.0)
         seller_unit_cost = (stc / sqty) if sqty > 0 else 0.0
         reserved_value = deal.qty * seller_unit_cost
+        deal.unit_ids = self.provenance.withdraw(
+            deal.seller_id, deal.item_id, deal.qty, "shipment", deal.id)
         seller.inventory[deal.item_id] = sqty - deal.qty
         seller.inventory_total_cost[deal.item_id] = stc - reserved_value
         # Pin the cogs basis on the deal for the eventual delivery /
@@ -590,6 +600,7 @@ class Environment:
             unit_cost = p["unit_cost"]
             total_cost = p["total_cost"]
             if aid in self._bankrupt_agents:
+                self.provenance.move(p["unit_ids"], aid, "lost")
                 # Frozen: drop the in-flight production. Cash has already
                 # been spent at the produce_item call so it doesn't appear
                 # in NI directly. Emit a `writedown` truth entry so audit
@@ -616,6 +627,7 @@ class Environment:
                 continue
             # Total-cost form: add qty + the actual $ spent to maintain
             # the invariant inventory_value = sum(inventory_total_cost).
+            self.provenance.move(p["unit_ids"], aid, "on_hand", kind="production_ready")
             ba.inventory[item_id] = ba.inventory.get(item_id, 0) + qty
             ba.inventory_total_cost[item_id] = (
                 ba.inventory_total_cost.get(item_id, 0.0) + total_cost
@@ -683,6 +695,7 @@ class Environment:
             yield_used = r["yield_used"]
             total_input_cost = r["output_total_cost"]
             if aid in self._bankrupt_agents:
+                self.provenance.move(r["unit_ids"], aid, "lost")
                 # Frozen: drop the in-flight roast. Labor cash + consumed
                 # green inventory were already debited at roast() call time;
                 # writedown captures the destruction in audit cogs/opex so
@@ -712,6 +725,7 @@ class Environment:
             # theoretical ratio (e.g. 30 kg × 0.85 = 25.5 → 26 kg).
             # `total_input_cost` is computed above (used for both the
             # materialise path here and the bankruptcy-writedown path).
+            self.provenance.move(r["unit_ids"], aid, "on_hand", kind="roasting_ready")
             ba.inventory[output_item] = ba.inventory.get(output_item, 0) + output_qty
             ba.inventory_total_cost[output_item] = (
                 ba.inventory_total_cost.get(output_item, 0.0) + total_input_cost
@@ -783,6 +797,7 @@ class Environment:
             # the seller's reserved inventory and emits a notification.
             roll = self.rng.random()
             if roll < DELIVERY_LOSS_PROB:
+                self.provenance.move(deal.unit_ids, deal.seller_id, "lost", deal.id)
                 seller = self.business_apps[deal.seller_id]
                 # Seller's reserved inventory is gone — write down the
                 # cost basis as `writedown` (truth-ledger entry, treated
@@ -850,6 +865,8 @@ class Environment:
             # to inventory_total_cost. WAVG view derives per-unit on
             # demand. inventory_in journal entry below uses the same
             # value, keeping the equity invariant exact.
+            self.provenance.move(deal.unit_ids, deal.buyer_id, "on_hand", deal.id,
+                                 kind="trade", seller=deal.seller_id, unit_price=deal.unit_price)
             received_value = received_qty * deal.unit_price
             buyer.inventory[deal.item_id] = (
                 buyer.inventory.get(deal.item_id, 0) + received_qty
@@ -1143,6 +1160,8 @@ class Environment:
                 cogs_unit = (inv_tc / inv) if inv > 0 else 0.0
                 cogs = qty * cogs_unit
                 ba.cash += revenue
+                self.provenance.withdraw(aid, item_id, qty, "consumed", kind="consumer",
+                                         total_price=revenue)
                 ba.inventory[item_id] = inv - qty
                 ba.inventory_total_cost[item_id] = inv_tc - cogs
                 self._record_truth(
@@ -1278,6 +1297,7 @@ class Environment:
                 inv_tc = ba.inventory_total_cost.get(item_id, 0.0)
                 cost_unit = (inv_tc / qty) if qty > 0 else 0.0
                 value = lose * cost_unit
+                self.provenance.withdraw(aid, item_id, lose, "spoiled")
                 ba.inventory[item_id] = qty - lose
                 ba.inventory_total_cost[item_id] = inv_tc - value
                 spoiled_units[item_id] = lose
@@ -1581,6 +1601,7 @@ class Environment:
             if p.get("agent_id") != agent_id:
                 prod_kept.append(p)
                 continue
+            self.provenance.move(p["unit_ids"], agent_id, "lost")
             amt = float(p.get("total_cost", 0.0))
             self._record_truth(
                 agent_id,
@@ -1601,6 +1622,7 @@ class Environment:
             if r.get("agent_id") != agent_id:
                 roast_kept.append(r)
                 continue
+            self.provenance.move(r["unit_ids"], agent_id, "lost")
             amt = float(r["output_total_cost"])
             self._record_truth(
                 agent_id,
@@ -2407,6 +2429,7 @@ class Environment:
             print("[env] === FINAL ===")
             print(json.dumps(result, indent=2, default=str))
         self._final_result = result
+        result["lot_cycles"] = analyze_cycles(self.provenance.events)
         self._emit("run_end", **result)
         if self.event_logger is not None:
             self.event_logger.close()
@@ -2840,6 +2863,10 @@ class Environment:
             "bankrupt_reason": dict(self._bankrupt_reason),
             "saved_at": datetime.now().isoformat(),
         }
+        self.provenance.assert_consistent(self)
+        data["provenance"] = self.provenance.snapshot()
+        data["lot_cycles"] = analyze_cycles(self.provenance.events)
+        data["deal_unit_ids"] = {d.id: getattr(d, "unit_ids", []) for d in self.marketplace.deals}
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
         if self.verbose:

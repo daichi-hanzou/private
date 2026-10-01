@@ -640,6 +640,12 @@ class BusinessApp:
             else 0.0
         )
         buyer_value_removed = qty * buyer_avg
+        # Upstream returns are fungible: preserve that rule, record actual FIFO units.
+        env = getattr(self, "_env", None)
+        if env is not None:
+            ids = env.provenance.select(self.agent_id, deal.item_id, qty)
+            env.provenance.move(ids, seller.agent_id, "on_hand", deal.id,
+                                kind="return", unit_price=unit_price)
         self.inventory[deal.item_id] = on_hand - qty
         self.inventory_total_cost[deal.item_id] = (
             self.inventory_total_cost.get(deal.item_id, 0.0) - buyer_value_removed
@@ -855,6 +861,8 @@ class BusinessApp:
                 "total_cost": total_cost,
                 "started_day": self._today(),
                 "ready_day": ready_day,
+                "unit_ids": env.provenance.create(self.agent_id, item_id, qty,
+                                                   total_cost, state="production"),
             }
         )
 
@@ -1002,6 +1010,8 @@ class BusinessApp:
         green_total = self.inventory_total_cost.get(green_item_id, 0.0)
         green_unit_cost = (green_total / held_green) if held_green > 0 else 0.0
         green_value_consumed = qty_kg * green_unit_cost
+        source_units = env.provenance.withdraw(self.agent_id, green_item_id, qty_kg,
+                                                "transformed")
         self.inventory[green_item_id] = held_green - qty_kg
         self.inventory_total_cost[green_item_id] = green_total - green_value_consumed
         self.cash -= labor_cost
@@ -1028,6 +1038,8 @@ class BusinessApp:
                 "input_value_consumed": green_value_consumed,
                 "started_day": self._today(),
                 "ready_day": ready_day,
+                "unit_ids": env.provenance.create(self.agent_id, output_item, roasted_yield,
+                    total_input_cost, state="roasting", parents=source_units),
             }
         )
         if self._record_truth is not None:

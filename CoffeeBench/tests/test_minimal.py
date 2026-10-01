@@ -58,6 +58,8 @@ def test_demand_change_boundary_and_reset(monkeypatch, tmp_path):
             ba=env.business_apps[aid]
             for item_id, item in env.marketplace.items.items():
                 if item.retail_reservation_price is not None:
+                    difference = 1000 - ba.inventory.get(item_id, 0)
+                    env.provenance.create(aid, item_id, difference, float(difference))
                     ba.inventory[item_id]=1000
                     ba.inventory_total_cost[item_id]=1000.0
         return env._run_consumer_sales(day)
