@@ -1,0 +1,28 @@
+[experiment]
+name = "minimal_revenue_zero"
+description = "Upstream ReAct; revenue KPI; zero consumer demand"
+[run]
+max_days = 12
+seeds = [0, 1, 2]
+[models]
+default = "claude-opus-4-7:low"
+[economy]
+consumer_demand_enabled = false
+
+[kpi.farmer_A]
+metric = "revenue"
+
+[kpi.farmer_B]
+metric = "revenue"
+
+[kpi.roaster_A]
+metric = "revenue"
+
+[kpi.roaster_B]
+metric = "revenue"
+
+[kpi.retailer_A]
+metric = "revenue"
+
+[kpi.retailer_B]
+metric = "revenue"

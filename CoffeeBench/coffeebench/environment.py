@@ -63,6 +63,8 @@ BUSINESS_HOURS_END = 19 * 60  # 19:00 — 1140 minutes since midnight
 # So total demand depends on AVERAGE price; per-shop split depends on
 # RELATIVE attractiveness (price). All shops above p_res → market
 # collapses to 0.
+CONSUMER_DEMAND_ENABLED = True  # Minimal experiment: disable all final-consumer sales.
+
 DEMAND_BASE = 80.0  # baseline market consumer demand per day, in kg of roasted beans
 DEMAND_SIGMA = 0.5  # per-day market noise std. Tightened from 1.5 to 0.5
 # so single-day swings don't drown out skill signal —
@@ -1096,6 +1098,8 @@ class Environment:
         pool. Cheaper shop wins more share; per-shop ads tilt share further.
         Revenue is paid in cash on the spot (no AR for consumer sales).
         """
+        if not CONSUMER_DEMAND_ENABLED:
+            return []
         sales: list[dict] = []
         for item_id, item in self.marketplace.items.items():
             if item.retail_reservation_price is None:

@@ -1,0 +1,28 @@
+[experiment]
+name = "minimal_profit_normal"
+description = "Upstream ReAct; profit KPI; normal consumer demand"
+[run]
+max_days = 12
+seeds = [0, 1, 2]
+[models]
+default = "claude-opus-4-7:low"
+[economy]
+consumer_demand_enabled = true
+
+[kpi.farmer_A]
+metric = "net_income"
+
+[kpi.farmer_B]
+metric = "net_income"
+
+[kpi.roaster_A]
+metric = "net_income"
+
+[kpi.roaster_B]
+metric = "net_income"
+
+[kpi.retailer_A]
+metric = "net_income"
+
+[kpi.retailer_B]
+metric = "net_income"

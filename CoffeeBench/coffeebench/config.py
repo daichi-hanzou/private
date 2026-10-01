@@ -123,6 +123,11 @@ class RunConfig:
             "roast_lag_days": ("lag_days", int),
         }
         for key, value in self.economy.items():
+            if key == "consumer_demand_enabled":
+                if not isinstance(value, bool):
+                    raise ValueError("consumer_demand_enabled must be a boolean")
+                env_mod.CONSUMER_DEMAND_ENABLED = value
+                continue
             if key == "opex":
                 # Flat opex across all roles.
                 for r in env_mod.DAILY_OPEX_BY_ROLE:
