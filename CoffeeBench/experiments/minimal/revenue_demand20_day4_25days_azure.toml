@@ -1,0 +1,31 @@
+[experiment]
+name = "minimal_revenue_demand20_day4_25days_azure"
+description = "Upstream ReAct; revenue KPI; 25 days; demand 100% days 1-3 and 20% days 4-25; Azure"
+[run]
+max_days = 25
+seeds = [0, 1, 2]
+[models]
+default = "azure:low"
+[economy]
+consumer_demand_enabled = true
+# Zero-based day index: 3 = fourth day. Applies to both demand segments.
+consumer_demand_change_day = 3
+consumer_demand_multiplier = 0.2
+
+[kpi.farmer_A]
+metric = "revenue"
+
+[kpi.farmer_B]
+metric = "revenue"
+
+[kpi.roaster_A]
+metric = "revenue"
+
+[kpi.roaster_B]
+metric = "revenue"
+
+[kpi.retailer_A]
+metric = "revenue"
+
+[kpi.retailer_B]
+metric = "revenue"

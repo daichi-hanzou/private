@@ -64,6 +64,8 @@ BUSINESS_HOURS_END = 19 * 60  # 19:00 — 1140 minutes since midnight
 # RELATIVE attractiveness (price). All shops above p_res → market
 # collapses to 0.
 CONSUMER_DEMAND_ENABLED = True  # Minimal experiment: disable all final-consumer sales.
+CONSUMER_DEMAND_CHANGE_DAY = None  # Zero-based; 3 means the fourth day.
+CONSUMER_DEMAND_MULTIPLIER = 1.0
 
 DEMAND_BASE = 80.0  # baseline market consumer demand per day, in kg of roasted beans
 DEMAND_SIGMA = 0.5  # per-day market noise std. Tightened from 1.5 to 0.5
@@ -1128,6 +1130,9 @@ class Environment:
                     if (floor_per_shop_kg > 0 and p_i <= item.retail_reservation_price)
                     else 0
                 )
+                if CONSUMER_DEMAND_CHANGE_DAY is not None and day >= CONSUMER_DEMAND_CHANGE_DAY:
+                    elastic_qty = int(round(elastic_qty * CONSUMER_DEMAND_MULTIPLIER))
+                    floor_qty = int(round(floor_qty * CONSUMER_DEMAND_MULTIPLIER))
                 qty = max(0, min(elastic_qty + floor_qty, inv))
                 if qty <= 0:
                     continue
@@ -1869,7 +1874,8 @@ class Environment:
             action_input=out.get("action_input"),
             observation=out.get("observation"),
             thought=out.get("thought") or "",
-            cost_so_far=round(float(getattr(model, "cost", 0.0) or 0.0), 6),
+            cost_so_far=(None if getattr(model, "cost_known", True) is False else
+                         round(float(getattr(model, "cost", 0.0) or 0.0), 6)),
             n_calls_so_far=int(getattr(model, "n_calls", 0) or 0),
             input_tokens_so_far=int(getattr(model, "total_input_tokens", 0) or 0),
             output_tokens_so_far=int(getattr(model, "total_output_tokens", 0) or 0),
@@ -2332,7 +2338,8 @@ class Environment:
             usage = {
                 "model": getattr(model, "model", None),
                 "n_calls": int(getattr(model, "n_calls", 0) or 0),
-                "cost": round(float(getattr(model, "cost", 0.0) or 0.0), 6),
+                "cost": (None if getattr(model, "cost_known", True) is False else
+                         round(float(getattr(model, "cost", 0.0) or 0.0), 6)),
                 "total_input_tokens": int(getattr(model, "total_input_tokens", 0) or 0),
                 "total_output_tokens": int(
                     getattr(model, "total_output_tokens", 0) or 0

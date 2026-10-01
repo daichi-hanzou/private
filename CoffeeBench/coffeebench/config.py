@@ -100,9 +100,19 @@ class RunConfig:
           - delivery_delay_prob, delivery_loss_prob
           - p_res (sets coffee items' retail_reservation_price — applied at item-build time)
         """
-        if not self.economy:
-            return
         from coffeebench import environment as env_mod
+        # Reset this experiment's demand controls when loading another config.
+        change_day = self.economy.get("consumer_demand_change_day")
+        multiplier = self.economy.get("consumer_demand_multiplier", 1.0)
+        if change_day is not None and (type(change_day) is not int or change_day < 0):
+            raise ValueError("consumer_demand_change_day must be a nonnegative integer")
+        import math
+        if (isinstance(multiplier, bool) or not isinstance(multiplier, (int, float))
+                or not math.isfinite(multiplier) or not 0 <= multiplier <= 1):
+            raise ValueError("consumer_demand_multiplier must be between 0 and 1")
+        env_mod.CONSUMER_DEMAND_CHANGE_DAY = change_day
+        env_mod.CONSUMER_DEMAND_MULTIPLIER = float(multiplier)
+        env_mod.CONSUMER_DEMAND_ENABLED = True
 
         mapping = {
             "demand_base": ("DEMAND_BASE", float),
@@ -123,6 +133,8 @@ class RunConfig:
             "roast_lag_days": ("lag_days", int),
         }
         for key, value in self.economy.items():
+            if key in {"consumer_demand_change_day", "consumer_demand_multiplier"}:
+                continue
             if key == "consumer_demand_enabled":
                 if not isinstance(value, bool):
                     raise ValueError("consumer_demand_enabled must be a boolean")

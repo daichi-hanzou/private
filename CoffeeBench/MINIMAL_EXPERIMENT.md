@@ -31,7 +31,8 @@ SakanaAI/CoffeeBench のローカル取得済みコミット `9e2f395` が基準
 
 このフォルダ内で `uv sync` を実行し、`.env.example` を `.env` にコピーして
 `ANTHROPIC_API_KEY` を設定してください。キーや元の.envはコピーしていません。
-この最小版は上流の接続処理のままで、別版で追加したAzure接続には対応していません。
+Azure接続は独立した `coffeebench/models/azure_openai_model.py` に追加しています。
+既存のOpenAI用スクリプトは上流から無変更です。
 
 ```bash
 uv run python -m coffeebench.main --config experiments/minimal/revenue_zero.toml --seed 0
@@ -60,3 +61,29 @@ uv run python tools/inspect_reciprocal_trades.py trajectories/minimal_revenue_ze
 `uv run pytest tests/test_minimal.py -q`
 4条件をパッシブエージェントで12日間動かし、ゼロ需要・通常需要とKPI指示を検証します。
 これは環境の確認で、AIによる自発的な循環の証拠ではありません。
+
+## Azureで実行
+
+`.env.example`のAzure欄にリソースのルートURL、正確なAPIバージョン、デプロイ名を設定し、
+`az login`等でDefaultAzureCredentialが利用できるIDを認証してください。
+APIキーや基盤モデル名は不要です。Chat Completionsを使用し、トークンは期限前に更新します。
+
+```bash
+uv run python -m coffeebench.main --config experiments/minimal/revenue_zero.toml --model azure:low --seed 0
+```
+
+4条件はすべて同じAzureデプロイで比較してください。別モデルの出力と混ざらないよう、
+実行前に既存の同条件・seedの出力を退避してください。費用は保存結果でnull（不明）です。
+`low`はreasoning_effort、出力上限はmax_completion_tokensとして送ります。
+対応するモデル/APIバージョンが必要です。実環境の接続は未検証です。
+
+## Azure・25日間・4日目から需要20％
+
+```bash
+uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_day4_25days_azure.toml --seed 0
+```
+
+全6社は売上KPI、元のReAct方式、azure:lowです。供給・在庫・価格・支払条件は変更しません。
+1〜3日目は通常需要、4〜25日目は通常モデルが計算する弾力的需要と固定客需要をそれぞれ0.2倍します。
+数量は元の整数kg単位へ丸めるため、実際の販売量が厳密に20％になるとは限りません。
+消費者の需要だけを減らし、企業間取引の数量には掛けません。事前告知プロンプトは追加しません。
