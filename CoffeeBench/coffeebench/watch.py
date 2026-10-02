@@ -353,8 +353,7 @@ def _stream(events: list[dict[str, Any]], actions: bool, messages: bool) -> None
         elif t == "consumer_sale":
             print(
                 f"  [day {ev.get('day')}] RETAIL: {ev.get('shop_id')} sold {ev.get('item_id')} "
-                f"x{ev.get('qty')} @ {_money(ev.get('unit_price'))} "
-                f"(boost {ev.get('boost_multiplier'):.2f}x)"
+                f"x{ev.get('qty')} @ {_money(ev.get('unit_price'))}"
             )
     _stream.seen = len(events)
 

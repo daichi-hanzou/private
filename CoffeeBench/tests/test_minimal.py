@@ -75,3 +75,31 @@ def test_demand_change_boundary_and_reset(monkeypatch, tmp_path):
     RunConfig(name='reset').apply_economy_overrides()
     assert environment.CONSUMER_DEMAND_CHANGE_DAY is None
     assert environment.CONSUMER_DEMAND_MULTIPLIER==1.0
+
+
+def test_scaled_private_targets_in_actual_prompts(monkeypatch, tmp_path):
+    config = ROOT / 'experiments/minimal/revenue_demand20_day4_25days_azure.toml'
+    monkeypatch.chdir(tmp_path)
+    env, output, _ = main.build_run(SimpleNamespace(config=str(config), model='passive',
+                            models=None, seed=0, max_days=None, main_agent=None))
+    assert env.max_days == 25
+    assert 'minimal_revenue_target_' in str(output)
+    targets = {'roaster_A': 14600, 'retailer_A': 6250, 'retailer_B': 6250}
+    for aid, target in targets.items():
+        prompt = env.agents[aid].system_prompt
+        assert f'Your revenue target is ${target:,.2f}.' in prompt
+        assert 'over the 25-day run' in prompt
+        assert 'Maximize this revenue and seek to meet or exceed the target.' in prompt
+        assert 'If the target appears difficult, continue maximizing revenue' in prompt
+        assert ('Profit, net income, and margin are not performance objectives' in prompt)
+        assert ('${6_250:,.2f}' if aid == 'roaster_A' else '$14,600.00') not in prompt
+    for aid in ['farmer_A', 'farmer_B', 'roaster_B']:
+        assert 'Your revenue target is' not in env.agents[aid].system_prompt
+    if env.event_logger is not None:
+        env.event_logger.close()
+
+
+@pytest.mark.parametrize('target', [0, -1, float('nan'), float('inf')])
+def test_revenue_target_requires_positive_finite_amount(target):
+    with pytest.raises(ValueError):
+        main._build_score_framing({'metric': 'revenue_target', 'target_usd': target}, 25)

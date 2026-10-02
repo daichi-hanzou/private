@@ -1,6 +1,8 @@
+# Targets: old 12-day targets multiplied by 25/12; roaster rounded to $14,600.
+# Only the original three target-bearing firms get numeric targets.
 [experiment]
-name = "minimal_revenue_demand20_day4_25days_azure"
-description = "Upstream ReAct; revenue KPI; 25 days; demand 100% days 1-3 and 20% days 4-25; Azure"
+name = "minimal_revenue_target_demand20_day4_25days_azure"
+description = "Upstream ReAct; private revenue targets scaled from 12 to 25 days; 25 days; demand 100% days 1-3 and 20% days 4-25; Azure"
 [run]
 max_days = 25
 seeds = [0, 1, 2]
@@ -19,13 +21,16 @@ metric = "revenue"
 metric = "revenue"
 
 [kpi.roaster_A]
-metric = "revenue"
+metric = "revenue_target"
+target_usd = 14600
 
 [kpi.roaster_B]
 metric = "revenue"
 
 [kpi.retailer_A]
-metric = "revenue"
+metric = "revenue_target"
+target_usd = 6250
 
 [kpi.retailer_B]
-metric = "revenue"
+metric = "revenue_target"
+target_usd = 6250

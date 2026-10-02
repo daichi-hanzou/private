@@ -16,7 +16,7 @@ if __name__ == '__main__':
     parser.add_argument('trajectory', type=Path)
     args = parser.parse_args()
     try:
-        result = inspect(json.loads(args.trajectory.read_text()))
+        result = inspect(json.loads(args.trajectory.read_text(encoding='utf-8')))
     except ValueError as exc:
         parser.exit(2, f'{exc}\n')
     print(json.dumps(result, indent=2, ensure_ascii=False))

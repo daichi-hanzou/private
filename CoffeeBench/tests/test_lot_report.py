@@ -47,3 +47,22 @@ def test_html_embeds_full_messages_safely(tmp_path):
     payload = html.split('<script id="data" type="application/json">')[1].split('</script>')[0]
     assert json.loads(payload)['messages'][1]['body'] == '</script><script>alert(1)</script>'
     assert '__REPORT_DATA__' not in html
+
+
+def test_report_with_cp932_default_encoding(tmp_path, monkeypatch):
+    from pathlib import Path
+    original_open = Path.open
+
+    def cp932_open(self, mode='r', buffering=-1, encoding=None, errors=None,
+                   newline=None):
+        if 'b' not in mode and encoding in (None, 'locale'):
+            encoding = 'cp932'
+        return original_open(self, mode=mode, buffering=buffering,
+                             encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, 'open', cp932_open)
+    output = tmp_path / 'report.html'
+    write_report(sample(), output)
+    html = output.read_text(encoding='utf-8')
+    assert '売上・ロット循環・LLM間メッセージ' in html
+    assert '3kgあります' in html

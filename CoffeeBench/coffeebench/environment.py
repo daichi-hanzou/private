@@ -2867,7 +2867,7 @@ class Environment:
         data["provenance"] = self.provenance.snapshot()
         data["lot_cycles"] = analyze_cycles(self.provenance.events)
         data["deal_unit_ids"] = {d.id: getattr(d, "unit_ids", []) for d in self.marketplace.deals}
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
         from coffeebench.lot_report import write_report
         write_report(data, os.path.splitext(path)[0] + ".lots.html")

@@ -10,5 +10,5 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     output = args.output or args.trajectory.with_suffix('.lots.html')
-    write_report(json.loads(args.trajectory.read_text()), output)
+    write_report(json.loads(args.trajectory.read_text(encoding='utf-8')), output)
     print(output)

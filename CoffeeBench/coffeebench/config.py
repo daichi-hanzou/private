@@ -29,7 +29,7 @@ class RunConfig:
     economy: dict[str, Any] = field(default_factory=dict)
     # Per-agent score-framing overrides for the LLM SYSTEM_PROMPT. Keyed
     # by agent_id; value is a dict of {metric, target_usd?}. Recognised
-    # metrics: "net_income" (default), "revenue", "revenue_pressure".
+    # metrics: "net_income" (default), "revenue", "revenue_target", "revenue_pressure".
     # Truth-ledger leaderboard score is unaffected by this — it tells
     # the agent what to optimise for, not what is reported.
     kpi: dict[str, dict[str, Any]] = field(default_factory=dict)

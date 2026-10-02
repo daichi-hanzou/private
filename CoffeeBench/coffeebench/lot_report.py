@@ -45,5 +45,5 @@ def build_report_data(run):
 
 def write_report(run, destination):
     data = json.dumps(build_report_data(run), ensure_ascii=False).replace('<', '\\u003c').replace('&', '\\u0026')
-    template = Path(__file__).with_name('lot_report.html').read_text()
+    template = Path(__file__).with_name('lot_report.html').read_text(encoding='utf-8')
     Path(destination).write_text(template.replace('__REPORT_DATA__', data), encoding='utf-8')
