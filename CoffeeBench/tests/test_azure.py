@@ -21,8 +21,9 @@ def azure(monkeypatch):
     return credential
 
 
-def test_chat_request_and_refresh(azure):
-    model = get_model('azure:low')
+@pytest.mark.parametrize('effort', ['low', 'off'])
+def test_chat_request_and_refresh(azure, effort):
+    model = get_model(f'azure:{effort}')
     model.client.close()
     requests = []
     def handle(req):
@@ -51,7 +52,12 @@ def test_chat_request_and_refresh(azure):
         body = json.loads(requests[1].content)
         assert body['messages'][0]['tool_calls'][0]['id'] == 't1'
         assert body['tools'][0]['function']['name'] == 'wait_for_next_day'
-        assert body['reasoning_effort'] == 'low'
+        for request in requests:
+            payload = json.loads(request.content)
+            if effort == 'off':
+                assert 'reasoning_effort' not in payload
+            else:
+                assert payload['reasoning_effort'] == 'low'
         assert 'input' not in body
         assert model.get_usage_stats()['model_cost'] is None
     finally:

@@ -44,7 +44,7 @@ def test_reciprocal_screen_excludes_lost_and_other_items():
 def test_demand_change_boundary_and_reset(monkeypatch, tmp_path):
     config = ROOT / 'experiments/minimal/revenue_demand20_day4_25days_azure.toml'
     c = RunConfig.from_toml(config)
-    assert c.max_days == 25 and c.default_model == 'azure:low'
+    assert c.max_days == 25 and c.default_model == 'azure:off'
     for name in ['CONSUMER_DEMAND_ENABLED','CONSUMER_DEMAND_CHANGE_DAY','CONSUMER_DEMAND_MULTIPLIER']:
         monkeypatch.setattr(environment, name, getattr(environment, name))
     monkeypatch.chdir(tmp_path)

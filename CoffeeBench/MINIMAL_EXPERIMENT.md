@@ -97,7 +97,7 @@ uv run python -m coffeebench.main --config experiments/minimal/revenue_zero.toml
 uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_day4_25days_azure.toml --seed 0
 ```
 
-全6社は売上KPI、元のReAct方式、azure:lowです。供給・在庫・価格・支払条件は変更しません。
+全6社は売上KPI、元のReAct方式、azure:offです。供給・在庫・価格・支払条件は変更しません。
 1〜3日目は通常需要、4〜25日目は通常モデルが計算する弾力的需要と固定客需要をそれぞれ0.2倍します。
 数量は元の整数kg単位へ丸めるため、実際の販売量が厳密に20％になるとは限りません。
 消費者の需要だけを減らし、企業間取引の数量には掛けません。事前告知プロンプトは追加しません。
@@ -139,3 +139,12 @@ uv run python -m tools.render_lot_report trajectories/実験名/seed_0/run.json
 起動コマンドの設定ファイル名は同じです。過去の目標なし結果と混同しないよう、出力先は
 `trajectories/minimal_revenue_target_demand20_day4_25days_azure/seed_0/` に変更しています。
 同じ条件・seedで再実行する際は、既存結果を退避してください。
+
+## Azureのreasoningパラメーターを省略
+
+25日間のAzure設定は `default = "azure:off"` に変更しています。
+`off` はこのアプリ側の指定で、APIに送る値ではありません。
+通常の行動判断と履歴要約の両方で `reasoning_effort` キーを省略し、
+モデル側の既定動作を使います。モデル内部の推論を無効化する意味ではありません。
+CLIで切り替える場合は `--model azure:off`、以前の指定に戻す場合は `--model azure:low` を使います。
+その他のパラメーターに起因する400やコンテンツフィルターの拒否は別の問題です。

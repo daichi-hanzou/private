@@ -7,7 +7,8 @@ description = "Upstream ReAct; private revenue targets scaled from 12 to 25 days
 max_days = 25
 seeds = [0, 1, 2]
 [models]
-default = "azure:low"
+# off omits reasoning_effort; the deployment uses its own default.
+default = "azure:off"
 [economy]
 consumer_demand_enabled = true
 # Zero-based day index: 3 = fourth day. Applies to both demand segments.
