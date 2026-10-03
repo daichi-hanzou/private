@@ -320,6 +320,7 @@ dependencies = [
     { name = "imageio" },
     { name = "jsonschema" },
     { name = "matplotlib" },
+    { name = "openai" },
     { name = "openai-agents" },
     { name = "pandas" },
 ]
@@ -334,12 +335,13 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.75.0" },
-    { name = "azure-identity", specifier = ">=1.19.0" },
+    { name = "azure-identity", specifier = ">=1.25.3" },
     { name = "google-adk", specifier = ">=1.20.0" },
     { name = "google-genai", specifier = ">=1.54.0" },
     { name = "imageio", specifier = ">=2.37.3" },
     { name = "jsonschema", specifier = ">=4.25.1" },
     { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "openai", specifier = ">=2.14.0" },
     { name = "openai-agents", specifier = ">=0.4.2" },
     { name = "pandas", specifier = ">=2.3.3" },
 ]

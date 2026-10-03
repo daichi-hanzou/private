@@ -9,6 +9,7 @@ import pytest
 from coffeebench import main
 from coffeebench.models import get_model
 from coffeebench.models import openai_model as provider
+from coffeebench.models import azure_client
 from coffeebench.models._retry import attempt_limit
 from coffeebench.models.types import ToolSpec
 
@@ -26,19 +27,9 @@ def response(name="submit_plan", arguments=None):
 def client(monkeypatch):
     sdk = Mock()
     sdk.responses.create.return_value = response()
-    def chat_create(**kwargs):
-        adapted = dict(kwargs)
-        if "tools" in adapted:
-            adapted["tools"] = [t["function"] for t in adapted["tools"]]
-        r = sdk.responses.create(**adapted)
-        calls = [NS(id=t.call_id, function=NS(name=t.name, arguments=t.arguments)) for t in r.output]
-        return NS(usage=NS(prompt_tokens=1000, completion_tokens=100,
-                          prompt_tokens_details=NS(cached_tokens=200)),
-                  choices=[NS(message=NS(content="summary", tool_calls=calls), finish_reason="tool_calls")])
-    sdk.chat.completions.create.side_effect = chat_create
     constructor = Mock(return_value=sdk)
     monkeypatch.setattr(provider, "OpenAI", constructor)
-    monkeypatch.setattr(provider, "AzureOpenAI", constructor)
+    monkeypatch.setattr(azure_client, "OpenAI", constructor)
     sdk.constructor = constructor
     return sdk
 
@@ -147,7 +138,12 @@ def test_twelve_days_with_real_adapter_mock_transport(client, tmp_path, monkeypa
 
 @pytest.mark.parametrize("condition", ["control", "retention"])
 def test_coordination_four_decisions_and_private_data_boundary(client, tmp_path, monkeypatch, condition):
-    config = Path(__file__).resolve().parents[1] / f"experiments/circular/coordination_{condition}.toml"
+    source = Path(__file__).resolve().parents[1] / "experiments/circular/coordination_control.toml"
+    config = tmp_path / "condition.toml"
+    settings = source.read_text(encoding="utf-8")
+    if condition == "retention":
+        settings = settings.replace("role_continuation = false", "role_continuation = true")
+    config.write_text(settings, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     args = NS(config=str(config), seed=0, max_days=None, model=None, models=None,
               main_agent=None, agent_mode=None, run_name=None, overwrite=False)
@@ -186,7 +182,7 @@ def configure_azure(monkeypatch):
     import azure.identity
     credential = Mock()
     credential.get_token.return_value = NS(token="test-credential-not-real", expires_on=9999999999)
-    monkeypatch.setattr(azure.identity, "DefaultAzureCredential", Mock(return_value=credential))
+    monkeypatch.setattr(azure_client, "DefaultAzureCredential", Mock(return_value=credential))
     return credential
 
 
@@ -194,9 +190,9 @@ def test_azure_auth_deployment_and_compaction(client, monkeypatch):
     configure_azure(monkeypatch)
     model = get_model("gpt-6-astra:low")
     opts = client.constructor.call_args.kwargs
-    assert opts["azure_endpoint"] == "https://example.openai.azure.com"
-    assert opts["api_version"] == "2025-04-01-preview"
-    assert opts["azure_ad_token_provider"]() == "test-credential-not-real"
+    assert opts["base_url"] == "https://example.openai.azure.com/openai/v1/"
+    assert "api_version" not in opts
+    assert opts["api_key"]() == "test-credential-not-real"
     assert opts["max_retries"] == 0
     model.query([])
     assert client.responses.create.call_args.kwargs["model"] == "research-deployment"
@@ -213,7 +209,6 @@ def test_azure_auth_deployment_and_compaction(client, monkeypatch):
     ("AZURE_OPENAI_ENDPOINT", "http://example.com"),
     ("AZURE_OPENAI_ENDPOINT", "https://example.com/openai/deployments/foo"),
     ("AZURE_OPENAI_DEPLOYMENT", ""),
-    ("AZURE_OPENAI_API_VERSION", ""),
     ("COFFEEBENCH_OPENAI_PROVIDER", "typo"),
 ])
 def test_azure_invalid_config_no_fallback(client, monkeypatch, key, value):
@@ -232,22 +227,24 @@ def test_azure_sdk_request_with_mock_http(monkeypatch):
     def handler(request):
         requests.append(request)
         return httpx.Response(200, json={
-            "id": "chat_test", "object": "chat.completion", "created": 0,
-            "model": "gpt-6-astra", "choices": [{"index": 0, "finish_reason": "stop",
-                "message": {"role": "assistant", "content": "ok"}}],
-            "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
-                      "prompt_tokens_details": {"cached_tokens": 200}},
+            "id": "resp_test", "object": "response", "created_at": 0,
+            "model": "research-deployment", "status": "completed",
+            "output": [{"type": "function_call", "id": "fc_test", "call_id": "call_test",
+                        "name": "submit_plan", "arguments": "{}"}],
+            "usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100,
+                      "input_tokens_details": {"cached_tokens": 200}},
         })
     model.client.close()
-    model.client = provider.AzureOpenAI(
-        azure_endpoint="https://example.openai.azure.com", api_version="2025-04-01-preview",
-        azure_ad_token_provider=lambda: "test-credential-not-real",
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)), max_retries=0,
-    )
+    model.client, _, _ = azure_client.create_azure_client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)), max_retries=0)
     try:
-        model.query([{"role": "user", "content": "test"}])
-        assert requests[0].url.path == "/openai/deployments/research-deployment/chat/completions"
-        assert requests[0].url.params["api-version"] == "2025-04-01-preview"
+        model.query([{"role": "user", "content": "test"}], [ToolSpec("submit_plan", "plan", {"type": "object"})])
+        assert requests[0].url.path == "/openai/v1/responses"
+        assert "api-version" not in requests[0].url.params
+        body = json.loads(requests[0].content)
+        assert body["reasoning"]["effort"] == "low"
+        assert body["tools"][0]["name"] == "submit_plan"
+        assert "reasoning_effort" not in body
         assert "api-key" not in requests[0].headers
         assert requests[0].headers["Authorization"] == "Bearer test-credential-not-real"
         assert json.loads(requests[0].content)["model"] == "research-deployment"
@@ -275,7 +272,7 @@ def test_azure_token_refresh(client, monkeypatch):
     credential = configure_azure(monkeypatch)
     model = get_model("gpt-6-astra:low")
     credential.get_token.assert_called_once_with("https://cognitiveservices.azure.com/.default")
-    token_provider = client.constructor.call_args.kwargs["azure_ad_token_provider"]
+    token_provider = client.constructor.call_args.kwargs["api_key"]
     assert token_provider() == "test-credential-not-real"
     assert credential.get_token.call_count == 1
     credential.get_token.return_value.expires_on = 0
@@ -316,7 +313,7 @@ def test_azure_pricing_model_is_optional_metadata(client, monkeypatch):
     assert get_model("azure:low").get_usage_stats()["model_cost"] is None
 
 
-def test_azure_chat_tool_history(client, monkeypatch):
+def test_azure_responses_tool_history(client, monkeypatch):
     from coffeebench.models.types import ToolCall
     configure_azure(monkeypatch)
     model = get_model("azure:low")
@@ -325,10 +322,50 @@ def test_azure_chat_tool_history(client, monkeypatch):
         {"role": "assistant", "content": "", "tool_calls": [ToolCall("c1", "submit_plan", {})]},
         {"role": "tool", "tool_call_id": "c1", "content": "done"},
     ], [spec], {"type": "function", "name": "submit_plan"})
-    k = client.chat.completions.create.call_args.kwargs
-    assert "input" not in k and "reasoning" not in k
-    assert k["messages"][0]["tool_calls"][0]["function"]["arguments"] == "{}"
-    assert k["messages"][1]["tool_call_id"] == "c1"
-    assert k["tools"][0]["function"]["name"] == "submit_plan"
-    assert k["tool_choice"] == {"type": "function", "function": {"name": "submit_plan"}}
+    k = client.responses.create.call_args.kwargs
+    assert "messages" not in k
+    assert k["reasoning"]["effort"] == "low"
+    assert k["input"][0]["arguments"] == "{}"
+    assert k["input"][1]["call_id"] == "c1"
+    assert k["input"][1]["type"] == "function_call_output"
+    assert k["tools"][0]["name"] == "submit_plan"
+    assert k["tool_choice"] == {"type": "function", "name": "submit_plan"}
     assert result.tool_calls[0].name == "submit_plan"
+
+
+def test_azure_private_target_preset_and_reasoning_replay(client, monkeypatch, tmp_path):
+    configure_azure(monkeypatch)
+    monkeypatch.delenv('AZURE_OPENAI_API_VERSION', raising=False)
+    config = Path(__file__).resolve().parents[1] / 'experiments/circular/coordination_private_targets_gpt56_azure.toml'
+    monkeypatch.chdir(tmp_path)
+    env, _, _ = main.build_run(NS(config=str(config), seed=0, max_days=None, model=None,
+        models=None, main_agent=None, agent_mode=None, run_name=None, overwrite=False))
+    env.verbose = False
+    asyncio.run(env.run())
+    assert client.responses.create.call_count == 144
+    for call in client.responses.create.call_args_list:
+        assert call.kwargs['reasoning']['effort'] == 'low'
+        assert call.kwargs['model'] == 'research-deployment'
+        assert call.kwargs['tools'][0]['name'] == 'submit_plan'
+    for aid in ('roaster_A','retailer_A','retailer_B'):
+        assert env.agents[aid].decision_errors == 0
+    model = env.agents['roaster_A'].model
+    r = response()
+    r.output.insert(0, NS(type='reasoning', id='rs_test', summary=[NS(text='Plan summary')]))
+    client.responses.create.return_value = r
+    first = model.query([])
+    model.query([{'role':'assistant', '_raw':first.raw},
+                 {'role':'tool', 'tool_call_id':'call_1', 'content':'done'}])
+    items = client.responses.create.call_args.kwargs['input']
+    assert items[0]['type'] == 'reasoning' and items[0]['id'] == 'rs_test'
+    assert items[1]['call_id'] == items[2]['call_id'] == 'call_1'
+    model.summarize('summary', 'history')
+    assert client.responses.create.call_args.kwargs['reasoning'] == {'effort':'low'}
+
+
+def test_azure_off_omits_reasoning(client, monkeypatch):
+    configure_azure(monkeypatch)
+    model = get_model('azure:off')
+    model.query([])
+    model.summarize('summary', 'history')
+    assert all('reasoning' not in c.kwargs for c in client.responses.create.call_args_list)

@@ -2,7 +2,7 @@
 
 import os
 
-from openai import OpenAI, AzureOpenAI
+from openai import OpenAI
 from dotenv import load_dotenv
 
 from coffeebench.models._retry import call_with_retry
@@ -50,39 +50,8 @@ class OpenAIModel:
         self.api_model = model
         client_options = {"timeout": 300.0, "max_retries": 0}
         if self.provider == "azure":
-            from urllib.parse import urlsplit
-
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip().rstrip("/")
-            deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
-            api_version = os.getenv("AZURE_OPENAI_API_VERSION", "").strip()
-            url = urlsplit(endpoint)
-            if (url.scheme != "https" or not url.hostname or url.username or url.password
-                    or url.query or url.fragment or url.path not in ("",)):
-                raise ValueError("AZURE_OPENAI_ENDPOINT must be an HTTPS resource URL without an API path")
-            if not deployment:
-                raise ValueError("Set AZURE_OPENAI_DEPLOYMENT to the Azure deployment name")
-            if not api_version:
-                raise ValueError("Set AZURE_OPENAI_API_VERSION")
-            from azure.identity import DefaultAzureCredential
-            import time
-
-            self.azure_credential = DefaultAzureCredential()
-            scope = "https://cognitiveservices.azure.com/.default"
-            token = self.azure_credential.get_token(scope)
-
-            def token_provider():
-                nonlocal token
-                if token.expires_on <= time.time() + 300:
-                    token = self.azure_credential.get_token(scope)
-                return token.token
-
-            self.api_model = deployment
-            self.client = AzureOpenAI(
-                azure_endpoint=endpoint,
-                api_version=api_version,
-                azure_ad_token_provider=token_provider,
-                **client_options,
-            )
+            from coffeebench.models.azure_client import create_azure_client
+            self.client, self.api_model, self.azure_credential = create_azure_client(**client_options)
         elif self.provider == "openai":
             client_options["api_key"] = os.getenv("OPENAI_API_KEY")
         else:
@@ -95,7 +64,7 @@ class OpenAIModel:
         # Legacy GPT-5.5 maps `off` to "minimal". Astra is validated above
         # and defaults direct construction to "low".
         self._skip_temperature = True
-        self._skip_reasoning = effort is None
+        self._skip_reasoning = effort is None or (self.provider == "azure" and effort == "off")
         self.reasoning_effort = "minimal" if effort == "off" else effort
         self.max_tokens = 4096
         self.temperature = 0.0
@@ -188,75 +157,12 @@ class OpenAIModel:
                 continue
         return items
 
-    def _chat_query(self, messages, tools=None, tool_choice=None, max_tokens=None):
-        import json
-
-        history = []
-        for message in messages:
-            role = message.get("role")
-            if role not in {"system", "developer", "user", "assistant", "tool"}:
-                continue
-            entry = {"role": role, "content": message.get("content") or ""}
-            if role == "tool":
-                entry["tool_call_id"] = message["tool_call_id"]
-            if role == "assistant" and message.get("tool_calls"):
-                calls = []
-                for call in message["tool_calls"]:
-                    if isinstance(call, ToolCall):
-                        calls.append({"id": call.id, "type": "function", "function": {
-                            "name": call.name, "arguments": json.dumps(call.input)}})
-                    elif "function" in call:
-                        calls.append(call)
-                    else:
-                        calls.append({"id": call["id"], "type": "function", "function": {
-                            "name": call["name"], "arguments": json.dumps(call["input"])}})
-                entry["tool_calls"] = calls
-            history.append(entry)
-        kwargs = {"model": self.api_model, "messages": history,
-                  "max_completion_tokens": max_tokens or self.max_tokens}
-        if not self._skip_reasoning:
-            kwargs["reasoning_effort"] = self.reasoning_effort
-        if tools:
-            kwargs["tools"] = [{"type": "function", "function": {
-                "name": t.name, "description": t.description,
-                "parameters": t.input_schema}} for t in tools]
-            kwargs["parallel_tool_calls"] = False
-            if tool_choice is not None:
-                if isinstance(tool_choice, dict) and "name" in tool_choice:
-                    tool_choice = {"type": "function", "function": {"name": tool_choice["name"]}}
-                kwargs["tool_choice"] = tool_choice
-        response = call_with_retry(lambda: self.client.chat.completions.create(**kwargs),
-                                   label=f"azure:{self.api_model}")
-        usage = response.usage
-        if usage is None:
-            raise ValueError("Azure Chat Completions response is missing token usage")
-        inputs, outputs = usage.prompt_tokens, usage.completion_tokens
-        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
-        cost = self._completion_cost(inputs - cached, cached, outputs)
-        self.n_calls += 1
-        self.cost += cost
-        self.total_input_tokens += inputs
-        self.total_output_tokens += outputs
-        self.last_input_tokens = inputs
-        choice = response.choices[0]
-        result = choice.message
-        calls = []
-        for call in result.tool_calls or []:
-            arguments = json.loads(call.function.arguments or "{}")
-            if not isinstance(arguments, dict):
-                raise ValueError("Azure tool arguments must be an object")
-            calls.append(ToolCall(call.id, call.function.name, arguments))
-        return ModelResponse(content=result.content or "", tool_calls=calls,
-                             stop_reason=choice.finish_reason or "", cost=cost)
-
     def query(
         self,
         messages: list[dict],
         tools: list[ToolSpec] | None = None,
         tool_choice: str | dict | None = None,
     ) -> ModelResponse:
-        if self.provider == "azure":
-            return self._chat_query(messages, tools, tool_choice)
         kwargs: dict = {
             "model": self.api_model,
             "input": self._to_responses_input(messages),
@@ -301,7 +207,7 @@ class OpenAIModel:
                     return self.client.responses.create(**kwargs)
                 raise
 
-        response = call_with_retry(_do_call, label=f"openai:{self.model}")
+        response = call_with_retry(_do_call, label=f"{self.provider}:{self.api_model}")
 
         usage = response.usage
         input_tokens = usage.input_tokens
@@ -315,7 +221,7 @@ class OpenAIModel:
         self.total_input_tokens += int(input_tokens)
         self.total_output_tokens += int(output_tokens)
         print(
-            f"[openai:{self.model}] in={input_tokens} cached={cached_tokens} "
+            f"[{self.provider}:{self.api_model}] in={input_tokens} cached={cached_tokens} "
             f"out={output_tokens} status={getattr(response, 'status', '?')}"
         )
 
@@ -388,10 +294,6 @@ class OpenAIModel:
         }
 
     def summarize(self, instructions: str, content: str, max_tokens: int = 4096) -> str:
-        if self.provider == "azure":
-            return self._chat_query([{"role": "system", "content": instructions},
-                                     {"role": "user", "content": content}],
-                                    max_tokens=max_tokens).content
         kwargs: dict = {
             "model": self.api_model,
             "input": [
@@ -406,7 +308,10 @@ class OpenAIModel:
             kwargs["temperature"] = self.temperature
         # Astra cannot disable reasoning. Pin the lowest supported level so
         # ReAct compaction does not inherit a more expensive provider default.
-        if self.model in {"gpt-6-astra", "gpt-5.6", "gpt-5.6-sol"}:
+        if self.provider == "azure":
+            if not self._skip_reasoning:
+                kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        elif self.model in {"gpt-6-astra", "gpt-5.6", "gpt-5.6-sol"}:
             kwargs["reasoning"] = {"effort": "low"}
 
         def _do_call():
@@ -420,7 +325,7 @@ class OpenAIModel:
                     return self.client.responses.create(**kwargs)
                 raise
 
-        response = call_with_retry(_do_call, label=f"openai:{self.model}:summarize")
+        response = call_with_retry(_do_call, label=f"{self.provider}:{self.api_model}:summarize")
         usage = response.usage
         input_tokens = int(usage.input_tokens or 0)
         cached_tokens = int(

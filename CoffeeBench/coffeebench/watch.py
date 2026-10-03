@@ -61,7 +61,7 @@ def _read_events(path: str) -> list[dict[str, Any]]:
     if not os.path.exists(path):
         return []
     out: list[dict[str, Any]] = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -347,20 +347,25 @@ def _stream(events: list[dict[str, Any]], actions: bool, messages: bool) -> None
                 if body:
                     print(f"                      {body}")
         elif t == "deal_accepted":
+            day = ev.get("day")
+            if day is None and ev.get("deal_at") is not None:
+                day = ev["deal_at"] // 1440
             print(
-                f"  [day {ev.get('day')}] DEAL: {ev.get('seller')} -> {ev.get('buyer')}  "
+                f"  [day {day}] DEAL: {ev.get('seller')} -> {ev.get('buyer')}  "
                 f"{ev.get('item_id')} x{ev.get('qty')} @ {_money(ev.get('unit_price'))}"
             )
         elif t == "consumer_sale":
             print(
                 f"  [day {ev.get('day')}] RETAIL: {ev.get('shop_id')} sold {ev.get('item_id')} "
-                f"x{ev.get('qty')} @ {_money(ev.get('unit_price'))} "
-                f"(boost {ev.get('boost_multiplier'):.2f}x)"
+                f"x{ev.get('qty')} @ {_money(ev.get('unit_price'))}"
             )
     _stream.seen = len(events)
 
 
 def main() -> None:
+    # Windows terminals may not support every character in agent messages.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     args = _parse_args()
     path = _resolve_path(args)
     print(f"[coffeebench.watch] tailing {path}")

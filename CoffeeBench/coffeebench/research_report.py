@@ -28,7 +28,7 @@ def table(headers, rows):
 def render_report(paths, output):
     sections, csv_rows = [], []
     for path in paths:
-        data = json.loads(Path(path).read_text())
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
         result = data["result"]
         research = result["research"]
         events = data["provenance"]["events"]
@@ -184,10 +184,10 @@ Cycle revenues are retrospective, net of linked returns. Reference-cost profit u
 run-end cash, resource-cost assets, AR and AP; it is separate from the benchmark score.</p>
 """
         + "".join(sections)
-        + "</html>"
+        + "</html>", encoding="utf-8"
     )
     if csv_rows:
-        with output.with_suffix(".csv").open("w", newline="") as f:
+        with output.with_suffix(".csv").open("w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=list(csv_rows[0]))
             writer.writeheader()
             writer.writerows(csv_rows)

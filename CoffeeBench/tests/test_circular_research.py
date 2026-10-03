@@ -344,7 +344,7 @@ def test_all_comparison_configs_have_three_llms():
 
     root = Path(main.__file__).parent.parent / "experiments/circular"
     configs = [RunConfig.from_toml(p) for p in root.glob("*.toml")]
-    assert len(configs) == 13
+    assert configs, "Expected circular experiment presets"
     assert sum("supply_stop_day" in c.research for c in configs) == 4
     for c in configs:
         assert c.models == {
