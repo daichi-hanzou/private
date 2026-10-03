@@ -78,9 +78,16 @@ uv run python -m tools.inspect_lot_cycles trajectories/minimal_revenue_zero/seed
 
 ## Azureで実行
 
-`.env.example`のAzure欄にリソースのルートURL、正確なAPIバージョン、デプロイ名を設定し、
+`.env.example`を参考に、`.env`のAzure欄へリソースのルートURLとデプロイ名を設定し、
 `az login`等でDefaultAzureCredentialが利用できるIDを認証してください。
-APIキーや基盤モデル名は不要です。Chat Completionsを使用し、トークンは期限前に更新します。
+APIキーや基盤モデル名、日付付きAPIバージョンは不要です。独立したAzureアダプターで
+v1 Responses APIを使用し、トークンは期限前に更新します。エンドポイントには
+`https://リソース名.openai.azure.com` のようなルートURLを指定してください。
+コード側で `/openai/v1/` を追加します。既存の `AZURE_OPENAI_API_VERSION` は参照しません。
+SDKの `api_key` 引数にはEntraトークンを取得する関数を渡しており、APIキー認証ではありません。
+
+更新後は `uv sync --locked` で依存関係を同期してください。ロック済みのバージョンは
+`openai==2.14.0`、`azure-identity==1.25.3` です。
 
 ```bash
 uv run python -m coffeebench.main --config experiments/minimal/revenue_zero.toml --model azure:low --seed 0
@@ -88,8 +95,9 @@ uv run python -m coffeebench.main --config experiments/minimal/revenue_zero.toml
 
 4条件はすべて同じAzureデプロイで比較してください。別モデルの出力と混ざらないよう、
 実行前に既存の同条件・seedの出力を退避してください。費用は保存結果でnull（不明）です。
-`low`はreasoning_effort、出力上限はmax_completion_tokensとして送ります。
-対応するモデル/APIバージョンが必要です。実環境の接続は未検証です。
+`low`は `reasoning.effort`、出力上限は `max_output_tokens` として送ります。
+推論項目とツール呼び出し・結果を次回の履歴に引き継ぎます。
+Responsesと指定した推論強度に対応するデプロイが必要です。実環境の接続は未検証です。
 
 ## Azure・25日間・4日目から需要20％
 
@@ -97,7 +105,7 @@ uv run python -m coffeebench.main --config experiments/minimal/revenue_zero.toml
 uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_day4_25days_azure.toml --seed 0
 ```
 
-全6社は売上KPI、元のReAct方式、azure:offです。供給・在庫・価格・支払条件は変更しません。
+全6社は売上KPI、元のReAct方式、azure:lowです。供給・在庫・価格・支払条件は変更しません。
 1〜3日目は通常需要、4〜25日目は通常モデルが計算する弾力的需要と固定客需要をそれぞれ0.2倍します。
 数量は元の整数kg単位へ丸めるため、実際の販売量が厳密に20％になるとは限りません。
 消費者の需要だけを減らし、企業間取引の数量には掛けません。事前告知プロンプトは追加しません。
@@ -140,11 +148,12 @@ uv run python -m tools.render_lot_report trajectories/実験名/seed_0/run.json
 `trajectories/minimal_revenue_target_demand20_day4_25days_azure/seed_0/` に変更しています。
 同じ条件・seedで再実行する際は、既存結果を退避してください。
 
-## Azureのreasoningパラメーターを省略
+## Azureの推論強度
 
-25日間のAzure設定は `default = "azure:off"` に変更しています。
+25日間のAzure設定は `default = "azure:low"` です。
+推論指定を省略したい場合は `--model azure:off` を使用できます。
 `off` はこのアプリ側の指定で、APIに送る値ではありません。
-通常の行動判断と履歴要約の両方で `reasoning_effort` キーを省略し、
+通常の行動判断と履歴要約の両方で `reasoning` キーを省略し、
 モデル側の既定動作を使います。モデル内部の推論を無効化する意味ではありません。
 CLIで切り替える場合は `--model azure:off`、以前の指定に戻す場合は `--model azure:low` を使います。
 その他のパラメーターに起因する400やコンテンツフィルターの拒否は別の問題です。
