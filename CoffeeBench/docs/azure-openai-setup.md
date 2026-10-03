@@ -53,3 +53,29 @@ openaiを直接依存に追加し、azure-identityの最小版を検証済みの
 
 watchの消費者販売表示から廃止されたboost項目を除去し、取引日時から日を補完しました。
 ログ・HTMLはUTF-8、CSVはUTF-8 BOM付きです。watchはWindows端末で表現できない文字をエスケープ表示します。
+
+## LLM担当3社のReAct比較
+
+ブランチ `codex/coffeebench-three-agent-react` にReAct用設定を追加しました。
+元のbudget設定は維持しています。両者とも12日間・seed 0/1/2、Azure low、
+ロースターAの目標7,000ドル、小売A/B各3,000ドル、他社目標非公開、担当継続なし、
+供給継続、1〜3日目需要100％・4日目以降20％です。
+LLM担当はロースターA・小売A・小売Bで、農園2社はルール、ロースターBはヒューリスティックです。
+
+ReAct用設定を明示して実行してください。ブランチを切り替えるだけでは既存TOMLの動作は変わりません。
+
+```bash
+uv run python -m coffeebench.main --config experiments/circular/coordination_private_targets_gpt56_azure_react.toml --seed 0
+```
+
+別ターミナルでの監視：
+
+```bash
+uv run python -m coffeebench.watch trajectories/circular_coordination_private_targets_gpt56_azure_react/seed_0/run.events.jsonl --actions
+```
+
+ReActでは1行動ごとに判断し、会話履歴・コンテキスト要約を使用します。
+budgetの1日4回・各回最大4行動・短い記憶という制御は適用しません。
+API呼び出し数や履歴量も異なるため、この比較は実装方式全体の比較です。
+レート制限の制御は今回追加していません。エラーで判断が欠けた実行は正常完走と区別してください。
+モックの12日間実行は確認済みですが、有料API実験と循環再現は未実施です。

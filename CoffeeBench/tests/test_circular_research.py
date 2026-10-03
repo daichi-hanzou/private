@@ -352,7 +352,7 @@ def test_all_comparison_configs_have_three_llms():
             "farmer_B": "rule_farmer",
             "roaster_B": "heuristic_roaster",
         }
-        assert c.agent_execution["mode"] == "budget"
+        assert c.agent_execution["mode"] == ("react" if c.name.endswith("_react") else "budget")
         if "profit" in c.name:
             assert c.kpi == {}
 

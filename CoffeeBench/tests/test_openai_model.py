@@ -369,3 +369,36 @@ def test_azure_off_omits_reasoning(client, monkeypatch):
     model.query([])
     model.summarize('summary', 'history')
     assert all('reasoning' not in c.kwargs for c in client.responses.create.call_args_list)
+
+
+def test_three_llm_react_preset_matches_budget_and_runs(client, monkeypatch, tmp_path):
+    from coffeebench.config import RunConfig
+    from coffeebench.agent import Agent
+    from coffeebench.rule_farmer import RuleFarmerAgent
+    root = Path(__file__).resolve().parents[1] / 'experiments/circular'
+    budget = RunConfig.from_toml(root / 'coordination_private_targets_gpt56_azure.toml')
+    config = root / 'coordination_private_targets_gpt56_azure_react.toml'
+    react = RunConfig.from_toml(config)
+    for key in ('models', 'default_model', 'research', 'kpi', 'max_days', 'seeds', 'economy'):
+        assert getattr(react, key) == getattr(budget, key)
+    assert react.agent_execution == {'mode': 'react'}
+    assert react.name != budget.name
+    configure_azure(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    client.responses.create.return_value = response('wait_for_next_day', {})
+    env, path, _ = main.build_run(NS(config=str(config), seed=0, max_days=None, model=None,
+        models=None, main_agent=None, agent_mode=None, run_name=None, overwrite=False))
+    assert react.name in str(path)
+    for aid in ('roaster_A', 'retailer_A', 'retailer_B'):
+        assert type(env.agents[aid]) is Agent
+        assert env.agents[aid].compactor is not None
+    for aid in ('farmer_A', 'farmer_B'):
+        assert isinstance(env.agents[aid], RuleFarmerAgent)
+    assert env.agents['roaster_B'].model.model == 'heuristic_roaster'
+    env.verbose = False
+    result = asyncio.run(env.run())
+    assert result['agent_execution']['mode'] == 'react'
+    assert client.responses.create.call_count > 0
+    for call in client.responses.create.call_args_list:
+        assert call.kwargs['reasoning']['effort'] == 'low'
+        assert all(t['name'] != 'submit_plan' for t in call.kwargs['tools'])
