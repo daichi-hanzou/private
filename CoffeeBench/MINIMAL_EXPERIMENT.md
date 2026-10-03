@@ -157,3 +157,17 @@ uv run python -m tools.render_lot_report trajectories/実験名/seed_0/run.json
 モデル側の既定動作を使います。モデル内部の推論を無効化する意味ではありません。
 CLIで切り替える場合は `--model azure:off`、以前の指定に戻す場合は `--model azure:low` を使います。
 その他のパラメーターに起因する400やコンテンツフィルターの拒否は別の問題です。
+
+
+## 現在の実験：6社ReAct・12日間・目標公開
+
+```bash
+uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_day4_12days_public_targets_azure.toml --seed 0
+```
+
+全6社がAzure（推論強度low）でReActを実行します。1〜3日目は通常需要、4〜12日目は20％です。
+12日間の売上目標はロースターAが7,000ドル、小売A・Bが各3,000ドルです。
+農園A・BとロースターBは数値目標を設定せず、売上最大化をKPIとします。
+`[run] public_revenue_targets = true` により、全社のKPIと目標額を全6社のシステムプロンプトに載せます。
+他社の実績や不足額のリアルタイム公開は追加していません。falseにすると目標非公開へ戻せます。
+従来の25日間・目標非公開の設定は比較用に残しています。出力は別の実験名に保存されます。

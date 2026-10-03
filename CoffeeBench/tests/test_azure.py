@@ -66,7 +66,7 @@ def test_responses_request_and_refresh(azure, effort):
         model.client.close()
 
 
-@pytest.mark.parametrize("preset,days", [("revenue_zero",12), ("revenue_demand20_day4_25days_azure",25)])
+@pytest.mark.parametrize("preset,days", [("revenue_zero",12), ("revenue_demand20_day4_25days_azure",25), ("revenue_demand20_day4_12days_public_targets_azure",12)])
 def test_azure_react_twelve_days(azure, monkeypatch, tmp_path,preset,days):
     client = Mock()
     client.responses.create.return_value = NS(

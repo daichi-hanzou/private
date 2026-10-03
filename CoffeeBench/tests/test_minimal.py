@@ -83,6 +83,7 @@ def test_scaled_private_targets_in_actual_prompts(monkeypatch, tmp_path):
     env, output, _ = main.build_run(SimpleNamespace(config=str(config), model='passive',
                             models=None, seed=0, max_days=None, main_agent=None))
     assert env.max_days == 25
+    assert all('Public performance goals' not in a.system_prompt for a in env.agents.values())
     assert 'minimal_revenue_target_' in str(output)
     targets = {'roaster_A': 14600, 'retailer_A': 6250, 'retailer_B': 6250}
     for aid, target in targets.items():
@@ -103,3 +104,26 @@ def test_scaled_private_targets_in_actual_prompts(monkeypatch, tmp_path):
 def test_revenue_target_requires_positive_finite_amount(target):
     with pytest.raises(ValueError):
         main._build_score_framing({'metric': 'revenue_target', 'target_usd': target}, 25)
+
+
+def test_public_twelve_day_goals_reach_all_six_agents(monkeypatch, tmp_path):
+    config = ROOT / 'experiments/minimal/revenue_demand20_day4_12days_public_targets_azure.toml'
+    c = RunConfig.from_toml(config)
+    assert c.public_revenue_targets is True
+    assert c.max_days == 12 and c.default_model == 'azure:low'
+    assert c.economy['consumer_demand_change_day'] == 3
+    assert c.economy['consumer_demand_multiplier'] == 0.2
+    monkeypatch.chdir(tmp_path)
+    env, output, _ = main.build_run(SimpleNamespace(config=str(config), model='passive',
+                            models=None, seed=0, max_days=None, main_agent=None))
+    assert len(env.agents) == 6 and env.max_days == 12
+    assert '12days_public_targets' in str(output)
+    for agent in env.agents.values():
+        prompt = agent.system_prompt
+        assert 'Public performance goals for this 12-day run' in prompt
+        for aid, target in [('roaster_A', 7000), ('retailer_A', 3000), ('retailer_B', 3000)]:
+            assert f'{aid}: cumulative revenue target ${target:,.2f}' in prompt
+        for aid in ['farmer_A', 'farmer_B', 'roaster_B']:
+            assert f'{aid}: maximize revenue, net of returns; no numeric target' in prompt
+    if env.event_logger is not None:
+        env.event_logger.close()

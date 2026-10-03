@@ -734,6 +734,23 @@ def build_run(
                 operational_mechanics=_operational_mechanics_block(),
                 score_framing=_build_score_framing(kpi_for_agent, max_days=max_days),
             )
+            if config and config.public_revenue_targets:
+                public_goals = []
+                for aid, peer_kpi in sorted(kpi_map.items()):
+                    metric = peer_kpi.get("metric", "net_income")
+                    if metric == "revenue_target":
+                        # Validate public amounts with the same rules as private goals.
+                        _build_score_framing(peer_kpi, max_days)
+                        goal = f"cumulative revenue target ${float(peer_kpi['target_usd']):,.2f}, net of returns"
+                    elif metric == "revenue":
+                        goal = "maximize revenue, net of returns; no numeric target"
+                    else:
+                        goal = _build_score_framing(peer_kpi, max_days)
+                    public_goals.append(f"- {aid}: {goal}")
+                prompt += (
+                    f"\nPublic performance goals for this {max_days}-day run "
+                    "(shared with all firms):\n" + "\n".join(public_goals)
+                )
             model_id = model_map[endow.agent_id]
             model = get_model(model_id)
             # Long-horizon (full-year) runs blow past every provider's

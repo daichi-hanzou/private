@@ -33,6 +33,7 @@ class RunConfig:
     # Truth-ledger leaderboard score is unaffected by this — it tells
     # the agent what to optimise for, not what is reported.
     kpi: dict[str, dict[str, Any]] = field(default_factory=dict)
+    public_revenue_targets: bool = False
     # path the config was loaded from (for snapshot copying)
     source_path: str | None = None
 
@@ -65,6 +66,9 @@ class RunConfig:
                 print(f"[config] WARN: ignoring kpi[{aid}] (must be str or table)")
 
         name = exp.get("name") or path.stem
+        public_targets = run.get("public_revenue_targets", False)
+        if type(public_targets) is not bool:
+            raise ValueError("run.public_revenue_targets must be a boolean")
         main_agent_raw = run.get("main_agent")
         return cls(
             name=str(name),
@@ -77,6 +81,7 @@ class RunConfig:
             kpi=kpi,
             main_agent=str(main_agent_raw) if main_agent_raw else None,
             source_path=str(path),
+            public_revenue_targets=public_targets,
         )
 
     def output_dir_for_seed(self, seed: int, root: str = "trajectories") -> Path:
