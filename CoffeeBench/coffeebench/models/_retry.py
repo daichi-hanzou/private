@@ -79,17 +79,15 @@ def _is_context_overflow(exc: BaseException) -> bool:
 def call_with_retry(
     fn: Callable[[], T],
     *,
-    max_attempts: int = 6,
+    max_attempts: int = 20,
     base_delay: float = 4.0,
     max_delay: float = 60.0,
     label: str = "api",
 ) -> T:
     """Run `fn()` and retry on transient API errors with backoff + jitter.
 
-    Total wait across attempts is bounded — at base_delay=4 and 6 attempts
-    the worst case is ~120 s before giving up, which is plenty for the
-    common rate-limit and timeout cases without making the run hang on
-    a real outage.
+    With the defaults, up to 20 calls are attempted (including the first).
+    Backoff waits total at most about 17.3 minutes, excluding API call time.
     """
     last_exc: BaseException | None = None
     for attempt in range(1, max_attempts + 1):
