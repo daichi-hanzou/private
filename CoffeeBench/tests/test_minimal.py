@@ -33,11 +33,11 @@ def test_boolean_validation():
         RunConfig(name="bad", economy={"consumer_demand_enabled": "false"}).apply_economy_overrides()
 
 
-def test_reciprocal_screen_excludes_lost_and_other_items():
+def test_reciprocal_screen_excludes_lost_and_includes_other_items():
     def e(seller, buyer, item="coffee", type="deal_delivered"):
         return dict(type=type, seller=seller, buyer=buyer, item_id=item, received_qty=2)
     assert inspect([e("a", "b"), e("b", "a", type="delivery_lost")])["reciprocal_pair_count"] == 0
-    assert inspect([e("a", "b"), e("b", "a", item="other")])["reciprocal_pair_count"] == 0
+    assert inspect([e("a", "b"), e("b", "a", item="other")])["reciprocal_pair_count"] == 1
     assert inspect([e("a", "b"), e("b", "a")])["reciprocal_pair_count"] == 1
 
 

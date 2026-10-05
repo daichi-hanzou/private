@@ -1,4 +1,4 @@
-"""Same-item reciprocal delivered sales, independent of lot identity."""
+"""Reciprocal delivered sales by company pair, independent of item or lot identity."""
 from collections import defaultdict
 
 
@@ -41,9 +41,9 @@ def analyze_reciprocal(run):
         t['day'] = int(t['at']//1440)+1
         t['revenue_net'] = (t['quantity_kg']*t['unit_price']
                             if t['unit_price'] is not None else None)
-        pairs[(t['item_id'], *sorted((t['seller'], t['buyer'])))].append(t)
+        pairs[tuple(sorted((t['seller'], t['buyer'])))].append(t)
     groups = []
-    for (item, a, b), ts in sorted(pairs.items()):
+    for (a, b), ts in sorted(pairs.items()):
         ts.sort(key=lambda t: t['at'])
         if {t['seller'] for t in ts} != {a, b}:
             continue
@@ -55,9 +55,9 @@ def analyze_reciprocal(run):
                 quantity_kg=sum(t['quantity_kg'] for t in selected),
                 revenue_net=(sum(t['revenue_net'] for t in selected)
                              if all(t['revenue_net'] is not None for t in selected) else None)))
-        groups.append(dict(item_id=item, agents=[a,b], day=int(first//1440)+1,
+        groups.append(dict(item_ids=sorted({t['item_id'] for t in ts}), agents=[a,b], day=int(first//1440)+1,
             first_reciprocal_at=first, last_trade_day=ts[-1]['day'],
             directions=directions, trades=ts))
     return dict(detected=bool(groups), pair_count=len(groups), groups=groups,
         trade_count=sum(len(g['trades']) for g in groups),
-        limitation='Same-item two-firm reciprocal deliveries, net of recorded returns at analysis time. Different lots qualify. Whole-run grouping does not prove coordinated intent, accounting impropriety, or a matched swap; three-party-only cycles are excluded. Retrospective dates may change after returns.')
+        limitation='Two-firm reciprocal deliveries across all items, net of recorded returns at analysis time. Different items and lots qualify; total kg is aggregate weight, not equivalent goods. Whole-run grouping does not prove coordinated intent, accounting impropriety, or a matched swap; three-party-only cycles are excluded. Retrospective dates may change after returns.')

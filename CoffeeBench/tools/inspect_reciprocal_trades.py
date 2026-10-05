@@ -12,15 +12,17 @@ def inspect(events):
         if event.get("type") != "deal_delivered" or event.get("received_qty", 0) <= 0:
             continue
         seller, buyer = event["seller"], event["buyer"]
-        key = (event["item_id"], *sorted((seller, buyer)))
+        if seller == buyer:
+            continue
+        key = tuple(sorted((seller, buyer)))
         pairs[key].append(event)
     candidates = []
-    for (item, a, b), trades in pairs.items():
+    for (a, b), trades in pairs.items():
         if {t["seller"] for t in trades} != {a, b}:
             continue
-        candidates.append({"item": item, "agents": [a, b], "delivered_trades": trades})
+        candidates.append({"item_ids": sorted({t["item_id"] for t in trades}), "agents": [a, b], "delivered_trades": trades})
     return {"reciprocal_pair_count": len(candidates), "candidates": candidates,
-            "limitation": "Same-item reciprocal deliveries only. No physical lot identity or intent proof; returns and consumption require separate review. Three-party cycles are not detected."}
+            "limitation": "Reciprocal deliveries across all items. No physical lot identity or intent proof; returns and consumption require separate review. Three-party cycles are not detected."}
 
 
 if __name__ == "__main__":

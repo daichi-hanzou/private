@@ -11,7 +11,7 @@ body{font:15px system-ui;margin:24px auto;padding:0 20px;max-width:1200px;color:
 <section><h2 id="dayTitle"></h2><div class="scroll" id="revenue"></div><h2>相互販売</h2><p id="summary"></p><label>相互販売を選択 <select id="cycle"></select></label><div id="detail"></div></section>
 <section><h2>LLM同士の送信メッセージ全文</h2><label><input type="checkbox" id="allMessages">選択日の全社メッセージを表示</label><label>前後の表示日数 <select id="window"><option value="0">当日のみ</option><option value="1" selected>前後1日</option><option value="3">前後3日</option><option value="99999">全期間</option></select></label>
 <p class="muted">相互販売選択時は、最初の売買から最後の関連配送までの期間に前後日数を加え、関係会社間の会話を表示します。「取引参照あり」は取引・出品・オファーIDの一致、それ以外は時期と会社による候補です。会話がその取引の原因とは断定しません。内部推論の表示ではありません。</p><div id="messages"></div></section>
-<p class="muted">同じ商品を同じ2社が双方に配送した取引を、全期間で集計します。ロット一致は不要です。数量は分析時点の返品控除後で、全量返品は除外します。通常の相互販売も含み、不適切な会計処理や売上目的の合意を自動判定するものではありません。3社だけで閉じる循環は対象外です。</p>
+<p class="muted">商品を問わず同じ2社が双方に配送した取引を、全期間で集計します。商品・ロットの一致は不要です。合計kgは異なる商品の重量の合計で、価値や用途が同等とは限りません。数量は分析時点の返品控除後で、全量返品は除外します。通常の相互販売も含み、不適切な会計処理や売上目的の合意を自動判定するものではありません。3社だけで閉じる循環は対象外です。</p>
 <details><summary>補助情報：同一ロットの循環</summary><p id="lotSummary"></p></details>
 <script id="data" type="application/json">__REPORT_DATA__</script><script>
 const D=JSON.parse(document.getElementById('data').textContent), $=id=>document.getElementById(id);
@@ -33,8 +33,8 @@ $('chart').onclick=e=>{const rect=$('chart').getBoundingClientRect();chooseDay(M
 function chooseDay(d){day=d;selected=D.reciprocal.groups.findIndex(c=>c.day===day);render();}
 function render(){draw();$('dayTitle').textContent=`${day}日目の売上高（USD）`;$('revenue').replaceChildren();table(['会社','当日売上','当日企業間','当日消費者','累計'],agents.map(a=>[a,...['daily','b2b','consumer','cumulative'].map(k=>money(D.series[a][k][day-1]))]),$('revenue'));
 for(const b of $('dayButtons').children)b.setAttribute('aria-pressed',Number(b.dataset.day)===day);
-$('cycle').value=selected;$('summary').textContent=`全期間：${D.reciprocal.pair_count}組（会社ペア×商品） ／ 関連配送 ${D.reciprocal.trade_count}件 ／ ${day}日目の初回成立：${D.reciprocal.groups.filter(c=>c.day===day).length}件`;
-$('detail').replaceChildren();const c=D.reciprocal.groups[selected];if(c){node('h3',`${c.item_id}：${c.agents.join(' ↔ ')}`,$('detail'));node('p',`相互販売の初回成立：${time(c.first_reciprocal_at)}。表は全期間の関連取引で、数量は返品控除後です。`,$('detail'));table(['売り手','買い手','配送件数','返品控除後数量','返品控除後売上'],c.directions.map(t=>[t.seller,t.buyer,t.trade_count,`${t.quantity_kg} kg`,t.revenue_net==null?'記録なし':money(t.revenue_net)]),$('detail'));table(['取引ID','契約時刻','配送・売上計上時刻','売り手 → 買い手','取引数量','単価'],c.trades.map(t=>[t.deal_id,time(t.accepted_at),time(t.at),`${t.seller} → ${t.buyer}`,`${t.quantity_kg} kg`,t.unit_price==null?'記録なし':money(t.unit_price)]),$('detail'));}else node('p','この日は相互販売の完了記録がありません。',$('detail'));renderMessages();}
+$('cycle').value=selected;$('summary').textContent=`全期間：${D.reciprocal.pair_count}組（会社ペア） ／ 関連配送 ${D.reciprocal.trade_count}件 ／ ${day}日目の初回成立：${D.reciprocal.groups.filter(c=>c.day===day).length}件`;
+$('detail').replaceChildren();const c=D.reciprocal.groups[selected];if(c){node('h3',`${c.item_ids.join(', ')}：${c.agents.join(' ↔ ')}`,$('detail'));node('p',`相互販売の初回成立：${time(c.first_reciprocal_at)}。表は全期間の関連取引で、数量は返品控除後です。`,$('detail'));table(['売り手','買い手','配送件数','返品控除後の合計重量','返品控除後売上'],c.directions.map(t=>[t.seller,t.buyer,t.trade_count,`${t.quantity_kg} kg`,t.revenue_net==null?'記録なし':money(t.revenue_net)]),$('detail'));table(['取引ID','商品ID','契約時刻','配送・売上計上時刻','売り手 → 買い手','取引数量','単価'],c.trades.map(t=>[t.deal_id,t.item_id,time(t.accepted_at),time(t.at),`${t.seller} → ${t.buyer}`,`${t.quantity_kg} kg`,t.unit_price==null?'記録なし':money(t.unit_price)]),$('detail'));}else node('p','この日は相互販売の完了記録がありません。',$('detail'));renderMessages();}
 function renderMessages(){const c=$('allMessages').checked?null:D.reciprocal.groups[selected],w=Number($('window').value),parties=new Set(c?c.agents:[]);
 const start=c?Math.min(...c.trades.map(t=>Math.floor((t.accepted_at??t.at)/1440)+1)):day,end=c?c.last_trade_day:day;
 const linked=m=>!!c&&c.trades.some(t=>[['ref_deal_id','deal_id'],['ref_listing_id','listing_id'],['ref_offer_id','offer_id']].some(([a,b])=>m[a]&&t[b]&&m[a]===t[b]));
@@ -43,6 +43,6 @@ $('messages').replaceChildren();node('p',`${ms.length}件：${c?'相互販売の
 ms.forEach(m=>{const box=node('article',null,$('messages'));box.className='message';node('strong',`${time(m.sent_at)} ｜ ${m.sender_id} → ${m.recipient_id}`,box);node('p',`${linked(m)?'取引参照あり':'周辺の会話'} ｜ ${m.title}`,box);node('pre',m.body,box);node('small',`メッセージID：${m.id}`,box);});}
 agents.forEach((a,i)=>{const s=node('span',`${a}　`,$('legend'));s.style.color=colors[i%colors.length];});
 for(let d=1;d<=D.days;d++){const b=node('button',`${d}日目`,$('dayButtons'));b.dataset.day=d;b.onclick=()=>chooseDay(d);}
-node('option','日付を選択（相互販売未選択）',$('cycle')).value=-1;D.reciprocal.groups.forEach((c,i)=>node('option',`${c.day}日目に初回成立・${c.item_id}・${c.agents.join(' ↔ ')}`,$('cycle')).value=i);
+node('option','日付を選択（相互販売未選択）',$('cycle')).value=-1;D.reciprocal.groups.forEach((c,i)=>node('option',`${c.day}日目に初回成立・${c.item_ids.join(', ')}・${c.agents.join(' ↔ ')}`,$('cycle')).value=i);
 $('cycle').onchange=()=>{selected=Number($('cycle').value);if(selected>=0)day=D.reciprocal.groups[selected].day;render();};$('metric').onchange=draw;$('allMessages').onchange=renderMessages;$('window').onchange=renderMessages;chooseDay(1);
 </script></html>
