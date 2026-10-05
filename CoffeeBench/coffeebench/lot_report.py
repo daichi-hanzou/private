@@ -2,11 +2,10 @@
 import json
 from pathlib import Path
 from coffeebench.provenance import analyze_cycles
+from coffeebench.reciprocal import analyze_reciprocal
 
 
 def build_report_data(run):
-    if 'provenance' not in run:
-        raise ValueError('Lot history is missing; re-run with lot tracking enabled.')
     ledger = run.get('truth_ledger', {})
     days = max([run.get('final_day', 0) + 1] +
                [e['day'] + 1 for entries in ledger.values() for e in entries])
@@ -26,7 +25,7 @@ def build_report_data(run):
         series[aid] = dict(daily=daily, cumulative=cumulative, consumer=consumer, b2b=b2b)
     marketplace = run.get('marketplace', {})
     deals = {d['id']: d for d in marketplace.get('deals', [])}
-    events = {e['seq']: e for e in run['provenance']['events']}
+    events = {e['seq']: e for e in run.get('provenance', {}).get('events', [])}
     cycles = analyze_cycles(list(events.values()))
     for c in cycles['cycles']:
         c['day'] = c['completed_at'] // 1440 + 1
@@ -39,7 +38,7 @@ def build_report_data(run):
                 quantity_kg=len(e['unit_ids']), unit_price=e.get('unit_price'),
                 accepted_at=d.get('deal_at'), listing_id=d.get('listing_id'),
                 offer_id=d.get('offer_id')))
-    return dict(days=days, series=series, cycles=cycles,
+    return dict(days=days, series=series, cycles=cycles, lot_history_available='provenance' in run, reciprocal=analyze_reciprocal(run),
                 messages=sorted(marketplace.get('messages', []), key=lambda m: m['sent_at']))
 
 

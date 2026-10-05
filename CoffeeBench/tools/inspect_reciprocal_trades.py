@@ -3,6 +3,7 @@ import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
+from coffeebench.reciprocal import analyze_reciprocal
 
 
 def inspect(events):
@@ -26,4 +27,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("events", type=Path)
     args = parser.parse_args()
-    print(json.dumps(inspect(json.loads(line) for line in args.events.read_text().splitlines() if line.strip()), indent=2))
+    text = args.events.read_text(encoding="utf-8")
+    if args.events.suffix == '.jsonl':
+        result = inspect(json.loads(line) for line in text.splitlines() if line.strip())
+    else:
+        result = analyze_reciprocal(json.loads(text))
+    print(json.dumps(result, indent=2, ensure_ascii=False))

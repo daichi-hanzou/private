@@ -64,5 +64,5 @@ def test_report_with_cp932_default_encoding(tmp_path, monkeypatch):
     output = tmp_path / 'report.html'
     write_report(sample(), output)
     html = output.read_text(encoding='utf-8')
-    assert '売上・ロット循環・LLM間メッセージ' in html
+    assert '売上・相互販売・LLM間メッセージ' in html
     assert '3kgあります' in html
