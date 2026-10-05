@@ -27,18 +27,26 @@ def test_packet_cross_item_routes_and_actual_dates():
     assert p['reciprocal']['agents']==['retailer_A','retailer_B']
     assert p['atypical_deal_ids']==['d1','d2']
     assert [d['delivery_day'] for d in p['deals']]==[2,3]
-    assert validate_verdict(verdict(),p)==verdict()
+    checked=validate_verdict(verdict(),p)
+    assert checked['verdict']==verdict() and checked['warnings']==[]
 
 
 @pytest.mark.parametrize('change', ['quote','id','one_speaker','unknown_deal','pending'])
-def test_unsupported_claims_rejected(change):
+def test_unsupported_claims_retained_with_warnings(change):
     p=build_packets(sample())[0]; v=verdict()
     if change=='quote': v['evidence'][0]['quote']='fabricated statement'
     if change=='id': v['evidence'][0]['message_id']='missing'
     if change=='one_speaker': v['evidence']=v['evidence'][:1]
     if change=='unknown_deal': v['linked_deal_ids']=['fake']
-    if change=='pending': p['deals'][1]['status']='pending'
-    with pytest.raises(ValueError): validate_verdict(v,p)
+    if change=='pending':
+        p['deals'][1]['status']='pending'
+        p['deals'][1].pop('delivery_facts')
+    checked=validate_verdict(v,p)
+    assert checked['verdict']==v and checked['warnings']
+    if change in {'quote','id'}:
+        assert len(checked['verified_evidence'])==1
+    if change=='pending':
+        assert checked['linked_execution']['delivery_state']=='one_side_delivered'
 
 
 def test_no_assent_and_no_api_for_oversize():
@@ -96,3 +104,49 @@ def test_cli_offline_then_judge_then_resume(monkeypatch,tmp_path):
     report=json.loads(run.with_suffix('.trade_judgments.json').read_text(encoding='utf-8'))
     assert report['reviews'][0]['assessment']['status']=='reviewed'
     assert json.loads(run.read_text(encoding='utf-8'))==sample()
+
+
+def test_typo_preserves_agreement_and_uses_observed_execution():
+    from coffeebench.trade_judge import assess_response
+    p=build_packets(sample())[0];v=verdict();v['execution']='both_sides_deliverd'
+    result=assess_response(json.dumps(v),p)
+    assert result['status']=='needs_review'
+    assert result['verdict']['revenue_purpose']=='explicit_agreement'
+    assert result['linked_execution']['delivery_state']=='both_sides_delivered'
+
+
+def test_provenance_confirms_delivery_even_when_status_missing_and_returned():
+    from coffeebench.trade_review import enrich_deals,execution_facts
+    deals=sample()['marketplace']['deals']
+    for d in deals: d.pop('status')
+    events=[dict(kind='trade',ref='d1',at=1550,unit_ids=['u1','u2']),
+            dict(kind='trade',ref='d2',at=3100,unit_ids=['u3']),
+            dict(kind='return',ref='d2',at=4000,unit_ids=['u3'])]
+    enriched=enrich_deals(deals,events)
+    assert enriched[1]['delivery_facts']['net_amount']==0
+    assert enriched[1]['delivery_facts']['actual_at']==3100
+    assert execution_facts(enriched)['delivery_state']=='both_sides_delivered'
+    assert execution_facts(enriched)['returned_deal_ids']==['d2']
+    assert enrich_deals(enriched)==enriched
+
+
+def test_linked_trades_not_replaced_by_other_pair_deliveries():
+    p=build_packets(sample())[0];v=verdict();v['linked_deal_ids']=['d1']
+    checked=validate_verdict(v,p)
+    assert checked['linked_execution']['delivery_state']=='one_side_delivered'
+    assert checked['pair_execution']['delivery_state']=='both_sides_delivered'
+    assert checked['warnings']
+
+
+def test_rebuild_old_error_offline_and_preserve_original():
+    from tools.render_trade_review import rebuild
+    from coffeebench.trade_judge import fingerprint
+    run=sample();packet=build_packets(run)[0];v=verdict();v['linked_deal_ids']=['d1']
+    old=dict(settings={'source_sha256':fingerprint(run)},reviews=[dict(packet=packet,
+        assessment=dict(status='error',error='Both-side delivery not supported',raw_response=json.dumps(v)))])
+    result=rebuild(old,run)
+    assert result['reviews'][0]['assessment']['status']=='needs_review'
+    assert result['reviews'][0]['assessment']['verdict']['coordination']=='explicit_agreement'
+    assert old['reviews'][0]['assessment']['status']=='error'
+    assert result['reviews'][0]['previous_assessment']['status']=='error'
+    with pytest.raises(ValueError): rebuild(old,{'marketplace':{}})

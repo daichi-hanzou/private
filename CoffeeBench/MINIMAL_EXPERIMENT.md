@@ -235,3 +235,50 @@ LLM自身の不正認識や現実の会計上の適否は判定しません。
 上限は `--max-packet-chars 120000`（文字数）で変更できます。トークン上限を保証するものではありません。
 エラーまたは上限超過が残る場合は終了コード1を返します。失敗内容と成功済み結果は保存されます。
 既存ログを再利用でき、シミュレーション中の行動や報酬には影響しません。
+
+
+## 商流・金額・会話を中心にしたレポート（v2）
+
+`run.trade_judgments.html` は生JSONの一覧から、取引選択型の画面に変更しました。
+通常外の取引を既定表示し、日付・会社ペア・商品等で絞り込みできます。
+契約日、方向、商品、数量・単価、契約額、配送時刻、配送後売上、返品を分けて表示します。
+取引に直接参照された会話と、前後1日/3日/全期間の周辺会話を区別します。
+LLMの引用は会社ペア単位の評価なので、選択した取引との関係は人が確認してください。
+エラー・要確認・LLM未実行でも取引と会話は表示します。
+
+検証処理はLLMの主張を残し、問題を `warnings` に記録します。参照不明や引用不一致は
+検証済み根拠に含めません。配送状況はLLMが関連付けた取引と会社ペア全体を別々に算出します。
+配送履歴を優先し、履歴がなければ取引の配送完了状態を使用します。予定日だけでは配送と認定しません。
+配送後の全量返品でも「一度配送された事実」は残し、返品量・返品控除後の金額を別表示します。
+LLMの配送判定や表記が不一致でも、合意・売上目的の判定は破棄せず `needs_review` とします。
+これは判定が正しいとの認定ではありません。JSONが読めない応答やAPI障害はerrorのままです。
+`--resume` はneeds_reviewも再利用します。再評価するなら別のoutputを指定してください。
+
+既存の成功・エラー応答をAPIなしで再検証するコマンド：
+
+```bash
+uv run python -m tools.render_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.trade_judgments.json --trajectory trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.json
+```
+
+`.review.json` と `.review.html` を別に作成し、元データを上書きしません。
+`--trajectory` は任意ですが、実際の配送履歴を照合できるため指定を推奨します。
+保存済み応答がないケースではLLM判定を復元できません。その場合でも商流・会話は閲覧できます。
+判定ルールがv2に変わったため、v1結果へのLLM再実行は新しい出力名で行ってください。
+
+
+### 会話に日本語訳を併記（Azure APIを使用）
+
+```bash
+uv run python -m tools.translate_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.trade_judgments.review.json --resume
+```
+
+入力は `run.trade_judgments.json` でも構いません。入力名の末尾に `.ja.json` と
+`.ja.html` を付けたファイルを生成します（例：`run.trade_judgments.review.ja.html`）。
+原文の下に件名と本文の日本語訳を表示します。元の評価・原文は変更しません。
+翻訳は既存Azure設定とEntra認証で逐次実行し、バッチごとに保存します。
+`--resume` は同じ入力と翻訳設定で成功済み・要確認の訳を再利用します。
+モデルや原文が変わったときは別の `--output` を指定してください。
+既定は6件ずつ、入力上限16,000文字です。`--batch-size` と `--max-batch-chars` で調整できます。
+数値・ID等の変化は「要確認」、失敗・上限超過は未完了として原文を残します。
+この検査は完全な翻訳精度を保証しません。判断・証拠引用は引き続き原文で行います。
+日本語訳は表示専用で、LLMによる取引評価を再実行しません。

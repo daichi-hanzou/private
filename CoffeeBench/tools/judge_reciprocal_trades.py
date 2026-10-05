@@ -32,8 +32,8 @@ def main():
     if args.resume and path.exists():
         old=json.loads(path.read_text(encoding='utf-8'))
         if old.get('settings')!=settings:
-            parser.error('Resume settings/input differ; use a different output or omit --resume')
-        previous={e['packet']['id']:e for e in old['reviews'] if e['assessment']['status']=='reviewed'}
+            parser.error('Resume settings/input differ; use --output with a new filename. To rebuild old results without API calls, use tools.render_trade_review')
+        previous={e['packet']['id']:e for e in old['reviews'] if e['assessment']['status'] in {'reviewed','needs_review'}}
     if args.judge and packets:
         from coffeebench.models.azure_openai_model import AzureOpenAIModel
         model=AzureOpenAIModel(args.effort)

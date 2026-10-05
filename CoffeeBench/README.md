@@ -79,6 +79,23 @@ uv run python -m tools.judge_reciprocal_trades trajectories/minimal_revenue_targ
 LLM評価は売上チャートとは別のHTMLで、シミュレーションには影響しません。
 異なるseedの結果を分析する場合はパスの `seed_0` を変更してください。
 
+### 見やすい商流レポートの再生成（API呼び出しなし）
+
+既存のLLM評価結果を再検証して、通常外の商流・金額・会話を見られるHTMLにします。
+配送判定の不一致でerrorになった結果も、保存済み回答があれば「要確認」として復元します。
+
+```bash
+uv run python -m tools.render_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.trade_judgments.json --trajectory trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.json
+```
+
+同じ場所の `run.trade_judgments.review.html` をブラウザで開いてください。
+元の評価ファイルは保持し、再検証結果を `run.trade_judgments.review.json` に保存します。
+一覧で取引を選ぶと、経路・商品・契約額・配送後売上・返品と関連会話が連動します。
+商品や会社、契約日で絞り込みできます。既定は契約〜配送の前後1日の会話で、全期間へ切替可能です。
+「通常外」は経路分類、「要確認」はLLMと証拠の不一致であり、不正認定ではありません。
+旧バージョンの結果を新しいLLM評価で再実行する場合は `--output 別名.json` を指定してください。
+
+
 ---
 
 ## Overview
@@ -156,3 +173,21 @@ If you find our work interesting, please consider citing our paper:
       url={https://arxiv.org/abs/2606.16613},
 }
 ```
+
+
+### 会話に日本語訳を併記（Azure APIを使用）
+
+```bash
+uv run python -m tools.translate_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.trade_judgments.review.json --resume
+```
+
+入力は `run.trade_judgments.json` でも構いません。入力名の末尾に `.ja.json` と
+`.ja.html` を付けたファイルを生成します（例：`run.trade_judgments.review.ja.html`）。
+原文の下に件名と本文の日本語訳を表示します。元の評価・原文は変更しません。
+翻訳は既存Azure設定とEntra認証で逐次実行し、バッチごとに保存します。
+`--resume` は同じ入力と翻訳設定で成功済み・要確認の訳を再利用します。
+モデルや原文が変わったときは別の `--output` を指定してください。
+既定は6件ずつ、入力上限16,000文字です。`--batch-size` と `--max-batch-chars` で調整できます。
+数値・ID等の変化は「要確認」、失敗・上限超過は未完了として原文を残します。
+この検査は完全な翻訳精度を保証しません。判断・証拠引用は引き続き原文で行います。
+日本語訳は表示専用で、LLMによる取引評価を再実行しません。
