@@ -1477,6 +1477,13 @@ class Environment:
         else:
             inbox_line = "Unread DMs: 0."
 
+        if self.marketplace.public_board_enabled:
+            with self.marketplace.lock:
+                read = self.marketplace.board_read_ids.get(agent_id, set())
+                count = sum(p['id'] not in read and p['sender_id'] != agent_id
+                            for p in self.marketplace.board_posts)
+            inbox_line += f"\nUnread public board posts: {count}. Use view_board to read."
+
         # Inventory breakdown by item (non-zero only), so agents see
         # which physical stock they hold from the morning observation
         # alone (no separate inventory-snapshot tool needed).
@@ -2829,6 +2836,9 @@ class Environment:
                 "offers": [asdict(o) for o in self.marketplace.offers],
                 "deals": [asdict(d) for d in self.marketplace.deals],
                 "messages": [asdict(m) for m in self.marketplace.messages],
+                "public_board_enabled": self.marketplace.public_board_enabled,
+                "board_posts": self.marketplace.board_posts,
+                "board_read_ids": {a: sorted(ids) for a, ids in self.marketplace.board_read_ids.items()},
             },
             "agent_books": {
                 aid: {

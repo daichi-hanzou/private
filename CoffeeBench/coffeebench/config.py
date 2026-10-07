@@ -34,6 +34,7 @@ class RunConfig:
     # the agent what to optimise for, not what is reported.
     kpi: dict[str, dict[str, Any]] = field(default_factory=dict)
     public_revenue_targets: bool = False
+    public_board_enabled: bool = False
     # path the config was loaded from (for snapshot copying)
     source_path: str | None = None
 
@@ -69,6 +70,9 @@ class RunConfig:
         public_targets = run.get("public_revenue_targets", False)
         if type(public_targets) is not bool:
             raise ValueError("run.public_revenue_targets must be a boolean")
+        board = run.get("public_board_enabled", False)
+        if type(board) is not bool:
+            raise ValueError("run.public_board_enabled must be a boolean")
         main_agent_raw = run.get("main_agent")
         return cls(
             name=str(name),
@@ -82,6 +86,7 @@ class RunConfig:
             main_agent=str(main_agent_raw) if main_agent_raw else None,
             source_path=str(path),
             public_revenue_targets=public_targets,
+            public_board_enabled=board,
         )
 
     def output_dir_for_seed(self, seed: int, root: str = "trajectories") -> Path:

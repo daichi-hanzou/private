@@ -39,6 +39,8 @@ TOOL_TIME_COST_MIN: dict[str, int] = {
     "accept_offer": 30,
     "withdraw_offer": 30,
     "send_message": 30,
+    "post_board_message": 30,
+    "view_board": 30,
     "produce_item": 30,
     "roast": 30,
     "set_retail_price": 30,

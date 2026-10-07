@@ -39,7 +39,7 @@ def build_report_data(run):
                 accepted_at=d.get('deal_at'), listing_id=d.get('listing_id'),
                 offer_id=d.get('offer_id')))
     return dict(days=days, series=series, cycles=cycles, lot_history_available='provenance' in run, reciprocal=analyze_reciprocal(run),
-                messages=sorted(marketplace.get('messages', []), key=lambda m: m['sent_at']))
+                messages=sorted(marketplace.get('messages', []) + marketplace.get('board_posts', []), key=lambda m: m['sent_at']))
 
 
 def write_report(run, destination):

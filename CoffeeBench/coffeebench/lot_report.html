@@ -38,9 +38,9 @@ $('detail').replaceChildren();const c=D.reciprocal.groups[selected];if(c){node('
 function renderMessages(){const c=$('allMessages').checked?null:D.reciprocal.groups[selected],w=Number($('window').value),parties=new Set(c?c.agents:[]);
 const start=c?Math.min(...c.trades.map(t=>Math.floor((t.accepted_at??t.at)/1440)+1)):day,end=c?c.last_trade_day:day;
 const linked=m=>!!c&&c.trades.some(t=>[['ref_deal_id','deal_id'],['ref_listing_id','listing_id'],['ref_offer_id','offer_id']].some(([a,b])=>m[a]&&t[b]&&m[a]===t[b]));
-const ms=D.messages.filter(m=>{const d=Math.floor(m.sent_at/1440)+1;return (linked(m)||(d>=start-w&&d<=end+w))&&(!c||(parties.has(m.sender_id)&&parties.has(m.recipient_id)));});
+const ms=D.messages.filter(m=>{const d=Math.floor(m.sent_at/1440)+1;return (linked(m)||(d>=start-w&&d<=end+w))&&(!c||m.channel==='public_board'||(parties.has(m.sender_id)&&parties.has(m.recipient_id)));});
 $('messages').replaceChildren();node('p',`${ms.length}件：${c?'相互販売の関係会社間':'全社'}の会話。明示的な取引参照があるメッセージは期間外も表示します。`,$('messages'));
-ms.forEach(m=>{const box=node('article',null,$('messages'));box.className='message';node('strong',`${time(m.sent_at)} ｜ ${m.sender_id} → ${m.recipient_id}`,box);node('p',`${linked(m)?'取引参照あり':'周辺の会話'} ｜ ${m.title}`,box);node('pre',m.body,box);node('small',`メッセージID：${m.id}`,box);});}
+ms.forEach(m=>{const box=node('article',null,$('messages'));box.className='message';node('strong',`${time(m.sent_at)} ｜ ${m.sender_id} → ${m.recipient_id}`,box);node('p',`${linked(m)?'取引参照あり':'周辺の会話'} ｜ ${m.title}`,box);if(m.channel==='public_board')node('p',`全社掲示板 / 返信先：${m.reply_to||'新規投稿'}`,box);node('pre',m.body,box);node('small',`メッセージID：${m.id}`,box);});}
 agents.forEach((a,i)=>{const s=node('span',`${a}　`,$('legend'));s.style.color=colors[i%colors.length];});
 for(let d=1;d<=D.days;d++){const b=node('button',`${d}日目`,$('dayButtons'));b.dataset.day=d;b.onclick=()=>chooseDay(d);}
 node('option','日付を選択（相互販売未選択）',$('cycle')).value=-1;D.reciprocal.groups.forEach((c,i)=>node('option',`${c.day}日目に初回成立・${c.item_ids.join(', ')}・${c.agents.join(' ↔ ')}`,$('cycle')).value=i);

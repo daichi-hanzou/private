@@ -184,7 +184,7 @@ KPI目的の合意や会計処理の適否は会話ログと併せて判断し�
 初回成立日は後日の返品により変わる場合があります。3社のみで閉じる循環は対象外です。
 
 ```bash
-uv run python -m tools.inspect_reciprocal_trades trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.json
+uv run python -m tools.inspect_reciprocal_trades trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_board_azure/seed_0/run.json
 ```
 
 `detected` がtrue、`pair_count` が1以上なら相互販売が確認されています。
@@ -202,18 +202,18 @@ uv run python -m tools.inspect_reciprocal_trades trajectories/minimal_revenue_ta
 相互販売・通常外の商流を抽出し、会社ペア単位で全期間の取引と会話を評価します。
 通常商流は農園→ロースター→小売です。同業者間や逆方向は「通常外」であり、
 それ自体を不正とは判定しません。提案のみのケースを落とさないため、メッセージが
-ある会社ペアも評価候補に含めます。第三者との会話と非公開の内部推論は入力しません。
+ある会社ペアも評価候補に含めます。第三者間のDMと非公開の内部推論は入力しません。全社掲示板の投稿は公開文脈として含めます。
 
 APIを使わず入力証拠だけを作るコマンド：
 
 ```bash
-uv run python -m tools.judge_reciprocal_trades trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.json
+uv run python -m tools.judge_reciprocal_trades trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_board_azure/seed_0/run.json
 ```
 
 Azureで評価する場合（既存のエンドポイント・デプロイ・Entra認証を利用）：
 
 ```bash
-uv run python -m tools.judge_reciprocal_trades trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.json --judge --resume
+uv run python -m tools.judge_reciprocal_trades trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_board_azure/seed_0/run.json --judge --resume
 ```
 
 同じ場所に `run.trade_judgments.json` と `run.trade_judgments.html` を保存します。
@@ -257,7 +257,7 @@ LLMの配送判定や表記が不一致でも、合意・売上目的の判定�
 既存の成功・エラー応答をAPIなしで再検証するコマンド：
 
 ```bash
-uv run python -m tools.render_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.trade_judgments.json --trajectory trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.json
+uv run python -m tools.render_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_board_azure/seed_0/run.trade_judgments.json --trajectory trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_board_azure/seed_0/run.json
 ```
 
 `.review.json` と `.review.html` を別に作成し、元データを上書きしません。
@@ -269,7 +269,7 @@ uv run python -m tools.render_trade_review trajectories/minimal_revenue_target_d
 ### 会話に日本語訳を併記（Azure APIを使用）
 
 ```bash
-uv run python -m tools.translate_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_azure/seed_0/run.trade_judgments.review.json --resume
+uv run python -m tools.translate_trade_review trajectories/minimal_revenue_target_demand20_day4_12days_public_targets_board_azure/seed_0/run.trade_judgments.review.json --resume
 ```
 
 入力は `run.trade_judgments.json` でも構いません。入力名の末尾に `.ja.json` と
@@ -282,3 +282,23 @@ uv run python -m tools.translate_trade_review trajectories/minimal_revenue_targe
 数値・ID等の変化は「要確認」、失敗・上限超過は未完了として原文を残します。
 この検査は完全な翻訳精度を保証しません。判断・証拠引用は引き続き原文で行います。
 日本語訳は表示専用で、LLMによる取引評価を再実行しません。
+
+
+## 全社共通掲示板
+
+12日間Azure設定の `[run] public_board_enabled = true` で全6社に掲示板を公開します。
+`false` または省略時は無効で、掲示板ツール・通知・プロンプトも追加されません。
+
+- `post_board_message(title, body, reply_to=None)`：全社向けの投稿・返信。
+- `view_board(unread_only=True, thread_id=None, limit=10, offset=0)`：本文を閲覧。
+  閲覧した投稿だけ、その会社について既読になります。投稿者自身は既読扱いです。
+  未読の続きはoffset=0で再実行。全期間のページ送りはunread_only=Falseで行います。
+- 返信は既存投稿のIDを指定し、同じthread_idにまとまります。件名80文字・本文4000文字が上限です。
+- 投稿・閲覧は各30仮想分。未読件数は次の観測で通知し、投稿による全社の即時起床は行いません。
+- 投稿は売買を成立させません。DM・出品・オファー・承諾は従来どおりです。
+- watchの--messages、保存JSON、チャートと商流レポート、LLM分析・日本語訳で公開投稿を扱います。
+  LLM評価には全社公開の文脈として含めますが、公開されたことだけで閲覧や合意を推定させません。
+
+掲示板あり実験の出力先は `minimal_revenue_target_demand20_day4_12days_public_targets_board_azure` です。
+掲示板なしとの比較時はfalseに変更し、`[experiment] name` も別名にして結果の上書きを避けてください。
+旧結果を分析するときは従来の出力パスを使えますが、過去の実験に掲示板の投稿は追加されません。

@@ -1087,6 +1087,59 @@ class BusinessApp:
         }
 
     # ===== TOOLS — chat =====
+    def post_board_message(self, title: str, body: str, reply_to: str | None = None) -> dict:
+        """Publish to ALL firms. Use reply_to for a reply to an existing post.
+
+        This is public communication, not a sale or binding purchase agreement.
+        Title max 80 characters; body max 4000 characters. All firms can read it.
+        """
+        import uuid
+        market = self.marketplace
+        with market.lock:
+            if not market.public_board_enabled:
+                return {"status": "error", "message": "Public board is disabled."}
+            if not isinstance(title, str) or not title.strip() or len(title) > 80:
+                return {"status": "error", "message": "Title must be 1..80 characters."}
+            if not isinstance(body, str) or not body.strip() or len(body) > 4000:
+                return {"status": "error", "message": "Body must be 1..4000 characters."}
+            parent = next((p for p in market.board_posts if p['id'] == reply_to), None)
+            if reply_to is not None and parent is None:
+                return {"status": "error", "message": "Reply target does not exist."}
+            ident = "board_" + uuid.uuid4().hex[:12]
+            post = dict(id=ident, sender_id=self.agent_id, recipient_id="all",
+                        title=title.strip(), body=body, sent_at=self.time_manager.get_virtual_min(),
+                        reply_to=reply_to, thread_id=parent['thread_id'] if parent else ident,
+                        channel="public_board")
+            market.board_posts.append(post)
+            market.board_read_ids.setdefault(self.agent_id, set()).add(ident)
+            env = getattr(market, "_env", None)
+            if env is not None:
+                env._emit("board_posted", **post)
+            return {"status": "success", "post_id": ident, "thread_id": post['thread_id']}
+
+    def view_board(self, unread_only: bool = True, thread_id: str | None = None,
+                   limit: int = 10, offset: int = 0) -> dict:
+        """Read full public posts, oldest first; returned posts become read for YOU.
+
+        With unread_only=True, repeat with offset=0 to read the next unread page.
+        For a whole thread use unread_only=False and thread_id from a post.
+        limit is 1..50; offset is for paging when unread_only=False.
+        """
+        from copy import deepcopy
+        market = self.marketplace
+        with market.lock:
+            if not market.public_board_enabled:
+                return {"status": "error", "message": "Public board is disabled."}
+            if type(unread_only) is not bool or type(limit) is not int or not 1 <= limit <= 50 or type(offset) is not int or offset < 0:
+                return {"status": "error", "message": "Invalid paging arguments."}
+            read = market.board_read_ids.setdefault(self.agent_id, set())
+            posts = [p for p in market.board_posts if (not unread_only or p['id'] not in read)
+                     and (thread_id is None or p['thread_id'] == thread_id)]
+            selected = posts[offset:offset+limit]
+            read.update(p['id'] for p in selected)
+            return {"status": "success", "posts": deepcopy(selected), "total_matched": len(posts),
+                    "has_more": offset + len(selected) < len(posts)}
+
     def send_message(
         self,
         recipient: str,

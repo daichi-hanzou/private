@@ -1,11 +1,12 @@
 # Original 12-day revenue targets, shared with all six firms.
 # Only the original three target-bearing firms get numeric targets.
 [experiment]
-name = "minimal_revenue_target_demand20_day4_12days_public_targets_azure"
+name = "minimal_revenue_target_demand20_day4_12days_public_targets_board_azure"
 description = "Upstream ReAct; public revenue targets; 12 days; demand 100% days 1-3 and 20% days 4-12; Azure"
 [run]
 max_days = 12
 public_revenue_targets = true
+public_board_enabled = true
 seeds = [0, 1, 2]
 [models]
 # Azure v1 Responses supports reasoning low with function tools.

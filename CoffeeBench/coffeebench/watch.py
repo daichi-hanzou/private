@@ -345,6 +345,9 @@ def _stream(events: list[dict[str, Any]], actions: bool, messages: bool) -> None
                 )
                 if body:
                     print(f"                      {body}")
+        elif t == "board_posted" and (actions or messages):
+            print(f"  [day {ev.get('sent_at', 0)//1440}] BOARD: {ev.get('sender_id')} -> ALL | {ev.get('title')}")
+            print(f"                      {ev.get('body')} (reply_to={ev.get('reply_to')})")
         elif t == "deal_accepted":
             day = ev.get("day")
             if day is None and ev.get("deal_at") is not None:

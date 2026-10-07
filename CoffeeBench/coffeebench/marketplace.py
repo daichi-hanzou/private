@@ -20,6 +20,9 @@ class Marketplace:
         self.offers: list[Offer] = []
         self.deals: list[Deal] = []
         self.messages: list[Message] = []
+        self.public_board_enabled = False
+        self.board_posts: list[dict] = []
+        self.board_read_ids: dict[str, set[str]] = {}
         # Per-agent set of message ids that have been read via
         # `read_message(id)`. Messages surfaced only as previews in
         # `view_messages` are NOT auto-marked — the agent must commit to
