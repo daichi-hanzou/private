@@ -111,6 +111,16 @@ class RunConfig:
           - p_res (sets coffee items' retail_reservation_price — applied at item-build time)
         """
         from coffeebench import environment as env_mod
+        mode = self.economy.get("inventory_decay_mode", "daily_rate")
+        if mode not in ("daily_rate", "lot_expiry"):
+            raise ValueError("inventory_decay_mode must be daily_rate or lot_expiry")
+        for key, default in (("green_shelf_life_days", 30), ("roasted_shelf_life_days", 7)):
+            value = self.economy.get(key, default)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{key} must be a positive integer")
+            setattr(env_mod, key.upper(), value)
+        env_mod.INVENTORY_DECAY_MODE = mode
+        env_mod.INVENTORY_SPOILAGE_PER_DAY = 0.005
         # Reset this experiment's demand controls when loading another config.
         change_day = self.economy.get("consumer_demand_change_day")
         multiplier = self.economy.get("consumer_demand_multiplier", 1.0)
@@ -143,7 +153,8 @@ class RunConfig:
             "roast_lag_days": ("lag_days", int),
         }
         for key, value in self.economy.items():
-            if key in {"consumer_demand_change_day", "consumer_demand_multiplier"}:
+            if key in {"consumer_demand_change_day", "consumer_demand_multiplier",
+                       "inventory_decay_mode", "green_shelf_life_days", "roasted_shelf_life_days"}:
                 continue
             if key == "consumer_demand_enabled":
                 if not isinstance(value, bool):

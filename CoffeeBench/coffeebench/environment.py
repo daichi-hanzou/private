@@ -120,6 +120,9 @@ FESTIVALS: list[tuple[int, int, float, str]] = [
 # eventually lose units (30 kg × 0.5% ≈ 1 kg/week). Intangibles (ad campaigns)
 # are skipped — they're consumed on delivery and don't sit in inventory anyway.
 INVENTORY_SPOILAGE_PER_DAY = 0.005
+INVENTORY_DECAY_MODE = "daily_rate"
+GREEN_SHELF_LIFE_DAYS = 30
+ROASTED_SHELF_LIFE_DAYS = 7
 
 # Late-payment interest on past-due invoices. Each day after due_date, every
 # open invoice accrues LATE_FEE_PER_DAY × amount. Buyer's AP balloons,
@@ -418,7 +421,13 @@ class Environment:
             ba.initial_equity = ba._compute_true_equity()
 
         # Passive FIFO audit: never exposed in agent observations/tools.
-        self.provenance = Provenance(self.time_manager.get_virtual_min, self._emit)
+        self.inventory_decay_mode = INVENTORY_DECAY_MODE
+        shelf_lives = ({"green_coffee_kg": GREEN_SHELF_LIFE_DAYS,
+                        "green_specialty_kg": GREEN_SHELF_LIFE_DAYS,
+                        "roasted_coffee_kg": ROASTED_SHELF_LIFE_DAYS,
+                        "roasted_specialty_kg": ROASTED_SHELF_LIFE_DAYS}
+                       if self.inventory_decay_mode == "lot_expiry" else {})
+        self.provenance = Provenance(self.time_manager.get_virtual_min, self._emit, shelf_lives)
         for aid, ba in business_apps.items():
             for item, qty in ba.inventory.items():
                 self.provenance.create(aid, item, qty, ba.inventory_total_cost.get(item, 0.0))
@@ -1266,11 +1275,88 @@ class Environment:
             "per_pair": {f"{k[0]}->{k[1]}": round(v, 4) for k, v in per_pair.items()},
         }
 
+    def _apply_lot_expiry(self, day: int) -> dict:
+        """Expire at EOD, including work in progress and seller-owned shipments.
+
+        If a shipment contains expired units, cancel the entire undelivered
+        deal: write off only expired units and release valid stock back to
+        the seller at the reserved cost basis. No revenue/invoice is created.
+        """
+        summary = {}
+
+        def dispose(aid, item, ids, value, ref=None):
+            self.provenance.move(ids, aid, "expired", ref, kind="lot_expired",
+                                 expiry_processed_day=day, book_value=value)
+            self._record_truth(aid, "spoilage_expense", amount=value, item=item,
+                               quantity=len(ids), reference=ref,
+                               memo="lot expiry; remaining carrying cost written off")
+            row = summary.setdefault(aid, {"spoiled_units": {}, "spoiled_value": 0.0})
+            row["spoiled_units"][item] = row["spoiled_units"].get(item, 0) + len(ids)
+            row["spoiled_value"] += value
+            self._emit("lot_expired", day=day, agent_id=aid, item_id=item,
+                       quantity=len(ids), book_value=value, reference=ref,
+                       lot_ids=sorted({self.provenance.units[u]["lot_id"] for u in ids}))
+
+        for aid, ba in self.business_apps.items():
+            for item, qty in list(ba.inventory.items()):
+                if qty <= 0:
+                    continue
+                ids = self.provenance.expired(self.provenance.select(aid, item, qty), day)
+                if ids:
+                    value = ba.inventory_total_cost.get(item, 0.0) * len(ids) / qty
+                    ba.inventory[item] -= len(ids)
+                    ba.inventory_total_cost[item] -= value
+                    dispose(aid, item, ids, value)
+
+        for attr, item_key, cost_key in (
+            ("_pending_production", "item_id", "total_cost"),
+            ("_pending_roasting", "output_item", "output_total_cost"),
+        ):
+            keep = []
+            for batch in getattr(self, attr):
+                ids = batch["unit_ids"]
+                if ids and self.provenance.expired(ids, day):
+                    # Each production/roasting batch is one lot with one deadline.
+                    dispose(batch["agent_id"], batch[item_key], ids, batch[cost_key])
+                else:
+                    keep.append(batch)
+            setattr(self, attr, keep)
+
+        keep = []
+        for deal in self._pending_shipments:
+            expired = self.provenance.expired(deal.unit_ids, day)
+            if not expired:
+                keep.append(deal)
+                continue
+            expired_set = set(expired)
+            valid = [u for u in deal.unit_ids if u not in expired_set]
+            value = deal._reserved_seller_cogs * len(expired) / deal.qty
+            dispose(deal.seller_id, deal.item_id, expired, value, deal.id)
+            if valid:
+                seller = self.business_apps[deal.seller_id]
+                self.provenance.move(valid, deal.seller_id, "on_hand", deal.id,
+                                     kind="shipment_cancelled")
+                seller.inventory[deal.item_id] = seller.inventory.get(deal.item_id, 0) + len(valid)
+                seller.inventory_total_cost[deal.item_id] = (
+                    seller.inventory_total_cost.get(deal.item_id, 0.0)
+                    + deal._reserved_seller_cogs - value)
+            deal.notes = (deal.notes or "") + " Cancelled: lot expired in transit; no invoice."
+            self._emit("shipment_expired", day=day, deal_id=deal.id,
+                       seller=deal.seller_id, buyer=deal.buyer_id,
+                       expired_qty=len(expired), released_qty=len(valid),
+                       seller_writedown=value)
+        self._pending_shipments = keep
+        for row in summary.values():
+            row["spoiled_value"] = round(row["spoiled_value"], 2)
+        return summary
+
     def _apply_spoilage(self, day: int) -> dict:
         """Deteriorate every agent's TANGIBLE inventory by INVENTORY_SPOILAGE_PER_DAY
         per day. Skips intangibles (ad campaigns) since those are consumed on
         delivery. Spoiled units are valued at the holder's WAVG cost basis
         and booked on the truth ledger as `spoilage_expense`."""
+        if self.inventory_decay_mode == "lot_expiry":
+            return self._apply_lot_expiry(day)
         per_agent: dict[str, dict] = {}
         for aid, ba in self.business_apps.items():
             if aid in self._bankrupt_agents:
@@ -1501,6 +1587,14 @@ class Environment:
             if inv_parts
             else f"Inventory by item: (empty).{cap_line}"
         )
+
+        if self.inventory_decay_mode == "lot_expiry":
+            rows = self.provenance.inventory(agent_id)
+            inventory_line += "\nLot deadlines (last usable day, 1-based; FIFO allocation): " + (
+                "; ".join(f"{r['lot_id']} {r['item_id']} {r['quantity_kg']}kg "
+                          f"[{r['state']}] expires end of day {r['expiry_day'] + 1}, "
+                          f"{r['days_remaining']} usable day(s) including today"
+                          for r in rows if r['expiry_day'] is not None) or "none")
 
         # Role-specific operational state.
         role_lines: list[str] = []
@@ -2874,6 +2968,9 @@ class Environment:
             "saved_at": datetime.now().isoformat(),
         }
         self.provenance.assert_consistent(self)
+        data["inventory_policy"] = {"mode": self.inventory_decay_mode,
+                                    "shelf_life_days": self.provenance.shelf_life_days,
+                                    "deadline_convention": "zero-based expiry_day; usable through EOD consumer sales"}
         data["provenance"] = self.provenance.snapshot()
         data["lot_cycles"] = analyze_cycles(self.provenance.events)
         data["deal_unit_ids"] = {d.id: getattr(d, "unit_ids", []) for d in self.marketplace.deals}

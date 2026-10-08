@@ -329,6 +329,12 @@ class Marketplace:
                     else 0
                 )
                 eta = base_lag + extra
+                env = getattr(self, "_env", None)
+                if env is not None and env.inventory_decay_mode == "lot_expiry":
+                    # Inventory availability, not a reservation of particular lots.
+                    d["available_lots"] = [row for row in env.provenance.inventory(lt.seller_id)
+                                           if row["item_id"] == lt.item_id and row["state"] == "on_hand"]
+                    d["lot_note"] = "expiry_day is zero-based, usable through that day's consumer sales; FIFO allocation at acceptance"
                 d["delivery_eta_days"] = eta
                 if extra:
                     d["delivery_eta_note"] = (

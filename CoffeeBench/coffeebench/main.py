@@ -26,10 +26,25 @@ def _operational_mechanics_block() -> str:
     consumer-demand model and per-festival magnitudes are NOT in
     here; those remain hidden as part of the operational discovery
     surface."""
+    from coffeebench import environment as env_mod
+    if env_mod.INVENTORY_DECAY_MODE == "lot_expiry":
+        decay = (
+            f"Lot expiry replaces daily percentage spoilage. Green beans last {env_mod.GREEN_SHELF_LIFE_DAYS} "
+            f"days from production completion; roasted beans last {env_mod.ROASTED_SHELF_LIFE_DAYS} "
+            "days from roast start, capped by the earliest input lot deadline. Initial inventory is fresh on day 1. "
+            "The start day counts as day 1 of shelf life. Stock can sell through its final day's consumer sales, "
+            "then is discarded at 19:00. Transfers, splitting and returns never reset deadlines. "
+            "Processing and shipping do not pause expiry. Expired on-hand stock is written off at WAVG cost. "
+            "Expired work in progress is written off at batch cost; a shipment with any expired units is "
+            "cancelled without revenue/invoice, expired units are written off at the seller's reserved cost, "
+            "and valid units return to the seller. Observations show lot deadlines; listings show the "
+            "seller's current FIFO stock, which can change before acceptance.")
+    else:
+        decay = f"Tangible inventory spoils at {env_mod.INVENTORY_SPOILAGE_PER_DAY * 100:g}%/day with fractional carry."
     return """Operational mechanics (env-enforced; same for everyone):
 - All four tangibles (`green_coffee_kg`, `roasted_coffee_kg`, `green_specialty_kg`, `roasted_specialty_kg`) ship in 1 day after `accept_offer` under nominal conditions. On delivery the AR/AP invoice is issued and the buyer's inventory is updated.
 - Shipping is NOT 100% reliable. Each shipment has a small probability of (a) being delayed by 1+ days at handoff, and (b) being lost in transit altogether. On loss, the seller writes off the reserved inventory and NO invoice issues — the buyer pays nothing for that shipment but also receives no goods. The probabilities are not disclosed; agents may learn empirically by observing their delivery history. Plan inventory buffers and supplier diversification accordingly.
-- Tangible inventory spoils at 0.5%/day (compounded). Cumulative spoilage over a quarter is non-trivial; rotate stock and avoid hoarding raw beans.
+- INVENTORY_DECAY_RULE
 - Each role has a hard cap on total tangible inventory (summed across all items): farmer 120 kg, roaster 120 kg, retailer 80 kg. The cap is enforced against COMMITTED holdings (on-hand kg + in-flight inbound: your own pending production / roast output + accepted-but-not-delivered purchases). `accept_offer` (as buyer), `produce_item`, and `roast` are rejected if the operation would push committed holdings over the cap. Each morning observation shows `on-hand X + in-flight Y / cap Z` so you can plan around your pending commitments — same-day stacking and cross-day pile-up are both blocked. Caps are tight; rotate stock through sales / shipments before stockpiling further.
 - Produce (farmer only) via `produce_item(item_id, quantity)`:
     · `green_coffee_kg`     — $2/kg, 30 kg/day cap per farmer, 2-day lag.
@@ -44,7 +59,7 @@ def _operational_mechanics_block() -> str:
 
 Consumer-side demand at retailers is governed by an env-internal model (per item) that is NOT disclosed. You learn it empirically from observed sales. Two structural notes about the consumer model that DO matter:
 - **Brand-loyalty multiplier (per retailer, hidden, fixed for the run)**: at the same retail price, the higher-loyalty retailer pulls more share than its competitor. Discover your own multiplier empirically from observed sales relative to your competitor at comparable prices.
-- **Inelastic floor demand (per item, per retailer pricing within reservation)**: each retailer that prices a consumer-facing item at or below the reservation price gets a small flat per-day allocation of regular customers, separate from the elastic market-pool sales that price competition splits. The floor is small but provides a stable baseline — even on "no demand" days from the elastic pool, regulars still walk in. Pricing above reservation forfeits the floor for that day."""
+- **Inelastic floor demand (per item, per retailer pricing within reservation)**: each retailer that prices a consumer-facing item at or below the reservation price gets a small flat per-day allocation of regular customers, separate from the elastic market-pool sales that price competition splits. The floor is small but provides a stable baseline — even on "no demand" days from the elastic pool, regulars still walk in. Pricing above reservation forfeits the floor for that day.""".replace("INVENTORY_DECAY_RULE", decay)
 
 
 SYSTEM_PROMPT = """

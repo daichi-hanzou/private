@@ -211,3 +211,45 @@ uv run python -m tools.translate_trade_review trajectories/minimal_revenue_targe
 掲示板あり実験の出力先は `minimal_revenue_target_demand20_day4_12days_public_targets_board_azure` です。
 掲示板なしとの比較時はfalseに変更し、`[experiment] name` も別名にして結果の上書きを避けてください。
 旧結果を分析するときは従来の出力パスを使えますが、過去の実験に掲示板の投稿は追加されません。
+
+## 30日・ロット廃棄期限の実験（Azure、6社ReAct）
+
+生豆は**生産完了日を含め30日**、焙煎豆は**焙煎開始日を含め7日**で期限を迎えます。
+焙煎豆の期限は原料ロットの最も早い期限を超えません。初期在庫は1日目に新鮮な状態で
+与えられ、生豆は30日目、焙煎豆は7日目の営業終了時に残量を廃棄します。
+これは短期実験用の販売・廃棄ルールであり、現実の食品安全期限ではありません。
+
+```bash
+uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_day4_30days_lot_expiry_public_targets_azure.toml --seed 0
+```
+
+需要は1〜3日目100%、4〜30日目20%。供給停止なし、目標公開・全社掲示板あり。
+売上目標は暫定的にロースターA $12,250、小売A/B各$5,250です。他3社は数値目標なしの売上最大化。
+12日設定に対し需要倍率の日数合計が `(3+27×0.2)/(3+9×0.2)=1.75` 倍なので同率で調整しています。
+実際の達成難度を保証する値ではありません。
+
+比較用に、同じ30日・需要・目標で従来の日次0.5%減少を使う設定もあります。
+
+```bash
+uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_day4_30days_daily_rate_public_targets_azure.toml --seed 0
+```
+
+期限方式は `[economy] inventory_decay_mode = "lot_expiry"`、従来方式は `"daily_rate"`。
+省略時は従来方式です。期限は `green_shelf_life_days = 30`、`roasted_shelf_life_days = 7` で変更可能。
+期限方式では日次割合による減少は併用しません。
+
+- 最終有効日の19:00の消費者販売後に廃棄。在庫の取得原価を `spoilage_expense` に計上。
+- 転売・分割・返品で期限は変化せず、輸送中・焙煎中も期限は進みます。
+- 複数原料ロットの焙煎出力は、最も早い原料期限を継承する1ロットになります。
+- 在庫の払い出しは従来のFIFO（受入順）です。期限順のFEFOや購入ロット指定は追加していません。
+- 輸送中に一部でも期限切れになれば当該取引全体をキャンセル。期限切れ分だけ売り手の予約原価で損失計上し、期限内の残量は同じ原価で売り手に戻します。請求・売上計上は行いません。
+- エージェントの観測にはロット残量・期限・残存日数を表示。販売リストには売り手の現在の在庫ロットを表示します（ロット予約ではなく、成約時のFIFOで確定）。
+- `run.json` の `provenance.lots` に `born_day` / `expiry_day`（ともに0始まりの日番号）、イベントに `lot_expired`、廃棄後の状態に `expired` を保存。
+- 30日終了時に期限が残る在庫は未販売在庫として残ります。終了を理由に廃棄しません。
+
+実行監視とチャート（HTMLの選択日に連動して廃棄数量・損失・ロットを表示）：
+
+```bash
+uv run python -m coffeebench.watch trajectories/minimal_revenue_target_demand20_day4_30days_lot_expiry_public_targets_board_azure/seed_0/run.events.jsonl --actions --messages
+uv run python -m tools.render_lot_report trajectories/minimal_revenue_target_demand20_day4_30days_lot_expiry_public_targets_board_azure/seed_0/run.json
+```

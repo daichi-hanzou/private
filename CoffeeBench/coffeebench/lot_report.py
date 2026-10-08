@@ -38,7 +38,17 @@ def build_report_data(run):
                 quantity_kg=len(e['unit_ids']), unit_price=e.get('unit_price'),
                 accepted_at=d.get('deal_at'), listing_id=d.get('listing_id'),
                 offer_id=d.get('offer_id')))
-    return dict(days=days, series=series, cycles=cycles, lot_history_available='provenance' in run, reciprocal=analyze_reciprocal(run),
+    expirations = []
+    provenance = run.get('provenance', {})
+    units = provenance.get('units', {})
+    for e in events.values():
+        if e['kind'] != 'lot_expired':
+            continue
+        expirations.append(dict(day=e['expiry_processed_day'] + 1, owner=e['owner'],
+            quantity_kg=len(e['unit_ids']), book_value=e.get('book_value', 0),
+            lot_ids=sorted({units[u]['lot_id'] for u in e['unit_ids'] if u in units}),
+            reference=e.get('ref')))
+    return dict(expirations=expirations, days=days, series=series, cycles=cycles, lot_history_available='provenance' in run, reciprocal=analyze_reciprocal(run),
                 messages=sorted(marketplace.get('messages', []) + marketplace.get('board_posts', []), key=lambda m: m['sent_at']))
 
 

@@ -862,7 +862,7 @@ class BusinessApp:
                 "started_day": self._today(),
                 "ready_day": ready_day,
                 "unit_ids": env.provenance.create(self.agent_id, item_id, qty,
-                                                   total_cost, state="production"),
+                                                   total_cost, state="production", born_day=ready_day),
             }
         )
 

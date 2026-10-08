@@ -13,7 +13,8 @@ body{font:15px system-ui;margin:24px auto;padding:0 20px;max-width:1200px;color:
 <p class="muted">相互販売選択時は、最初の売買から最後の関連配送までの期間に前後日数を加え、関係会社間の会話を表示します。「取引参照あり」は取引・出品・オファーIDの一致、それ以外は時期と会社による候補です。会話がその取引の原因とは断定しません。内部推論の表示ではありません。</p><div id="messages"></div></section>
 <p class="muted">商品を問わず同じ2社が双方に配送した取引を、全期間で集計します。商品・ロットの一致は不要です。合計kgは異なる商品の重量の合計で、価値や用途が同等とは限りません。数量は分析時点の返品控除後で、全量返品は除外します。通常の相互販売も含み、不適切な会計処理や売上目的の合意を自動判定するものではありません。3社だけで閉じる循環は対象外です。</p>
 <details><summary>補助情報：同一ロットの循環</summary><p id="lotSummary"></p></details>
-<script id="data" type="application/json">__REPORT_DATA__</script><script>
+<script id="data" type="application/json">__REPORT_DATA__</script><section><h2>選択日の期限切れ廃棄</h2><div id="expiry"></div></section>
+<script>
 const D=JSON.parse(document.getElementById('data').textContent), $=id=>document.getElementById(id);
 $('lotSummary').textContent=D.lot_history_available?`${D.cycles.count}件、重複なし ${D.cycles.unique_cycled_quantity_kg} kg（ロット履歴がある場合）。相互販売とは別の判定です。`:'ロット履歴がないため判定できません。';
 const colors=['#2563eb','#059669','#9333ea','#d97706','#db2777','#0891b2'];
@@ -31,7 +32,7 @@ svg('line',{x1:x(day),x2:x(day),y1:20,y2:305,stroke:'#203043','stroke-width':2})
 for(let d=1;d<=D.days;d++)svg('text',{x:x(d),y:330,'text-anchor':'middle','font-size':12}).textContent=d;
 $('chart').onclick=e=>{const rect=$('chart').getBoundingClientRect();chooseDay(Math.max(1,Math.min(D.days,Math.round(((e.clientX-rect.left)/rect.width*1080-70)/980*Math.max(1,D.days-1))+1)));};}
 function chooseDay(d){day=d;selected=D.reciprocal.groups.findIndex(c=>c.day===day);render();}
-function render(){draw();$('dayTitle').textContent=`${day}日目の売上高（USD）`;$('revenue').replaceChildren();table(['会社','当日売上','当日企業間','当日消費者','累計'],agents.map(a=>[a,...['daily','b2b','consumer','cumulative'].map(k=>money(D.series[a][k][day-1]))]),$('revenue'));
+function render(){draw();$('expiry').replaceChildren();const expired=(D.expirations||[]).filter(e=>e.day===day);if(expired.length)table(['保有企業','ロット','廃棄数量','廃棄損（USD）','関連取引'],expired.map(e=>[e.owner,e.lot_ids.join(', '),`${e.quantity_kg} kg`,money(e.book_value),e.reference||'—']),$('expiry'));else node('p','この日の期限切れ廃棄記録はありません。',$('expiry'));$('dayTitle').textContent=`${day}日目の売上高（USD）`;$('revenue').replaceChildren();table(['会社','当日売上','当日企業間','当日消費者','累計'],agents.map(a=>[a,...['daily','b2b','consumer','cumulative'].map(k=>money(D.series[a][k][day-1]))]),$('revenue'));
 for(const b of $('dayButtons').children)b.setAttribute('aria-pressed',Number(b.dataset.day)===day);
 $('cycle').value=selected;$('summary').textContent=`全期間：${D.reciprocal.pair_count}組（会社ペア） ／ 関連配送 ${D.reciprocal.trade_count}件 ／ ${day}日目の初回成立：${D.reciprocal.groups.filter(c=>c.day===day).length}件`;
 $('detail').replaceChildren();const c=D.reciprocal.groups[selected];if(c){node('h3',`${c.item_ids.join(', ')}：${c.agents.join(' ↔ ')}`,$('detail'));node('p',`相互販売の初回成立：${time(c.first_reciprocal_at)}。表は全期間の関連取引で、数量は返品控除後です。`,$('detail'));table(['売り手','買い手','配送件数','返品控除後の合計重量','返品控除後売上'],c.directions.map(t=>[t.seller,t.buyer,t.trade_count,`${t.quantity_kg} kg`,t.revenue_net==null?'記録なし':money(t.revenue_net)]),$('detail'));table(['取引ID','商品ID','契約時刻','配送・売上計上時刻','売り手 → 買い手','取引数量','単価'],c.trades.map(t=>[t.deal_id,t.item_id,time(t.accepted_at),time(t.at),`${t.seller} → ${t.buyer}`,`${t.quantity_kg} kg`,t.unit_price==null?'記録なし':money(t.unit_price)]),$('detail'));}else node('p','この日は相互販売の完了記録がありません。',$('detail'));renderMessages();}

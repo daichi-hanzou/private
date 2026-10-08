@@ -12,12 +12,13 @@ from copy import deepcopy
 class Provenance:
     ACTIVE = {"on_hand", "shipment", "production", "roasting"}
 
-    def __init__(self, clock, emit=None):
+    def __init__(self, clock, emit=None, shelf_life_days=None):
         self.clock = clock
         self.emit = emit
         self.units = {}
         self.lots = {}
         self.events = []
+        self.shelf_life_days = dict(shelf_life_days or {})
 
     def event(self, kind, **data):
         event = {"seq": len(self.events) + 1, "at": self.clock(), "kind": kind, **data}
@@ -26,9 +27,18 @@ class Provenance:
             self.emit("provenance", **deepcopy(event))
         return event
 
-    def create(self, owner, item, qty, cost, state="on_hand", parents=()):
+    def create(self, owner, item, qty, cost, state="on_hand", parents=(), born_day=None):
         if qty <= 0:
             return []
+        born_day = self.clock() // 1440 if born_day is None else born_day
+        lifetime = self.shelf_life_days.get(item)
+        # Zero-based final usable day; disposal follows consumer sales at 19:00.
+        expiry_day = born_day + lifetime - 1 if lifetime else None
+        parent_expiries = [self.lots[self.units[u]["lot_id"]].get("expiry_day")
+                           for u in parents]
+        parent_expiries = [d for d in parent_expiries if d is not None]
+        if expiry_day is not None and parent_expiries:
+            expiry_day = min(expiry_day, *parent_expiries)
         lot = f"LOT-{len(self.lots) + 1:06d}"
         self.lots[lot] = {
             "lot_id": lot,
@@ -36,6 +46,8 @@ class Provenance:
             "quantity_kg": qty,
             "resource_cost": cost,
             "parent_units": list(parents),
+            "born_day": born_day,
+            "expiry_day": expiry_day,
         }
         ids = []
         for i in range(qty):
@@ -57,6 +69,13 @@ class Provenance:
             lot=deepcopy(self.lots[lot]),
         )
         return ids
+
+    def expiry_day(self, uid):
+        return self.lots[self.units[uid]["lot_id"]].get("expiry_day")
+
+    def expired(self, ids, day):
+        return [u for u in ids if self.expiry_day(u) is not None
+                and self.expiry_day(u) <= day]
 
     def select(self, owner, item, qty, eligible=None):
         candidates = [
@@ -100,7 +119,11 @@ class Provenance:
             if u["owner"] == owner and u["state"] in self.ACTIVE
         )
         return [
-            {"lot_id": lot, "item_id": item, "state": state, "quantity_kg": qty}
+            {"lot_id": lot, "item_id": item, "state": state, "quantity_kg": qty,
+             "born_day": self.lots[lot].get("born_day"),
+             "expiry_day": self.lots[lot].get("expiry_day"),
+             "days_remaining": (None if self.lots[lot].get("expiry_day") is None else
+                                max(0, self.lots[lot]["expiry_day"] - self.clock() // 1440 + 1))}
             for (lot, item, state), qty in sorted(groups.items())
         ]
 

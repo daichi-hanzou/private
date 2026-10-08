@@ -356,6 +356,14 @@ def _stream(events: list[dict[str, Any]], actions: bool, messages: bool) -> None
                 f"  [day {day}] DEAL: {ev.get('seller')} -> {ev.get('buyer')}  "
                 f"{ev.get('item_id')} x{ev.get('qty')} @ {_money(ev.get('unit_price'))}"
             )
+        elif t == "lot_expired":
+            print(f"  [day {ev.get('day')}] EXPIRED: {ev.get('agent_id')} "
+                  f"{ev.get('item_id')} x{ev.get('quantity')} "
+                  f"write-off {_money(ev.get('book_value'))} lots={ev.get('lot_ids')}")
+        elif t == "shipment_expired":
+            print(f"  [day {ev.get('day')}] SHIPMENT CANCELLED (expiry): "
+                  f"{ev.get('deal_id')} {ev.get('seller')} -> {ev.get('buyer')} "
+                  f"expired={ev.get('expired_qty')} released={ev.get('released_qty')}; no invoice")
         elif t == "consumer_sale":
             print(
                 f"  [day {ev.get('day')}] RETAIL: {ev.get('shop_id')} sold {ev.get('item_id')} "
