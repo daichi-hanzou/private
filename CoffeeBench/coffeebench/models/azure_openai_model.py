@@ -1,8 +1,9 @@
 """Azure-only v1 Responses adapter; independent of the OpenAI adapter."""
 import os
+import subprocess
 import time
 from urllib.parse import urlsplit
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, CredentialUnavailableError
 from dotenv import load_dotenv
 from openai import OpenAI
 from coffeebench.models.openai_model import OpenAIModel, _serialize_responses_item
@@ -28,8 +29,8 @@ class AzureOpenAIModel:
         self.model = "azure"
         self.api_model = deployment
         self.provider = "azure"
-        self.credential = DefaultAzureCredential()
-        self._token = self.credential.get_token(self.SCOPE)
+        self.credential = DefaultAzureCredential(process_timeout=60)
+        self._token = self._get_token_with_retry()
         self.client = OpenAI(base_url=endpoint + "/openai/v1/",
                              api_key=self._token_provider, timeout=300.0, max_retries=0)
         self.cost = 0.0  # Internal bookkeeping placeholder; exports are unknown.
@@ -41,9 +42,34 @@ class AzureOpenAIModel:
         self._skip_reasoning = effort == "off"
         self.reasoning_effort = effort
 
+    def _get_token_with_retry(self):
+        """Retry only CLI subprocess timeouts, including wrapped SDK errors.
+
+        Authentication failures (e.g. login required or insufficient permissions)
+        remain fatal. Keep retries bounded independently of LLM API retries.
+        """
+        for attempt in range(1, 4):
+            try:
+                return self.credential.get_token(self.SCOPE)
+            except CredentialUnavailableError as exc:
+                cause, seen, timed_out = exc, set(), False
+                while cause is not None and id(cause) not in seen:
+                    seen.add(id(cause))
+                    if isinstance(cause, subprocess.TimeoutExpired):
+                        timed_out = True
+                        break
+                    cause = cause.__cause__ or cause.__context__
+                if not timed_out or attempt == 3:
+                    raise
+                delay = 2 ** attempt
+                # Never print CLI output or token contents.
+                print(f"[azure-auth] CLI token acquisition timed out; "
+                      f"attempt {attempt}/3, retrying in {delay}s")
+                time.sleep(delay)
+
     def _token_provider(self):
         if self._token.expires_on <= time.time() + 300:
-            self._token = self.credential.get_token(self.SCOPE)
+            self._token = self._get_token_with_retry()
         return self._token.token
 
     def _completion_cost(self, *args):

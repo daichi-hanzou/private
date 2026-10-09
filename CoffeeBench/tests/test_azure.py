@@ -92,3 +92,73 @@ def test_azure_react_twelve_days(azure, monkeypatch, tmp_path,preset,days):
         assert env.consumer_sales_log
     assert all(a['usage']['cost'] is None for a in result['agents'].values())
     assert all(a.model.n_calls >= days for a in env.agents.values())
+
+
+def cli_timeout():
+    import subprocess
+    error = adapter.CredentialUnavailableError('Failed to invoke the Azure CLI')
+    error.__cause__ = subprocess.TimeoutExpired(['az', 'account', 'get-access-token'], 60)
+    return error
+
+
+def test_initial_cli_timeout_retries_then_succeeds(azure, monkeypatch):
+    sleep = Mock()
+    monkeypatch.setattr(adapter.time, 'sleep', sleep)
+    token = NS(token='test-token', expires_on=9999999999)
+    azure.get_token.side_effect = [cli_timeout(), cli_timeout(), token]
+    model = get_model('azure:low')
+    try:
+        adapter.DefaultAzureCredential.assert_called_once_with(process_timeout=60)
+        assert model._token_provider() == 'test-token'
+        assert azure.get_token.call_count == 3
+        assert [c.args[0] for c in sleep.call_args_list] == [2, 4]
+    finally:
+        model.client.close()
+
+
+def test_refresh_cli_timeout_retries_without_losing_cached_token(azure, monkeypatch):
+    monkeypatch.setattr(adapter.time, 'sleep', Mock())
+    model = get_model('azure:low')
+    try:
+        model._token.expires_on = 0
+        azure.get_token.side_effect = [cli_timeout(), NS(token='renewed', expires_on=9999999999)]
+        assert model._token_provider() == 'renewed'
+        assert model._token_provider() == 'renewed'
+        assert azure.get_token.call_count == 3  # initial + two refresh attempts
+    finally:
+        model.client.close()
+
+
+def test_cli_timeout_exhaustion_is_bounded(azure, monkeypatch):
+    sleep = Mock()
+    monkeypatch.setattr(adapter.time, 'sleep', sleep)
+    model = get_model('azure:low')
+    try:
+        cached = model._token
+        cached.expires_on = 0
+        error = cli_timeout()
+        azure.get_token.side_effect = error
+        with pytest.raises(adapter.CredentialUnavailableError) as caught:
+            model._token_provider()
+        assert caught.value is error
+        assert model._token is cached
+        assert azure.get_token.call_count == 4  # initial + three attempts
+        assert sleep.call_count == 2
+    finally:
+        model.client.close()
+
+
+@pytest.mark.parametrize('error', [
+    adapter.CredentialUnavailableError('Please run az login'),
+    adapter.CredentialUnavailableError('Failed to invoke the Azure CLI'),
+    ValueError('configuration error'),
+])
+def test_non_timeout_auth_errors_are_not_retried(azure, monkeypatch, error):
+    sleep = Mock()
+    monkeypatch.setattr(adapter.time, 'sleep', sleep)
+    azure.get_token.side_effect = error
+    with pytest.raises(type(error)) as caught:
+        get_model('azure:low')
+    assert caught.value is error
+    assert azure.get_token.call_count == 1
+    sleep.assert_not_called()

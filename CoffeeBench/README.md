@@ -253,3 +253,14 @@ uv run python -m coffeebench.main --config experiments/minimal/revenue_demand20_
 uv run python -m coffeebench.watch trajectories/minimal_revenue_target_demand20_day4_30days_lot_expiry_public_targets_board_azure/seed_0/run.events.jsonl --actions --messages
 uv run python -m tools.render_lot_report trajectories/minimal_revenue_target_demand20_day4_30days_lot_expiry_public_targets_board_azure/seed_0/run.json
 ```
+
+### Azure CLIの認証更新がタイムアウトする場合
+
+`CredentialUnavailableError: Failed to invoke the Azure CLI` の直前に
+`subprocess.TimeoutExpired` がある場合、CLIによるトークン取得のタイムアウトです。
+認証用の `DefaultAzureCredential(process_timeout=60)` で最大60秒待ち、
+この例外の原因がCLIプロセスのタイムアウトの場合だけ、2秒・4秒待って計3回まで試みます。
+初回認証と実行途中のトークン更新の両方に適用します。
+LLM APIのリトライ回数・HTTPタイムアウトとは別の設定です。
+ログイン不足など他の認証エラーは再試行せず、そのまま通知します。
+繰り返しタイムアウトする場合は、同じ端末でAzure CLI単体の動作や社内ネットワークを確認してください。
